@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.4c: GET /health JSON + basic metrics counters.
+# P1.5: class-A sim_main + libsim fuzz path.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.4.2)
+project(edgehost LANGUAGES C VERSION 0.5.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -20,7 +20,9 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/EdgeLoadPins.cmake")
 option(EDGEHOST_REQUIRE_SIBLINGS
   "Fail configure if phase-1 sibling headers are missing" ON)
 option(EDGEHOST_REQUIRE_LIBSIM
-  "Fail configure if libsim is missing (soft until class-A fuzz)" OFF)
+  "Fail configure if libsim is missing (needed for P1.5 sim_main)" ON)
+option(BUILD_FUZZ
+  "Build libFuzzer class-A harness (clang)" OFF)
 
 if(EDGEHOST_REQUIRE_SIBLINGS)
   find_package(Shaggy REQUIRED)
@@ -46,31 +48,26 @@ endif()
 find_library(LIBURING_LIBRARY uring)
 find_path(LIBURING_INCLUDE_DIR liburing.h)
 if(NOT LIBURING_LIBRARY OR NOT LIBURING_INCLUDE_DIR)
-  message(FATAL_ERROR "liburing required for P1.4a (install liburing-dev)")
+  message(FATAL_ERROR "liburing required (install liburing-dev)")
 endif()
-message(STATUS "  liburing    ${LIBURING_LIBRARY}")
 
 message(STATUS "edgehost dependency map:")
 message(STATUS "  SIBLING_ROOT=${SIBLING_ROOT}")
-message(STATUS "  shaggy     FOUND=${Shaggy_FOUND} ROOT=${SHAGGY_ROOT}")
+message(STATUS "  shaggy     FOUND=${Shaggy_FOUND} ROOT=${SHAGGY_ROOT} LIB=${SHAGGY_LIBRARY}")
 message(STATUS "  libyaml    FOUND=${Libyaml_FOUND} ROOT=${LIBYAML_ROOT}")
 message(STATUS "  librest    FOUND=${Librest_FOUND} ROOT=${LIBREST_ROOT}")
-message(STATUS "  pique      FOUND=${Pique_FOUND} ROOT=${PIQUE_ROOT}")
-message(STATUS "  libharness FOUND=${Libharness_FOUND} ROOT=${LIBHARNESS_ROOT}")
-message(STATUS "  libslack   FOUND=${Libslack_FOUND} ROOT=${LIBSLACK_ROOT}")
-message(STATUS "  libteams   FOUND=${Libteams_FOUND} ROOT=${LIBTEAMS_ROOT}")
-message(STATUS "  libwebmap  FOUND=${Libwebmap_FOUND} ROOT=${LIBWEBMAP_ROOT}")
-message(STATUS "  libsim     FOUND=${Libsim_FOUND} ROOT=${LIBSIM_ROOT}")
-if(Shaggy_FOUND)
-  message(STATUS "  shaggy lib  ${SHAGGY_LIBRARY}")
-endif()
+message(STATUS "  libsim     FOUND=${Libsim_FOUND} ROOT=${LIBSIM_ROOT} LIB=${LIBSIM_LIBRARY}")
+message(STATUS "  liburing   ${LIBURING_LIBRARY}")
 
 if(EDGEHOST_REQUIRE_SIBLINGS AND Shaggy_FOUND AND NOT SHAGGY_LIBRARY)
   message(FATAL_ERROR
     "shaggy headers found but no static lib (expected "
-    "${SHAGGY_ROOT}/build/libhttp1.a). Build shaggy: "
-    "cmake -B ${SHAGGY_ROOT}/build -S ${SHAGGY_ROOT} && "
-    "cmake --build ${SHAGGY_ROOT}/build --target http1")
+    "${SHAGGY_ROOT}/build/libhttp1.a). Build: cmake --build ${SHAGGY_ROOT}/build --target http1")
+endif()
+if(EDGEHOST_REQUIRE_LIBSIM AND Libsim_FOUND AND NOT LIBSIM_LIBRARY)
+  message(FATAL_ERROR
+    "libsim headers found but no build/libsim.a. Build: "
+    "cmake -B ${LIBSIM_ROOT}/build -S ${LIBSIM_ROOT} && cmake --build ${LIBSIM_ROOT}/build")
 endif()
 
 # --- libedgecore ---
@@ -83,13 +80,14 @@ target_include_directories(edgecore PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# --- Host libraries ---
+# --- Host: alloc ---
 add_library(edgehost_alloc STATIC src/host/host_alloc.c)
 target_include_directories(edgehost_alloc PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
+# --- Host: YAML config ---
 add_library(edgehost_config STATIC
   src/host/config_yaml.c
   src/host/config_hup.c
@@ -108,23 +106,54 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-add_library(edgehost_iouring STATIC
-  src/host/iouring_loop.c
+# --- Host: HTTP/1 serve + metrics (shared by uring + sim) ---
+add_library(edgehost_http STATIC
   src/host/edge_metrics.c
+  src/host/edge_http1_serve.c
 )
+target_include_directories(edgehost_http PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+if(TARGET Shaggy::shaggy)
+  target_link_libraries(edgehost_http PUBLIC Shaggy::shaggy)
+elseif(SHAGGY_LIBRARY)
+  target_link_libraries(edgehost_http PUBLIC ${SHAGGY_LIBRARY})
+endif()
+if(Shaggy_FOUND AND TARGET Shaggy::headers)
+  target_link_libraries(edgehost_http PUBLIC Shaggy::headers)
+endif()
+
+# --- Host: real io_uring loop ---
+add_library(edgehost_iouring STATIC src/host/iouring_loop.c)
 target_include_directories(edgehost_iouring PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
-target_link_libraries(edgehost_iouring PUBLIC edgecore ${LIBURING_LIBRARY})
-if(TARGET Shaggy::shaggy)
-  target_link_libraries(edgehost_iouring PUBLIC Shaggy::shaggy)
-elseif(SHAGGY_LIBRARY)
-  target_link_libraries(edgehost_iouring PUBLIC ${SHAGGY_LIBRARY})
-endif()
-if(Shaggy_FOUND AND TARGET Shaggy::headers)
-  target_link_libraries(edgehost_iouring PUBLIC Shaggy::headers)
+target_link_libraries(edgehost_iouring PUBLIC edgecore edgehost_http ${LIBURING_LIBRARY})
+
+# --- Host: class-A sim_main ---
+if(Libsim_FOUND AND LIBSIM_LIBRARY)
+  add_library(edgehost_sim STATIC src/host/sim_main.c)
+  target_include_directories(edgehost_sim PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+  )
+  target_link_libraries(edgehost_sim PUBLIC
+    edgecore edgehost_http edgehost_alloc
+  )
+  if(TARGET Libsim::sim)
+    target_link_libraries(edgehost_sim PUBLIC Libsim::sim)
+  else()
+    target_link_libraries(edgehost_sim PUBLIC ${LIBSIM_LIBRARY})
+  endif()
+  if(TARGET Libsim::headers)
+    target_link_libraries(edgehost_sim PUBLIC Libsim::headers)
+  endif()
+  set(EDGEHOST_HAVE_SIM 1)
+else()
+  set(EDGEHOST_HAVE_SIM 0)
 endif()
 
 # edgehost binary
@@ -175,6 +204,22 @@ add_test(NAME edgecore_config COMMAND edgecore_config_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME edgehost_iouring_static COMMAND edgehost_iouring_test)
 
+if(EDGEHOST_HAVE_SIM)
+  add_executable(edgehost_sim_test tests/test_sim_main.c)
+  target_link_libraries(edgehost_sim_test PRIVATE edgehost_sim)
+  add_test(NAME edgehost_sim_main COMMAND edgehost_sim_test)
+endif()
+
+if(BUILD_FUZZ AND EDGEHOST_HAVE_SIM)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(WARNING "BUILD_FUZZ is intended for Clang libFuzzer")
+  endif()
+  add_executable(fuzz_edgehost_a fuzz/fuzz_edgehost_a.c)
+  target_link_libraries(fuzz_edgehost_a PRIVATE edgehost_sim)
+  target_compile_options(fuzz_edgehost_a PRIVATE -fsanitize=fuzzer,address)
+  target_link_options(fuzz_edgehost_a PRIVATE -fsanitize=fuzzer,address)
+endif()
+
 find_program(EDGEHOST_BASH bash)
 if(EDGEHOST_BASH)
   add_test(
@@ -185,7 +230,11 @@ if(EDGEHOST_BASH)
 endif()
 
 include(GNUInstallDirs)
-install(TARGETS edgecore edgehost_alloc edgehost_config edgehost_iouring edgehost
+set(_install_libs edgecore edgehost_alloc edgehost_config edgehost_http edgehost_iouring)
+if(EDGEHOST_HAVE_SIM)
+  list(APPEND _install_libs edgehost_sim)
+endif()
+install(TARGETS ${_install_libs} edgehost
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )

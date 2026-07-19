@@ -9,10 +9,10 @@
 - [x] **P1.4a** io_uring accept + fixed static response (plain TCP)
 - [x] **P1.4b** shaggy HTTP/1 parse bridge (static simple body)
 - [x] **P1.4c** `GET /health` JSON + metrics counters
+- [x] **P1.5** sim_main class-A fuzz path (libsim + edge_http1_serve)
 
 ## Next (program Track 1)
 
-- [ ] **P1.5** sim_main fuzz (needs libsim P0.3)
 - [ ] **P1.6** static SPA root + package path
 - [ ] **P1.7a–d** state store, WS stream, auth ladder
 - [ ] **P1.8a–b** plugin ABI + openai_proxy E2E
@@ -24,4 +24,4 @@
 ## Soft deps
 
 - [x] libsim P0.1–P0.4 (separate repo; pin in deps/pins.txt)
-- [ ] Wire class-A fuzz via P1.5 once host accept exists
+- [x] Class-A fuzz path (P1.5); optional BUILD_FUZZ harness

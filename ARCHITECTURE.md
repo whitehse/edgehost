@@ -2,44 +2,46 @@
 
 ## Status
 
-**P1.4c**: plain TCP io_uring + shaggy HTTP/1 + **`GET /health` JSON** and
-basic process metrics counters.
+**P1.5**: production io_uring HTTP/1 + `/health`, and class-A **sim_main**
+fuzz path via libsim (no real sockets).
 
 ## Split (ADR-002)
 
 | Layer | Path | Rules |
 |-------|------|-------|
-| **libedgecore** | `src/core/*` | Syscall-free; pull events; NEED_* memory; apply_config |
-| **YAML + HUP** | `src/host/config_*.c` | libyaml load; SIGHUP flag → reload |
-| **io_uring + HTTP/1** | `src/host/iouring_loop.c`, `main.c` | accept/recv/send; shaggy parse |
+| **libedgecore** | `src/core/*` | Syscall-free; events; NEED_*; apply_config |
+| **HTTP/1 serve** | `src/host/edge_http1_serve.c` | Shared shaggy parse + route (prod + sim) |
 | **Metrics** | `src/host/edge_metrics.c` | Counters; `/health` JSON |
-| **host_alloc** | `src/host/host_alloc.c` | Process malloc for edgecore data |
-| **TLS (later)** | P1.13 | **OpenSSL non-blocking** (ADR-014) |
+| **io_uring host** | `src/host/iouring_loop.c`, `main.c` | Real kernel accept/recv/send |
+| **sim_main** | `src/host/sim_main.c` | Class A: libsim net/uring + same HTTP serve |
+| **YAML + HUP** | `src/host/config_*.c` | libyaml; SIGHUP flag |
+| **TLS (later)** | P1.13 | OpenSSL non-blocking |
 
-## HTTP routes (P1.4c)
+## HTTP routes
 
-| Method / path | Response |
-|---------------|----------|
-| `GET /health` | `200 application/json` — status, uptime, accepts, requests, 2xx/4xx, bytes, active_conns, rejects |
-| `GET /` | `200 text/plain` — `ok\n` |
-| other `GET` | `404 text/plain` |
-| parse error | `400 text/plain` |
+| Path | Response |
+|------|----------|
+| `GET /health` | JSON metrics |
+| `GET /` | plain `ok` |
+| other GET | 404 |
+| parse error | 400 |
 
-## Metrics fields
+## Class-A sim / fuzz (ADR-011)
 
-`accepts`, `requests`, `responses_2xx`, `responses_4xx`, `bytes_in`,
-`bytes_out`, `active_conns`, `rejects`, `uptime_s`.
+```
+edge_sim_drive(data):
+  sim_fuzz_drive_a          # libsim clock/timer/net/uring opcodes
+  edgecore NEED_ALLOC path  # host_alloc provide
+  edge_http1_serve_feed     # direct buffer path
+  sim_net + sim_uring       # accept/recv/send HTTP exchange
+```
 
-Not Prometheus exposition yet (P1.15).
+Harness: `fuzz/fuzz_edgehost_a.c` (`-DBUILD_FUZZ=ON`, clang + libFuzzer).
 
 ## TLS (ADR-014)
 
-edgehost → OpenSSL non-blocking (later); CPE → mbedTLS; pqproxy side-car OpenSSL.
+edgehost → OpenSSL non-blocking (later); CPE → mbedTLS.
 
 ## Deliberate absences
 
-- SPA root (P1.6), state store (P1.7a), plugins, OpenSSL, sim_main (P1.5).
-
-## Related
-
-- Program design: `~/edge-platform-program-design.md`
+SPA root (P1.6), state store, plugins, OpenSSL, Prometheus (P1.15).

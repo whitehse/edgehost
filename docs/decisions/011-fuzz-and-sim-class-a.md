@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (policy). Harness lands in **P1.5** (`sim_main` + libsim).
+Accepted. **P1.5 landed:** `edge_sim_drive` + `fuzz/fuzz_edgehost_a.c`.
 
 ## Date
 
@@ -18,22 +18,23 @@ and `sim_fuzz_drive_a`.
 ## Decision
 
 1. **Class A only** for production edgehost and its primary fuzz path.
-2. Drive edgecore through **buffers + pull events** under libsim (no real
-   sockets in unit/fuzz hosts).
-3. Prefer **libFuzzer + ASan/UBSan** harnesses once `sim_main` exists (`BUILD_FUZZ`).
-4. Pin libsim via `deps/pins.txt`; do not vendor sim sources.
-5. Core must not abort on adversarial feed data; surface `EDGE_EVENT_*` /
-   return codes instead.
-
-P1.1 does **not** ship a fuzz binary — only this policy so later PRs do not
-invent a second I/O model.
+2. Drive edgecore + HTTP/1 through **buffers** under libsim (no real sockets
+   in unit/fuzz hosts). Shared `edge_http1_serve` is used by both production
+   io_uring and sim.
+3. **`edge_sim_drive`** (`src/host/sim_main.c`):
+   - `sim_fuzz_drive_a` (full class-A opcode stream)
+   - edgecore `NEED_ALLOC` + `host_alloc` + `apply_config`
+   - direct `edge_http1_serve_feed`
+   - mini `sim_net` + `sim_uring` accept/recv/send of HTTP bytes
+4. **libFuzzer** harness: `fuzz/fuzz_edgehost_a.c` via `-DBUILD_FUZZ=ON` (clang).
+5. Pin libsim via `deps/pins.txt`; do not vendor sim sources.
+6. Must not abort on adversarial input; return 0 / surface events.
 
 ## Consequences
 
-- P1.5 depends on libsim P0.3+ and edgecore accept/feed spine (P1.4a).
-- Class B/C consumers (CPE agent, mobile) use libsim with `LIBSIM_NO_URING`
-  and are out of scope for this ADR.
-- Host `iouring_loop.c` stays thin: map CQEs → `feed_*` / drain `next_event`.
+- `ctest` includes `edgehost_sim_main` when libsim is linked.
+- Class B/C consumers use libsim with `LIBSIM_NO_URING` — out of scope here.
+- Production `iouring_loop.c` maps CQEs → `edge_http1_serve_feed`.
 
 ## Alternatives considered
 

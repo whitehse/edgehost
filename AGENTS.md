@@ -7,7 +7,7 @@ malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
 does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.4c** — GET /health JSON + metrics counters.
+**Current milestone**: **P1.5** — class-A sim_main + libsim fuzz path.
 
 ## Key commands
 
@@ -23,7 +23,16 @@ deps/update_pins.sh
 ```
 
 Requires: **liburing-dev**, sibling **libyaml** (`~/libyaml/build/libyaml.a`),
-sibling **shaggy** HTTP/1 (`~/shaggy/build/libhttp1.a`).
+sibling **shaggy** HTTP/1 (`~/shaggy/build/libhttp1.a`), sibling **libsim**
+(`~/libsim/build/libsim.a`).
+
+Optional libFuzzer (class A):
+
+```bash
+cmake -B build-fuzz -S . -DBUILD_FUZZ=ON -DCMAKE_C_COMPILER=clang
+cmake --build build-fuzz --target fuzz_edgehost_a
+./build-fuzz/fuzz_edgehost_a -max_total_time=30
+```
 
 Optional roots (same pattern as pqproxy):
 
@@ -95,5 +104,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.4c complete**: `GET /health` JSON + basic host metrics counters.  
-**Next**: **P1.5** — sim_main fuzz (class A, libsim).
+**P1.5 complete**: class-A `edge_sim_drive` + optional `fuzz_edgehost_a`.  
+**Next**: **P1.6** — static SPA root + package path.

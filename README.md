@@ -4,9 +4,9 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.4c — plain TCP **io_uring** + **shaggy HTTP/1**;
-`GET /health` returns JSON metrics. TLS later: **OpenSSL non-blocking**;
-CPE agent uses **mbedTLS**.
+**Status:** P1.5 — production **io_uring** HTTP/1 + `/health`, and class-A
+**sim_main** fuzz path (libsim). TLS later: **OpenSSL non-blocking**; CPE
+uses **mbedTLS**.
 
 ## Build
 
