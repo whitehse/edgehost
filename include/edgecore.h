@@ -4,12 +4,15 @@
  *
  * Host owns sockets, files, io_uring, TLS, signals, and process malloc for
  * edgecore-owned data growth via host_alloc + NEED_ALLOC / NEED_REALLOC
- * (ADR-003 / Decision X1).
+ * (ADR-003 / Decision X1). Config apply is pure swap + events (ADR-005).
  *
- * See docs/decisions/002-core-host-split.md and 003-event-gated-memory.md.
+ * See docs/decisions/002-core-host-split.md, 003-event-gated-memory.md,
+ * and 005-yaml-sighup-apply.md.
  */
 #ifndef EDGECORE_H
 #define EDGECORE_H
+
+#include "edge_config.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -19,7 +22,7 @@ extern "C" {
 #endif
 
 #define EDGECORE_VERSION_MAJOR 0
-#define EDGECORE_VERSION_MINOR 2
+#define EDGECORE_VERSION_MINOR 3
 #define EDGECORE_VERSION_PATCH 0
 
 /** Max simultaneous host-owned data buffers registered with one core. */
@@ -133,6 +136,25 @@ int edgecore_detach_buffer(edgecore_t *core, uint32_t alloc_id, void **out_ptr,
 const void *edgecore_buffer_ptr(const edgecore_t *core, uint32_t alloc_id);
 size_t      edgecore_buffer_size(const edgecore_t *core, uint32_t alloc_id);
 size_t      edgecore_buffer_count(const edgecore_t *core);
+
+/* --- Config apply (P1.3 / ADR-005) --- */
+
+/**
+ * Validate and atomically replace the active config.
+ * Success → EDGE_EVENT_CONFIG_APPLIED (generation bumped).
+ * Failure → EDGE_EVENT_CONFIG_REJECTED; previous config kept.
+ * @return 0 applied, -1 rejected.
+ */
+int edgecore_apply_config(edgecore_t *core, const edge_config_t *cfg);
+
+/**
+ * Emit CONFIG_REJECTED without mutating active config (e.g. YAML load error).
+ * @return 0 event queued, -1 error.
+ */
+int edgecore_notify_config_rejected(edgecore_t *core, const char *reason);
+
+/** Pointer to active config (valid until next successful apply or destroy). */
+const edge_config_t *edgecore_config(const edgecore_t *core);
 
 #ifdef __cplusplus
 }

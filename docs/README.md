@@ -16,6 +16,7 @@
 | [001](decisions/001-pure-c-choice.md) | Pure C11 |
 | [002](decisions/002-core-host-split.md) | Core vs host split |
 | [003](decisions/003-event-gated-memory.md) | Event-gated memory (X1) |
+| [005](decisions/005-yaml-sighup-apply.md) | YAML + SIGHUP shadow apply |
 | [011](decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](decisions/012-agent-ready-documentation.md) | Agent-ready docs |
 

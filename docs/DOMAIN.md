@@ -14,7 +14,9 @@
 | **NEED_REALLOC** | Core event requesting grow of an existing host buffer |
 | **host_alloc** | Sole process malloc gate for edgecore data (`include/host_alloc.h`) |
 | **provide_buffer** | Host hands a fulfilled allocation back to core |
+| **Shadow config** | Newly loaded YAML not yet applied; discarded on validate failure |
+| **CONFIG_APPLIED** | Event after successful `edgecore_apply_config` |
+| **CONFIG_REJECTED** | Event when load/validate fails; previous config kept |
 
-Public API: `include/edgecore.h` (create, next_event, request_alloc,
-provide_buffer, …) and `include/host_alloc.h`. See program design for full
-sketches (`edge_plugin.h`, …).
+Public API: `edgecore.h`, `edge_config.h`, `edge_config_hup.h`, `host_alloc.h`.
+Example: `config/edgehost.example.yaml`.

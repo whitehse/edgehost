@@ -1,0 +1,314 @@
+/**
+ * @file config_yaml.c
+ * @brief Load edge_config_t from YAML via sibling libyaml (pqproxy pattern).
+ */
+
+#include "edge_config.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "yaml.h"
+
+static int parse_bool(const char *s, int *out)
+{
+    if (!s || !out) {
+        return -1;
+    }
+    if (strcmp(s, "1") == 0 || strcmp(s, "true") == 0 ||
+        strcmp(s, "True") == 0 || strcmp(s, "yes") == 0 ||
+        strcmp(s, "on") == 0) {
+        *out = 1;
+        return 0;
+    }
+    if (strcmp(s, "0") == 0 || strcmp(s, "false") == 0 ||
+        strcmp(s, "False") == 0 || strcmp(s, "no") == 0 ||
+        strcmp(s, "off") == 0) {
+        *out = 0;
+        return 0;
+    }
+    return -1;
+}
+
+static int parse_u16(const char *s, uint16_t *out)
+{
+    long v;
+    char *end = NULL;
+
+    if (!s || !out) {
+        return -1;
+    }
+    v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v < 0 || v > 65535) {
+        return -1;
+    }
+    *out = (uint16_t)v;
+    return 0;
+}
+
+static int parse_size(const char *s, size_t *out)
+{
+    unsigned long long v;
+    char *end = NULL;
+
+    if (!s || !out) {
+        return -1;
+    }
+    v = strtoull(s, &end, 10);
+    if (end == s || *end != '\0') {
+        return -1;
+    }
+    *out = (size_t)v;
+    return 0;
+}
+
+static int copy_str(char *dst, size_t dst_sz, const char *src)
+{
+    size_t n;
+
+    if (!dst || dst_sz == 0 || !src) {
+        return -1;
+    }
+    n = strlen(src);
+    if (n + 1 > dst_sz) {
+        return -1;
+    }
+    memcpy(dst, src, n + 1);
+    return 0;
+}
+
+static const char *lookup(yaml_ctx_t *ctx, const char *path)
+{
+    size_t len = 0;
+    const char *v = yaml_lookup_scalar(ctx, path, &len);
+
+    if (!v || len == 0) {
+        return NULL;
+    }
+    return v;
+}
+
+static int apply_scalar(edge_config_t *c, const char *key, const char *val,
+                        char *err, size_t err_len)
+{
+    int iv;
+    uint16_t u16;
+    size_t sz;
+
+    if (!key || !val) {
+        return 0;
+    }
+
+#define FAIL(msg)                                                              \
+    do {                                                                       \
+        if (err && err_len) {                                                  \
+            snprintf(err, err_len, "%s: %s", key, msg);                        \
+        }                                                                      \
+        return -1;                                                             \
+    } while (0)
+
+    if (strcmp(key, "listen.host") == 0) {
+        if (copy_str(c->listen_host, sizeof(c->listen_host), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "listen.port") == 0) {
+        if (parse_u16(val, &u16) != 0 || u16 == 0) {
+            FAIL("invalid port");
+        }
+        c->listen_port = u16;
+        return 0;
+    }
+    if (strcmp(key, "spa.root") == 0 || strcmp(key, "spa_root") == 0) {
+        if (copy_str(c->spa_root, sizeof(c->spa_root), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "http.max_body_bytes") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->http_max_body_bytes = sz;
+        return 0;
+    }
+    if (strcmp(key, "http.max_pending_outbound") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->http_max_pending_outbound = sz;
+        return 0;
+    }
+    if (strcmp(key, "http.max_upstream_body_bytes") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->http_max_upstream_body_bytes = sz;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.net_core.enabled") == 0 ||
+        strcmp(key, "state.net_core.enabled") == 0 ||
+        strcmp(key, "state.enable_net_core") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->state_net_core_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.map_dynamic.enabled") == 0 ||
+        strcmp(key, "state.map_dynamic.enabled") == 0 ||
+        strcmp(key, "state.enable_map_dynamic") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->state_map_dynamic_enabled = iv;
+        return 0;
+    }
+#undef FAIL
+    return 0; /* unknown keys ignored */
+}
+
+static const char *const g_paths[] = {
+    "listen.host",
+    "listen.port",
+    "spa.root",
+    "spa_root",
+    "http.max_body_bytes",
+    "http.max_pending_outbound",
+    "http.max_upstream_body_bytes",
+    "state.namespaces.net_core.enabled",
+    "state.namespaces.map_dynamic.enabled",
+    "state.net_core.enabled",
+    "state.map_dynamic.enabled",
+    "state.enable_net_core",
+    "state.enable_map_dynamic",
+    NULL
+};
+
+static int load_from_ctx(yaml_ctx_t *ctx, edge_config_t *c, char *err,
+                         size_t err_len)
+{
+    size_t i;
+    yaml_event_t ev;
+
+    while (yaml_next_event(ctx, &ev)) {
+        if (ev.type == YAML_EVENT_ERROR) {
+            if (err && err_len) {
+                snprintf(err, err_len, "yaml parse: %s",
+                         ev.data.error.message[0] ? ev.data.error.message
+                                                  : "error");
+            }
+            return -1;
+        }
+    }
+
+    for (i = 0; g_paths[i]; i++) {
+        const char *val = lookup(ctx, g_paths[i]);
+        if (!val) {
+            continue;
+        }
+        if (apply_scalar(c, g_paths[i], val, err, err_len) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int edge_config_load_yaml_buf(const char *yaml, size_t yaml_len,
+                              edge_config_t *out, char *err, size_t err_len)
+{
+    yaml_ctx_t *ctx;
+    size_t n;
+
+    if (!out) {
+        if (err && err_len) {
+            snprintf(err, err_len, "null args");
+        }
+        return -1;
+    }
+    edge_config_defaults(out);
+    if (!yaml || yaml_len == 0) {
+        return 0;
+    }
+
+    ctx = yaml_create(YAML_ROLE_PARSER);
+    if (!ctx) {
+        if (err && err_len) {
+            snprintf(err, err_len, "yaml_create failed");
+        }
+        return -1;
+    }
+    n = yaml_feed_input(ctx, (const uint8_t *)yaml, yaml_len);
+    if (n == 0 && yaml_len > 0) {
+        if (err && err_len) {
+            snprintf(err, err_len, "yaml_feed_input consumed 0");
+        }
+        yaml_destroy(ctx);
+        return -1;
+    }
+    if (load_from_ctx(ctx, out, err, err_len) != 0) {
+        yaml_destroy(ctx);
+        return -1;
+    }
+    yaml_destroy(ctx);
+    return 0;
+}
+
+int edge_config_load_yaml_path(const char *path, edge_config_t *out, char *err,
+                               size_t err_len)
+{
+    FILE *fp;
+    char *buf = NULL;
+    size_t cap = 0;
+    size_t len = 0;
+    char chunk[4096];
+    size_t nr;
+    int rc;
+
+    if (!path || !out) {
+        if (err && err_len) {
+            snprintf(err, err_len, "null args");
+        }
+        return -1;
+    }
+    fp = fopen(path, "rb");
+    if (!fp) {
+        if (err && err_len) {
+            snprintf(err, err_len, "cannot open %s", path);
+        }
+        return -1;
+    }
+    while ((nr = fread(chunk, 1, sizeof(chunk), fp)) > 0) {
+        char *nb;
+        if (len + nr + 1 > cap) {
+            size_t ncap = cap ? cap * 2 : 8192;
+            while (ncap < len + nr + 1) {
+                ncap *= 2;
+            }
+            nb = (char *)realloc(buf, ncap);
+            if (!nb) {
+                free(buf);
+                fclose(fp);
+                if (err && err_len) {
+                    snprintf(err, err_len, "oom reading config");
+                }
+                return -1;
+            }
+            buf = nb;
+            cap = ncap;
+        }
+        memcpy(buf + len, chunk, nr);
+        len += nr;
+    }
+    fclose(fp);
+    if (!buf) {
+        edge_config_defaults(out);
+        return 0;
+    }
+    buf[len] = '\0';
+    rc = edge_config_load_yaml_buf(buf, len, out, err, err_len);
+    free(buf);
+    return rc;
+}

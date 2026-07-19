@@ -1,11 +1,10 @@
 /**
  * @file edgecore.c
- * @brief edgecore: fixed event ring + event-gated host buffers (P1.1–P1.2).
+ * @brief edgecore: event ring, host buffers, config apply (P1.1–P1.3).
  *
  * No syscalls. Create-time allocation only for core object + event ring.
  * Post-create data buffers: NEED_ALLOC / NEED_REALLOC → host_alloc →
- * edgecore_provide_buffer (ADR-003). This file must not call malloc/realloc
- * on the steady path.
+ * edgecore_provide_buffer (ADR-003). Config: pure validate + swap (ADR-005).
  */
 
 #include "edgecore.h"
@@ -42,6 +41,9 @@ struct edgecore {
 
     edge_buf_slot_t bufs[EDGECORE_MAX_BUFS];
     uint32_t        next_alloc_id; /* 1..; skip 0 */
+
+    edge_config_t   cfg;
+    int             cfg_applied; /* 0 until first successful apply */
 };
 
 /* -------------------------------------------------------------------------- */
@@ -90,6 +92,8 @@ edgecore_t *edgecore_create_with_config(const edgecore_config_t *cfg)
     core->cnt = 0;
     core->dropped = 0;
     core->next_alloc_id = 1;
+    edge_config_defaults(&core->cfg);
+    core->cfg_applied = 0;
     return core;
 }
 
@@ -408,4 +412,64 @@ size_t edgecore_buffer_count(const edgecore_t *core)
         }
     }
     return n;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Config apply (ADR-005)                                                      */
+/* -------------------------------------------------------------------------- */
+
+int edgecore_apply_config(edgecore_t *core, const edge_config_t *cfg)
+{
+    edge_event_t ev;
+    char verr[96];
+    edge_config_t next;
+
+    if (!core || !cfg) {
+        return -1;
+    }
+
+    memset(&ev, 0, sizeof(ev));
+    if (edge_config_validate(cfg, verr, sizeof(verr)) != 0) {
+        ev.type = EDGE_EVENT_CONFIG_REJECTED;
+        snprintf(ev.reason, sizeof(ev.reason), "%s", verr);
+        (void)emit_event(core, &ev);
+        return -1;
+    }
+
+    next = *cfg;
+    next.generation = core->cfg.generation + 1;
+    if (next.generation == 0) {
+        next.generation = 1; /* skip 0 after wrap */
+    }
+    core->cfg = next;
+    core->cfg_applied = 1;
+
+    ev.type = EDGE_EVENT_CONFIG_APPLIED;
+    snprintf(ev.reason, sizeof(ev.reason), "CONFIG_APPLIED gen=%llu port=%u",
+             (unsigned long long)core->cfg.generation,
+             (unsigned)core->cfg.listen_port);
+    (void)emit_event(core, &ev);
+    return 0;
+}
+
+int edgecore_notify_config_rejected(edgecore_t *core, const char *reason)
+{
+    edge_event_t ev;
+
+    if (!core) {
+        return -1;
+    }
+    memset(&ev, 0, sizeof(ev));
+    ev.type = EDGE_EVENT_CONFIG_REJECTED;
+    if (reason && reason[0]) {
+        snprintf(ev.reason, sizeof(ev.reason), "%s", reason);
+    } else {
+        snprintf(ev.reason, sizeof(ev.reason), "CONFIG_REJECTED");
+    }
+    return emit_event(core, &ev) == 0 ? 0 : -1;
+}
+
+const edge_config_t *edgecore_config(const edgecore_t *core)
+{
+    return core ? &core->cfg : NULL;
 }

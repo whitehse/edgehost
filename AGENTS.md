@@ -6,7 +6,7 @@ sockets, files, signals, TLS (**mbedTLS**), and process malloc. Composes sibling
 protocol libraries (shaggy, libyaml, librest, …) — does not reimplement them.
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.2** — host_alloc + NEED_ALLOC path + ADR-003.
+**Current milestone**: **P1.3** — YAML load + SIGHUP apply + ADR-005.
 
 ## Key commands
 
@@ -16,6 +16,8 @@ ctest --test-dir build --output-on-failure
 deps/verify_pins.sh              # local SHAs vs deps/pins.txt
 deps/update_pins.sh              # refresh pins from ~/ siblings
 ```
+
+Requires sibling **libyaml** built (`~/libyaml/build/libyaml.a`) for config tests.
 
 Optional roots (same pattern as pqproxy):
 
@@ -37,6 +39,7 @@ cmake -B build -S . \
 | `docs/DOMAIN.md` | Glossary |
 | `docs/README.md` | Index |
 | `docs/decisions/` | ADRs (write when work lands) |
+| `config/edgehost.example.yaml` | Example YAML |
 | `deps/pins.txt` | Known-good sibling SHAs |
 | Program design | `~/edge-platform-program-design.md` |
 
@@ -47,6 +50,7 @@ cmake -B build -S . \
 | [001](docs/decisions/001-pure-c-choice.md) | Pure C11 |
 | [002](docs/decisions/002-core-host-split.md) | libedgecore vs host |
 | [003](docs/decisions/003-event-gated-memory.md) | Event-gated memory (scoped X1) |
+| [005](docs/decisions/005-yaml-sighup-apply.md) | YAML + SIGHUP shadow apply |
 | [011](docs/decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](docs/decisions/012-agent-ready-documentation.md) | Doc layout + no stub ADRs |
 
@@ -68,6 +72,8 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 - **edgecore** (`src/core/*`): no syscalls; no silent `malloc` after create for
   data buffers — emit `NEED_ALLOC` / `NEED_REALLOC`; host uses `host_alloc`
   then `edgecore_provide_buffer` (ADR-003).
+- **Config**: load YAML on host; apply only via `edgecore_apply_config` (startup
+  and SIGHUP share this path — ADR-005). HUP handler only sets a flag.
 - **Host** (`src/host/*`): sole place for io_uring, sockets, files, process malloc, signals.
 - Compose shaggy/librest/libyaml/pique/libslack/libteams/libharness — do not reimplement wire protocols.
 - C11, CMake ≥ 3.20, `-Wall -Wextra -Wpedantic -Werror`.
@@ -82,5 +88,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.2 complete**: `host_alloc` + NEED_ALLOC/NEED_REALLOC provide path + ADR-003.  
-**Next**: **P1.3** — YAML load + SIGHUP apply + ADR-005.
+**P1.3 complete**: YAML load, shadow apply, SIGHUP flag + reload, ADR-005.  
+**Next**: **P1.4a** — io_uring accept + fixed static response.

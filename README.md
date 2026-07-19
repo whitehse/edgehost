@@ -4,7 +4,7 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.2 — `libedgecore` + event-gated `host_alloc` / `NEED_ALLOC`.
+**Status:** P1.3 — edgecore + `host_alloc` + YAML/SIGHUP config apply.
 No listen socket yet.
 
 ## Build

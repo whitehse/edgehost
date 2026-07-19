@@ -1,0 +1,24 @@
+# Example edgehost configuration (YAML via libyaml).
+# Load at start; SIGHUP re-reads this path → shadow validate → apply (ADR-005).
+# pqproxy has YAML load at start only — HUP reload is new program behavior.
+
+listen:
+  host: 0.0.0.0
+  port: 8080
+
+spa:
+  root: ./spa
+
+http:
+  max_body_bytes: 1048576
+  max_pending_outbound: 256
+  max_upstream_body_bytes: 4194304
+
+# v1 namespaces (underscore keys — libyaml knowledge paths split on '.')
+# Maps to ns names net.core / map.dynamic inside edgecore.
+state:
+  namespaces:
+    net_core:
+      enabled: true
+    map_dynamic:
+      enabled: true
