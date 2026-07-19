@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.7d: proxy X-User HMAC session (ADR-013 step 2).
+# P1.8a: plugin ABI HTTP/SESSION + PENDING + host API v0 (ADR-008).
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.7.3)
+project(edgehost LANGUAGES C VERSION 0.8.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -76,11 +76,20 @@ add_library(edgecore STATIC
   src/core/edge_config.c
   src/core/state_store.c
   src/core/auth_rbac.c
+  src/core/pending_table.c
 )
 target_include_directories(edgecore PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+
+# --- Host: plugin registry + host API v0 ---
+add_library(edgehost_plugins STATIC src/host/plugin_host.c)
+target_include_directories(edgehost_plugins PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(edgehost_plugins PUBLIC edgecore)
 
 # --- Host: alloc ---
 add_library(edgehost_alloc STATIC src/host/host_alloc.c)
@@ -217,6 +226,9 @@ target_link_libraries(edgehost_ws_test PRIVATE edgecore edgehost_http)
 add_executable(edgehost_auth_test tests/test_auth.c)
 target_link_libraries(edgehost_auth_test PRIVATE edgecore edgehost_http edgehost_config)
 
+add_executable(edgehost_pending_test tests/test_pending_plugin.c)
+target_link_libraries(edgehost_pending_test PRIVATE edgecore edgehost_plugins)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -229,6 +241,7 @@ add_test(NAME edgehost_static_files COMMAND edgehost_static_test
 add_test(NAME edgehost_state_store COMMAND edgehost_state_test)
 add_test(NAME edgehost_ws_stream COMMAND edgehost_ws_test)
 add_test(NAME edgehost_auth COMMAND edgehost_auth_test)
+add_test(NAME edgehost_pending_plugin COMMAND edgehost_pending_test)
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)
@@ -256,7 +269,8 @@ if(EDGEHOST_BASH)
 endif()
 
 include(GNUInstallDirs)
-set(_install_libs edgecore edgehost_alloc edgehost_config edgehost_http edgehost_iouring)
+set(_install_libs edgecore edgehost_alloc edgehost_config edgehost_http
+  edgehost_plugins edgehost_iouring)
 if(EDGEHOST_HAVE_SIM)
   list(APPEND _install_libs edgehost_sim)
 endif()

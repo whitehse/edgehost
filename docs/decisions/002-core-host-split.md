@@ -32,7 +32,9 @@ API spine (grows by PR):
 - P1.3: `edgecore_apply_config` + host YAML/HUP (`edgehost_reload_config`)
 - P1.4a: `edge_iouring_run` plain TCP static response
 - P1.4b: shaggy `http1_feed_input` / `next_event` bridge; host-built reply
-- Later: state, auth, OpenSSL TLS, plugin pending HTTP
+- P1.7: state, auth
+- P1.8a: plugin ABI + PENDING + host API v0
+- Later: OpenSSL TLS, openai_proxy E2E
 
 Event kinds are defined in `edgecore.h` (program design). Host consumes
 `EDGE_EVENT_OUTBOUND_DONE` internally; SPA clients never see it.

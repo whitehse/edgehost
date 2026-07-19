@@ -2,43 +2,37 @@
 
 ## Status
 
-**P1.7d**: state REST + WS stream + lab session + **proxy header HMAC** (ADR-013).
+**P1.8a**: state + WS + auth + **plugin ABI / PENDING** (ADR-008).
 
 ## Layers
 
 | Layer | Path |
 |-------|------|
-| **edgecore** | events, config, buffers, state_store, **auth_rbac** |
-| **HTTP serve** | health, SPA, packages, state, stream upgrade, **lab-login** |
-| **WS hub** | host-side subscriber queue + STATE_CHANGED JSON |
-| **io_uring** | production sockets; keep-alive WS after 101 |
-| **sim_main** | class-A fuzz (HTTP path) |
+| **edgecore** | events, config, state, auth_rbac, **pending_table** |
+| **HTTP serve** | health, SPA, packages, state, stream, lab-login |
+| **plugin_host** | registry, host API v0, PENDING dispatch |
+| **io_uring** | production sockets; WS keep-alive |
+| **sim_main** | class-A fuzz |
 
-## State REST
-
-| Method | Path | Auth (lab_password) |
-|--------|------|---------------------|
-| GET/PUT/DELETE | `/api/v1/state/{ns}/{key}` | employee session |
-| GET | `/api/v1/state/{ns}?prefix=` | employee session |
-
-## WebSocket
+## Plugin ABI (P1.8a)
 
 | Item | Detail |
 |------|--------|
-| Path | `GET /api/v1/stream` |
-| Events | `STATE_CHANGED` JSON text frames |
-| Auth | employee session when `auth.mode=lab_password` |
+| Header | `edge_plugin.h` |
+| Kinds | `HTTP` (`on_http` / `on_http_complete`), `SESSION` (feed/next_event) |
+| Status | `OK` \| `PENDING` \| `ERR` |
+| Host API | state_get/put, log, http_client_request, timers (stub) |
+| pending_table | fixed cap; one outbound per inbound slot |
+| Real TLS outbound | P1.8b + P1.13b |
 
-## Auth (P1.7c–d)
+## Auth
 
-| Item | Detail |
-|------|--------|
-| Mode | `open` (default), `lab_password`, `proxy_headers` |
-| Lab login | `POST /auth/lab-login` → `edge_session` cookie |
-| Proxy | `X-User` + `X-Auth-Timestamp` + `X-Auth-Signature` (+ optional `X-Roles`) |
-| Me | `GET /auth/me` |
-| Secrets | `EDGEHOST_LAB_PASSWORD`, `EDGEHOST_SESSION_HMAC`, `EDGEHOST_PROXY_HMAC` |
+| Mode | Mechanism |
+|------|-----------|
+| `open` | no checks (default) |
+| `lab_password` | `POST /auth/lab-login` → cookie |
+| `proxy_headers` | signed `X-User` headers |
 
 ## Next
 
-P1.8 plugin ABI.
+P1.8b openai_proxy E2E; P1.9–P1.10 stubs; P1.13 TLS.
