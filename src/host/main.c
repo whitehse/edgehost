@@ -271,7 +271,8 @@ int main(int argc, char **argv)
             memset(&eopts, 0, sizeof(eopts));
             eopts.cfg = ac;
             eopts.state = store;
-            eopts.hub = NULL; /* PR-4b: wire hub for coalesced notify */
+            /* Hub is created inside iouring_run; attach via set_hub there. */
+            eopts.hub = NULL;
             e7 = edge_e7_callhome_create(&eopts);
             if (!e7) {
 #if EDGEHOST_HAVE_LIBNETCONF

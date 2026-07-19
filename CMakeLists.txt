@@ -133,7 +133,8 @@ target_include_directories(edgehost_e7 PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(edgehost_e7 PUBLIC edgecore)
+# state_notify + ws hub live in edgehost_plugins (put_and_notify / K16)
+target_link_libraries(edgehost_e7 PUBLIC edgecore edgehost_plugins)
 if(Libnetconf_FOUND)
   target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_HAVE_LIBNETCONF=1)
   if(TARGET Libnetconf::netconf)

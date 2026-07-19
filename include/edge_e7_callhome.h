@@ -1,14 +1,15 @@
 /**
  * @file edge_e7_callhome.h
- * @brief E7 NETCONF Call Home listen, identity preamble, CLIENT session pump.
+ * @brief E7 NETCONF Call Home listen, identity, subscribe, lab.v1 apply (PR-4b).
  *
  * Host owns TCP accept + Calix identity parse (MAC primary). After identity,
- * libnetconf NETCONF_ROLE_CLIENT runs delimiter-framed hellos to SESSION_OPEN.
+ * libnetconf NETCONF_ROLE_CLIENT runs delimiter-framed hellos to SESSION_OPEN,
+ * then create_subscription (allowlisted / auto_subscribe_unknown). Notifications
+ * apply into net.pon; inventory/session uses put_and_notify. K16 dirty-set
+ * coalesces high-rate ONT/PON STATE_CHANGED (flush ≤100 ms on tick).
  *
  * Requires EDGEHOST_HAVE_LIBNETCONF (sibling libnetconf). Without it, create
  * returns NULL.
- *
- * PR-4a: no create_subscription / notification apply / WS dirty coalesce.
  */
 #ifndef EDGE_E7_CALLHOME_H
 #define EDGE_E7_CALLHOME_H
@@ -36,6 +37,10 @@ extern "C" {
 #define EDGE_E7_PEER_ADDR_MAX 64
 /** Identity preamble accumulation cap. */
 #define EDGE_E7_IDENTITY_BUF_MAX 2048
+/** Default dirty-set cap when config e7_dirty_cap is 0 (K16). */
+#define EDGE_E7_DIRTY_CAP_DEFAULT 8192
+/** Coalesce flush interval (ms) — design ≤100. */
+#define EDGE_E7_COALESCE_MS 100u
 
 typedef enum {
     EDGE_E7_SESS_EMPTY = 0,
@@ -57,13 +62,19 @@ typedef struct {
     uint64_t rejects_other;
     uint64_t sessions_open;   /* currently OPEN */
     uint64_t sessions_opened; /* cumulative OPEN transitions */
+    uint64_t notifications;   /* NOTIFICATION events applied or seen */
+    uint64_t state_puts;      /* successful inventory/net.pon puts from CH */
+    uint64_t coalesce_flush;  /* dirty-set flush cycles */
+    uint64_t coalesce_overflow; /* dirty table full → force notify */
+    uint64_t subscriptions_ok; /* create-subscription rpc-ok */
 } edge_e7_callhome_stats_t;
 
 typedef struct edge_e7_callhome edge_e7_callhome_t;
 
 /**
  * Create options. @p cfg is not copied — must outlive the instance.
- * state/hub optional (not owned). hub may be NULL (put-only inventory).
+ * state/hub optional (not owned). hub may be NULL (put-only); set later via
+ * edge_e7_callhome_set_hub when the io_uring hub is created.
  */
 typedef struct {
     const edge_config_t *cfg;
@@ -78,6 +89,12 @@ typedef struct {
 edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts);
 
 void edge_e7_callhome_destroy(edge_e7_callhome_t *ch);
+
+/**
+ * Attach or replace WS hub (not owned). Used by iouring after hub create so
+ * Call Home can fan out STATE_CHANGED (K16).
+ */
+void edge_e7_callhome_set_hub(edge_e7_callhome_t *ch, edge_ws_hub_t *hub);
 
 /** 1 if instance exists and cfg.e7_enabled. */
 int edge_e7_callhome_enabled(const edge_e7_callhome_t *ch);
@@ -101,7 +118,8 @@ int edge_e7_callhome_on_accept(edge_e7_callhome_t *ch, int fd,
 
 /**
  * Non-blocking accept on listen_fd (if any) + pump all sessions (read/write/
- * identity/NETCONF). Safe to call from io_uring tick or a poll loop.
+ * identity/NETCONF) + dirty-set coalesce flush (≤100 ms). Safe to call from
+ * io_uring tick or a poll loop.
  * @p mono_ms is CLOCK_MONOTONIC milliseconds.
  */
 void edge_e7_callhome_poll(edge_e7_callhome_t *ch, uint64_t mono_ms);

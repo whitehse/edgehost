@@ -870,6 +870,10 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     if (srv.plugins) {
         edge_plugin_host_set_ws_hub(srv.plugins, srv.hub);
     }
+    /* E7 Call Home coalesce notify (PR-4b / K16). */
+    if (srv.e7) {
+        edge_e7_callhome_set_hub(srv.e7, srv.hub);
+    }
 
     srv.conns = (conn_t *)calloc((size_t)srv.max_conns, sizeof(conn_t));
     if (!srv.conns) {

@@ -1,11 +1,12 @@
 /**
  * @file e7_callhome.c
- * @brief Call Home listen + identity + raw NETCONF CLIENT pump (PR-4a).
+ * @brief Call Home listen + identity + subscribe + lab.v1 apply + K16 coalesce.
  */
 
 #define _GNU_SOURCE
 
 #include "edge_e7_callhome.h"
+#include "edge_state_notify.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -32,6 +33,8 @@
 #define EDGE_E7_NC_MAX_OUTPUT    (256 * 1024)
 #define EDGE_E7_NC_EVENT_Q       8
 
+#define EDGE_E7_DIRTY_NS_MAX     32
+
 typedef struct {
     edge_e7_sess_state_t state;
     int                  fd;
@@ -40,6 +43,9 @@ typedef struct {
     char                 peer[EDGE_E7_PEER_ADDR_MAX];
     int                  allowlisted; /* MAC in shelves[] and enabled */
     int                  auto_unknown; /* accepted via auto_subscribe_unknown */
+    int                  sub_sent;     /* create_subscription issued */
+    int                  sub_ok;       /* subscription rpc-ok */
+    int                  sub_msg_id;
 
     char                 id_buf[EDGE_E7_IDENTITY_BUF_MAX];
     size_t               id_len;
@@ -58,6 +64,12 @@ typedef struct {
 #endif
 } edge_e7_session_t;
 
+typedef struct {
+    int  used;
+    char ns[EDGE_E7_DIRTY_NS_MAX];
+    char key[EDGE_STATE_KEY_MAX];
+} edge_e7_dirty_slot_t;
+
 struct edge_e7_callhome {
     const edge_config_t *cfg;
     edge_state_store_t  *state;
@@ -67,6 +79,12 @@ struct edge_e7_callhome {
     edge_e7_session_t   *sessions;
     uint32_t             max_sessions;
     edge_e7_callhome_stats_t stats;
+
+    /* K16 dirty-set (host-owned; fixed cap) */
+    edge_e7_dirty_slot_t *dirty;
+    uint32_t              dirty_cap;
+    uint32_t              dirty_used;
+    uint64_t              last_flush_ms;
 };
 
 /* ---- utilities ---- */
@@ -160,6 +178,119 @@ static int shelf_lookup(const edge_config_t *cfg, const char *mac_norm)
     return -1;
 }
 
+/* ---- K16 dirty-set ---- */
+
+static uint32_t dirty_hash(const char *ns, const char *key)
+{
+    uint32_t h = 5381u;
+    const unsigned char *p;
+    for (p = (const unsigned char *)ns; *p; p++) {
+        h = ((h << 5) + h) + *p;
+    }
+    h = ((h << 5) + h) + (uint32_t)':';
+    for (p = (const unsigned char *)key; *p; p++) {
+        h = ((h << 5) + h) + *p;
+    }
+    return h;
+}
+
+static void dirty_broadcast_key(edge_e7_callhome_t *ch, const char *ns,
+                                const char *key)
+{
+    char val[EDGE_STATE_VALUE_DEFAULT];
+    size_t vlen = 0;
+    char rid[EDGE_WS_REQUEST_ID];
+    edge_state_err_t e;
+
+    if (!ch || !ch->hub || !ch->state || !ns || !key) {
+        return;
+    }
+    e = edge_state_get(ch->state, ns, key, val, sizeof(val), &vlen);
+    if (e != EDGE_STATE_OK) {
+        return;
+    }
+    edge_ws_hub_mint_request_id(ch->hub, NULL, rid, sizeof(rid));
+    (void)edge_ws_hub_broadcast_state_changed(ch->hub, ns, key, "put", val, vlen,
+                                              rid);
+}
+
+/**
+ * Mark (ns,key) dirty. @return 0 ok, -1 table full (overflow — caller must
+ * force-notify).
+ */
+static int dirty_mark(edge_e7_callhome_t *ch, const char *ns, const char *key)
+{
+    uint32_t i, start, cap;
+
+    if (!ch || !ch->dirty || ch->dirty_cap == 0 || !ns || !key || !key[0]) {
+        return -1;
+    }
+    if (strlen(ns) >= EDGE_E7_DIRTY_NS_MAX ||
+        strlen(key) >= EDGE_STATE_KEY_MAX) {
+        return -1;
+    }
+    cap = ch->dirty_cap;
+    start = dirty_hash(ns, key) % cap;
+    for (i = 0; i < cap; i++) {
+        uint32_t idx = (start + i) % cap;
+        edge_e7_dirty_slot_t *s = &ch->dirty[idx];
+        if (s->used && strcmp(s->ns, ns) == 0 && strcmp(s->key, key) == 0) {
+            return 0; /* already dirty */
+        }
+        if (!s->used) {
+            s->used = 1;
+            snprintf(s->ns, sizeof(s->ns), "%s", ns);
+            snprintf(s->key, sizeof(s->key), "%s", key);
+            ch->dirty_used++;
+            return 0;
+        }
+    }
+    return -1; /* full */
+}
+
+static void dirty_flush(edge_e7_callhome_t *ch)
+{
+    uint32_t i;
+    int any = 0;
+
+    if (!ch || !ch->dirty || ch->dirty_used == 0) {
+        return;
+    }
+    for (i = 0; i < ch->dirty_cap; i++) {
+        edge_e7_dirty_slot_t *s = &ch->dirty[i];
+        if (!s->used) {
+            continue;
+        }
+        dirty_broadcast_key(ch, s->ns, s->key);
+        s->used = 0;
+        s->ns[0] = '\0';
+        s->key[0] = '\0';
+        any = 1;
+    }
+    ch->dirty_used = 0;
+    if (any) {
+        ch->stats.coalesce_flush++;
+    }
+}
+
+/**
+ * After state put for a high-rate key: mark dirty, or force-notify on overflow.
+ */
+static void notify_coalesce(edge_e7_callhome_t *ch, const char *ns,
+                            const char *key)
+{
+    if (!ch || !ns || !key) {
+        return;
+    }
+    if (!ch->hub) {
+        return;
+    }
+    if (dirty_mark(ch, ns, key) != 0) {
+        ch->stats.coalesce_overflow++;
+        dirty_broadcast_key(ch, ns, key);
+    }
+}
+
 static void put_session_json(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                              const char *status)
 {
@@ -189,12 +320,123 @@ static void put_session_json(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return;
     }
-    /* PR-4a: put only (coalesced WS notify is PR-4b). hub reserved. */
-    (void)ch->hub;
-    e = edge_state_put(ch->state, "inventory", key, json, (size_t)n);
-    if (e != EDGE_STATE_OK && e != EDGE_STATE_NS_DISABLED) {
-        /* best-effort */
+    /* Low-rate path: immediate STATE_CHANGED (coalesce=0). */
+    e = edge_state_put_and_notify(ch->state, ch->hub, "inventory", key, json,
+                                  (size_t)n, NULL, 0);
+    if (e == EDGE_STATE_OK) {
+        ch->stats.state_puts++;
     }
+}
+
+/* Minimal lab.v1 tag extract for dirty-key construction (mirrors apply). */
+static int xml_tag_text(const char *xml, size_t len, const char *tag, char *out,
+                        size_t out_sz)
+{
+    char open[64];
+    size_t tlen, olen;
+    size_t i;
+
+    if (!xml || !tag || !out || out_sz == 0) {
+        return -1;
+    }
+    tlen = strlen(tag);
+    if (tlen + 3 >= sizeof(open)) {
+        return -1;
+    }
+    open[0] = '<';
+    memcpy(open + 1, tag, tlen);
+    open[1 + tlen] = '>';
+    open[2 + tlen] = '\0';
+    olen = tlen + 2;
+    for (i = 0; i + olen < len; i++) {
+        if (memcmp(xml + i, open, olen) == 0) {
+            size_t start = i + olen;
+            size_t j = start;
+            char close[72];
+            size_t clen;
+            snprintf(close, sizeof(close), "</%s>", tag);
+            clen = strlen(close);
+            while (j + clen <= len) {
+                if (memcmp(xml + j, close, clen) == 0) {
+                    size_t n = j - start;
+                    if (n >= out_sz) {
+                        n = out_sz - 1;
+                    }
+                    memcpy(out, xml + start, n);
+                    out[n] = '\0';
+                    return 0;
+                }
+                j++;
+            }
+            return -1;
+        }
+    }
+    return -1;
+}
+
+static int xml_has_tag(const char *xml, size_t len, const char *tag)
+{
+    char open[64];
+    size_t tlen, olen, i;
+    tlen = strlen(tag);
+    if (tlen + 2 >= sizeof(open)) {
+        return 0;
+    }
+    open[0] = '<';
+    memcpy(open + 1, tag, tlen);
+    open[1 + tlen] = '\0';
+    olen = tlen + 1;
+    for (i = 0; i + olen <= len; i++) {
+        if (memcmp(xml + i, open, olen) == 0) {
+            char c = (i + olen < len) ? xml[i + olen] : '\0';
+            if (c == '>' || c == ' ' || c == '/' || c == '\t' || c == '\n' ||
+                c == '\r') {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/**
+ * Build net.pon key for lab.v1 notification (same patterns as apply).
+ * @return 0 ok, -1 unknown/bad.
+ */
+static int lab_v1_state_key(const char *mac_colon, const char *xml, size_t len,
+                            char *key, size_t key_sz)
+{
+    char mac[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    int n;
+
+    if (!mac_colon || !xml || !key || key_sz == 0 || len == 0) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac_colon, mac, sizeof(mac)) != 0 ||
+        edge_e7_mac_to_key_seg(mac, mac_key, sizeof(mac_key)) != 0) {
+        return -1;
+    }
+    if (xml_has_tag(xml, len, "ont-event")) {
+        char ont_id[EDGE_E7_AID_MAX];
+        char ont_key[EDGE_E7_AID_MAX];
+        if (xml_tag_text(xml, len, "ont-id", ont_id, sizeof(ont_id)) != 0 ||
+            edge_e7_aid_to_key_seg(ont_id, ont_key, sizeof(ont_key)) != 0) {
+            return -1;
+        }
+        n = snprintf(key, key_sz, "e7/%s/ont/%s", mac_key, ont_key);
+        return (n > 0 && (size_t)n < key_sz) ? 0 : -1;
+    }
+    if (xml_has_tag(xml, len, "pon-alarm")) {
+        char pon_id[EDGE_E7_AID_MAX];
+        char pon_key[EDGE_E7_AID_MAX];
+        if (xml_tag_text(xml, len, "pon-id", pon_id, sizeof(pon_id)) != 0 ||
+            edge_e7_aid_to_key_seg(pon_id, pon_key, sizeof(pon_key)) != 0) {
+            return -1;
+        }
+        n = snprintf(key, key_sz, "e7/%s/pon/%s", mac_key, pon_key);
+        return (n > 0 && (size_t)n < key_sz) ? 0 : -1;
+    }
+    return -1;
 }
 
 static void session_clear_nc(edge_e7_session_t *s)
@@ -211,10 +453,17 @@ static void session_clear_nc(edge_e7_session_t *s)
 
 static void session_close(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
+    int was_open;
+
     if (!s || s->state == EDGE_E7_SESS_EMPTY) {
         return;
     }
-    if (s->state == EDGE_E7_SESS_OPEN && ch->stats.sessions_open > 0) {
+    was_open = (s->state == EDGE_E7_SESS_OPEN);
+    /* Disconnect of an open session → inventory status + immediate notify. */
+    if (was_open && s->identity.identity_ok) {
+        put_session_json(ch, s, "disconnected");
+    }
+    if (was_open && ch->stats.sessions_open > 0) {
         ch->stats.sessions_open--;
     }
     session_clear_nc(s);
@@ -231,6 +480,9 @@ static void session_close(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     s->state = EDGE_E7_SESS_EMPTY;
     s->allowlisted = 0;
     s->auto_unknown = 0;
+    s->sub_sent = 0;
+    s->sub_ok = 0;
+    s->sub_msg_id = 0;
     memset(&s->identity, 0, sizeof(s->identity));
     s->peer[0] = '\0';
 }
@@ -279,15 +531,6 @@ static int find_identity_end(const char *buf, size_t len)
 }
 
 #if EDGEHOST_HAVE_LIBNETCONF
-static void drain_nc_events(edge_e7_session_t *s)
-{
-    netconf_event_t ev;
-    while (s->nc && netconf_next_event(s->nc, &ev) == 1) {
-        /* PR-4a: no notification apply; just drain to avoid queue overflow. */
-        (void)ev;
-    }
-}
-
 static int session_append_tx(edge_e7_session_t *s, const uint8_t *data, size_t n)
 {
     if (!s || !data || n == 0) {
@@ -328,6 +571,70 @@ static int session_drain_output(edge_e7_session_t *s)
     return 0;
 }
 
+static void session_try_subscribe(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    int mid;
+
+    if (!s || !s->nc || s->sub_sent || s->state != EDGE_E7_SESS_OPEN) {
+        return;
+    }
+    /* Allowlisted or accepted via auto_subscribe_unknown. */
+    if (!s->allowlisted && !s->auto_unknown) {
+        return;
+    }
+    mid = netconf_create_subscription(s->nc, "NETCONF", NULL);
+    if (mid < 0) {
+        return;
+    }
+    s->sub_sent = 1;
+    s->sub_msg_id = mid;
+    (void)session_drain_output(s);
+    (void)ch;
+}
+
+static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                            const netconf_notification_t *n)
+{
+    edge_e7_apply_err_t ae;
+    char key[EDGE_STATE_KEY_MAX];
+
+    if (!ch || !s || !n || n->xml_len == 0) {
+        return;
+    }
+    ch->stats.notifications++;
+    if (!ch->state || !s->identity.identity_ok) {
+        return;
+    }
+    ae = edge_e7_event_apply_lab_v1(ch->state, s->identity.mac, n->xml,
+                                    n->xml_len);
+    if (ae != EDGE_E7_APPLY_OK) {
+        return;
+    }
+    ch->stats.state_puts++;
+    if (lab_v1_state_key(s->identity.mac, n->xml, n->xml_len, key,
+                         sizeof(key)) == 0) {
+        notify_coalesce(ch, "net.pon", key);
+    }
+}
+
+static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    netconf_event_t ev;
+    while (s->nc && netconf_next_event(s->nc, &ev) == 1) {
+        if (ev.type == NETCONF_EVENT_NOTIFICATION) {
+            on_notification(ch, s, &ev.data.notification);
+        } else if (ev.type == NETCONF_EVENT_RPC_OK ||
+                   ev.type == NETCONF_EVENT_RPC_REPLY) {
+            if (s->sub_sent && !s->sub_ok && s->sub_msg_id > 0 &&
+                ev.data.rpc_reply.message_id == (uint32_t)s->sub_msg_id) {
+                s->sub_ok = 1;
+                ch->stats.subscriptions_ok++;
+            }
+        }
+        /* QUEUE_OVERFLOW / ERROR: count optionally later */
+    }
+}
+
 static int session_start_netconf(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     netconf_config_t ncfg;
@@ -342,7 +649,7 @@ static int session_start_netconf(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         session_clear_nc(s);
         return -1;
     }
-    drain_nc_events(s);
+    drain_nc_events(ch, s);
     if (session_drain_output(s) != 0) {
         session_clear_nc(s);
         return -1;
@@ -364,6 +671,7 @@ static void session_check_open(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         ch->stats.sessions_open++;
         ch->stats.sessions_opened++;
         put_session_json(ch, s, "open");
+        session_try_subscribe(ch, s);
     }
 }
 #endif /* EDGEHOST_HAVE_LIBNETCONF */
@@ -426,7 +734,7 @@ static int session_finish_identity(edge_e7_callhome_t *ch, edge_e7_session_t *s,
             netconf_feed_input(s->nc, (const uint8_t *)s->id_buf, s->id_len);
         (void)used;
         s->id_len = 0;
-        drain_nc_events(s);
+        drain_nc_events(ch, s);
         (void)session_drain_output(s);
         session_check_open(ch, s);
     }
@@ -502,12 +810,15 @@ static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         s->nc) {
         size_t used = netconf_feed_input(s->nc, s->rx, (size_t)n);
         (void)used;
-        drain_nc_events(s);
+        drain_nc_events(ch, s);
         if (session_drain_output(s) != 0) {
             session_close(ch, s);
             return;
         }
         session_check_open(ch, s);
+        if (s->state == EDGE_E7_SESS_OPEN && !s->sub_sent) {
+            session_try_subscribe(ch, s);
+        }
         if (session_flush_tx(s) != 0) {
             session_close(ch, s);
             return;
@@ -586,6 +897,7 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
 {
     edge_e7_callhome_t *ch;
     uint32_t max_s;
+    uint32_t dirty_cap;
     size_t est;
 
 #if !EDGEHOST_HAVE_LIBNETCONF
@@ -611,6 +923,11 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
         return NULL;
     }
 
+    dirty_cap = opts->cfg->e7_dirty_cap;
+    if (dirty_cap == 0) {
+        dirty_cap = EDGE_E7_DIRTY_CAP_DEFAULT;
+    }
+
     ch = (edge_e7_callhome_t *)calloc(1, sizeof(*ch));
     if (!ch) {
         return NULL;
@@ -620,9 +937,17 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
     ch->hub = opts->hub;
     ch->listen_fd = -1;
     ch->max_sessions = max_s;
+    ch->dirty_cap = dirty_cap;
     ch->sessions =
         (edge_e7_session_t *)calloc(max_s, sizeof(edge_e7_session_t));
     if (!ch->sessions) {
+        free(ch);
+        return NULL;
+    }
+    ch->dirty = (edge_e7_dirty_slot_t *)calloc(dirty_cap,
+                                               sizeof(edge_e7_dirty_slot_t));
+    if (!ch->dirty) {
+        free(ch->sessions);
         free(ch);
         return NULL;
     }
@@ -651,7 +976,16 @@ void edge_e7_callhome_destroy(edge_e7_callhome_t *ch)
     }
     edge_e7_callhome_close_all(ch);
     free(ch->sessions);
+    free(ch->dirty);
     free(ch);
+}
+
+void edge_e7_callhome_set_hub(edge_e7_callhome_t *ch, edge_ws_hub_t *hub)
+{
+    if (!ch) {
+        return;
+    }
+    ch->hub = hub;
 }
 
 int edge_e7_callhome_enabled(const edge_e7_callhome_t *ch)
@@ -769,6 +1103,13 @@ void edge_e7_callhome_poll(edge_e7_callhome_t *ch, uint64_t mono_ms)
             session_pump(ch, &ch->sessions[i], mono_ms);
         }
     }
+    /* K16: flush dirty set on tick interval ≤100 ms. */
+    if (ch->dirty_used > 0 &&
+        (ch->last_flush_ms == 0 ||
+         mono_ms - ch->last_flush_ms >= EDGE_E7_COALESCE_MS)) {
+        dirty_flush(ch);
+        ch->last_flush_ms = mono_ms;
+    }
 }
 
 void edge_e7_callhome_on_tick(edge_e7_callhome_t *ch, uint64_t mono_ms)
@@ -789,6 +1130,7 @@ void edge_e7_callhome_close_all(edge_e7_callhome_t *ch)
         close(ch->listen_fd);
         ch->listen_fd = -1;
     }
+    dirty_flush(ch);
 }
 
 const edge_e7_callhome_stats_t *edge_e7_callhome_stats(
