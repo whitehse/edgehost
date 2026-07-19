@@ -7,3 +7,14 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+# Linked by scripts/run-status-map.sh from ~/libwebmap/demo (not vendored)
+/spa/map/main.js
+/spa/map/display
+/spa/map/webmap.wasm
+/spa/map/basemap
+/spa/map/fiber_data
+/spa/map/tiles_fiber
+/spa/map/weather
+/spa/map/dynamic
+/spa/map/splice_diagrams
+*.edgehost.log

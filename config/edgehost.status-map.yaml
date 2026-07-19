@@ -1,0 +1,70 @@
+# Status map lab config — company SPA + large static assets from libwebmap demo.
+#
+# Prefer the helper script (links demo data + exports secrets):
+#   ./scripts/run-status-map.sh
+#
+# Manual:
+#   export EDGEHOST_LAB_PASSWORD=lab
+#   export EDGEHOST_SESSION_HMAC='dev-hmac-key-32-bytes-minimum!!'
+#   ./build/edgehost --config config/edgehost.status-map.yaml
+#
+# Then open http://127.0.0.1:18080/  (login → /map/)
+
+listen:
+  host: 127.0.0.1
+  port: 18080
+
+spa:
+  root: ./spa
+  # Basemap / fiber tiles and path_index can exceed 1–20 MiB per file.
+  max_file_bytes: 33554432
+
+packages:
+  root: ./packages
+
+http:
+  max_body_bytes: 1048576
+  max_pending_outbound: 256
+  max_upstream_body_bytes: 4194304
+
+state:
+  namespaces:
+    net_core:
+      enabled: true
+    map_dynamic:
+      enabled: true
+    net_pon:
+      enabled: false
+    net_home:
+      enabled: false
+    electric:
+      enabled: false
+    inventory:
+      enabled: false
+
+auth:
+  mode: lab_password
+  lab_password_env: EDGEHOST_LAB_PASSWORD
+  session_hmac_key_env: EDGEHOST_SESSION_HMAC
+  session_ttl_s: 28800
+
+dns:
+  allow_blocking: true
+
+plugins:
+  openai_proxy:
+    enabled: false
+    upstream: "https://api.openai.com"
+    api_key_env: OPENAI_API_KEY
+    service_api_key_env: EDGEHOST_OPENAI_SERVICE_KEY
+    timeout_ms: 60000
+    rate_limit_rpm: 60
+    max_concurrent_per_principal: 4
+  slack:
+    enabled: false
+  teams:
+    enabled: false
+  pqproxy:
+    enabled: false
+    metrics_url: "http://127.0.0.1:9108/metrics"
+    scrape_interval_ms: 5000

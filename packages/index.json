@@ -13,6 +13,13 @@
       "kind": "file",
       "path": "demo.wmap",
       "note": "single-file smoke asset from P1.6"
+    },
+    {
+      "id": "libwebmap_demo_status_map",
+      "kind": "status_map",
+      "note": "Full rural basemap + fiber served under SPA /map/ via scripts/run-status-map.sh (symlinks to ~/libwebmap/demo). Not duplicated under packages/ yet.",
+      "ui": "/map/",
+      "docs": "docs/guides/status-map.md"
     }
   ]
 }

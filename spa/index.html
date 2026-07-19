@@ -3,77 +3,54 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>edgehost lab console</title>
+  <title>edgehost — status map</title>
   <link rel="stylesheet" href="/app.css"/>
 </head>
-<body>
+<body class="home">
   <header>
-    <h1>edgehost lab</h1>
+    <h1>edgehost</h1>
     <span id="authBadge" class="badge muted">not logged in</span>
   </header>
 
-  <section class="card">
-    <h2>Health</h2>
-    <pre id="healthOut">…</pre>
-    <button type="button" id="btnHealth">Refresh /health</button>
-  </section>
+  <section class="card hero">
+    <h2>Rural network status map</h2>
+    <p class="hint">
+      Sign in with the lab password to open the WebGPU status map
+      (basemap + fiber design, same data path as the libwebmap demo).
+    </p>
 
-  <section class="card">
-    <h2>Lab login</h2>
-    <p class="hint">POST /auth/lab-login → <code>edge_session</code> cookie (ADR-013).</p>
-    <label>Password <input id="labPw" type="password" value="lab" autocomplete="current-password"/></label>
-    <button type="button" id="btnLogin">Login</button>
-    <button type="button" id="btnMe">GET /auth/me</button>
-    <pre id="authOut"></pre>
-  </section>
-
-  <section class="card">
-    <h2>State</h2>
-    <p class="hint">PUT/GET <code>/api/v1/state/{ns}/{key}</code></p>
-    <label>Namespace
-      <select id="stateNs">
-        <option value="net.core">net.core</option>
-        <option value="map.dynamic">map.dynamic</option>
-      </select>
-    </label>
-    <label>Key <input id="stateKey" type="text" value="router/lab-1"/></label>
-    <label>JSON body
-      <textarea id="stateBody" rows="3">{"id":"lab-1","status":"ok","updated_at":"2026-07-18T00:00:00Z"}</textarea>
-    </label>
-    <div class="row">
-      <button type="button" id="btnPut">PUT</button>
-      <button type="button" id="btnGet">GET</button>
-      <button type="button" id="btnList">LIST ns</button>
+    <div id="loginPanel">
+      <label>Password
+        <input id="labPw" type="password" value="lab" autocomplete="current-password"/>
+      </label>
+      <div class="row">
+        <button type="button" id="btnLogin">Log in</button>
+      </div>
+      <pre id="authOut" class="compact"></pre>
     </div>
-    <pre id="stateOut"></pre>
-  </section>
 
-  <section class="card">
-    <h2>WebSocket stream</h2>
-    <p class="hint"><code>/api/v1/stream</code> — fan-out STATE_CHANGED (uses session cookie).</p>
-    <div class="row">
-      <button type="button" id="btnWsConnect">Connect</button>
-      <button type="button" id="btnWsClose">Close</button>
-    </div>
-    <pre id="wsOut" class="log"></pre>
-  </section>
-
-  <section class="card">
-    <h2>Packages</h2>
-    <p class="hint">Static files under <code>/packages/</code> (auth required in lab_password mode).</p>
-    <pre id="pkgOut">…</pre>
-    <div class="row">
-      <button type="button" id="btnPkgIndex">Load /packages/index.json</button>
-      <a id="pkgManifest" href="/packages/fixture_basemap/manifest.json" target="_blank" rel="noopener">fixture manifest</a>
+    <div id="appPanel" class="hidden">
+      <p class="hint">Session active. Open the map or use the lab API console.</p>
+      <div class="row nav-row">
+        <a class="btn primary" href="/map/">Open status map</a>
+        <a class="btn secondary" href="/lab/">Lab console</a>
+        <button type="button" id="btnLogout" class="ghost">Log out (local)</button>
+      </div>
     </div>
   </section>
 
   <section class="card muted">
-    <h2>OpenAI proxy (optional)</h2>
-    <p>Enable <code>plugins.openai_proxy.enabled</code> and set <code>OPENAI_API_KEY</code>.
-       Then <code>POST /v1/chat/completions</code> with the session cookie.</p>
+    <h2>What this serves</h2>
+    <ul class="plain">
+      <li><strong>Login</strong> — <code>POST /auth/lab-login</code> (ADR-013 cookie)</li>
+      <li><strong>Map UI</strong> — <code>/map/</code> (WebGPU host; assets linked from libwebmap demo)</li>
+      <li><strong>Packages</strong> — <code>/packages/</code> (auth-gated catalog + fixtures)</li>
+      <li><strong>State / WS</strong> — <code>/api/v1/state/*</code>, <code>/api/v1/stream</code></li>
+    </ul>
+    <p class="hint">Start with <code>./scripts/run-status-map.sh</code> (links demo tiles, raises file size limits).</p>
   </section>
 
   <script src="/app.js"></script>
+  <script src="/home.js"></script>
 </body>
 </html>

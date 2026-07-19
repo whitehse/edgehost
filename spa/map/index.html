@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>edgehost — status map</title>
+  <!-- Glass UI from libwebmap demo (linked by run-status-map.sh) -->
+  <link rel="stylesheet" href="./display/glass_ui.css" />
+  <link rel="stylesheet" href="/app.css" />
+  <style>
+    /* edgehost chrome over full-viewport map */
+    body.map-page {
+      max-width: none;
+      padding: 0;
+      margin: 0;
+      overflow: hidden;
+      height: 100vh;
+    }
+    .map-topbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.45rem 0.85rem;
+      background: rgba(12, 18, 30, 0.92);
+      border-bottom: 1px solid #2a3548;
+      font-size: 0.9rem;
+    }
+    .map-topbar a { color: #8bb4ff; text-decoration: none; }
+    .map-topbar a:hover { text-decoration: underline; }
+    .map-topbar .title { font-weight: 600; }
+    .map-topbar .meta { color: #8b9bb4; font-size: 0.8rem; }
+    #auth-gate {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0e1218;
+      padding: 1.5rem;
+    }
+    /*
+     * Author `display: flex` overrides the UA [hidden] rule. Force hide
+     * when .hidden or [hidden] so revealMap() actually dismisses the gate.
+     */
+    #auth-gate.hidden,
+    #auth-gate[hidden],
+    .map-topbar.hidden,
+    .map-topbar[hidden],
+    #wrap.hidden,
+    #wrap[hidden] {
+      display: none !important;
+    }
+    #auth-gate .card { max-width: 22rem; width: 100%; }
+    #wrap.glass-shell {
+      /* leave room for edgehost top bar */
+      margin-top: 2.5rem;
+      height: calc(100vh - 2.5rem);
+    }
+    /* Demo header hidden — topbar replaces it */
+    body.map-page > header.glass-header { display: none; }
+
+    .path-list-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.35rem;
+    }
+    .path-clear {
+      font: inherit;
+      color: var(--glass-text, #e8eef7);
+      background: var(--glass-bg-elevated-solid, #1a2740);
+      border: 1px solid var(--glass-border-strong, #2a3548);
+      border-radius: var(--glass-radius-sm, 4px);
+      cursor: pointer;
+      padding: 0.15rem 0.45rem;
+      font-size: 0.75rem;
+    }
+    .path-item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      margin: 0.2rem 0;
+      padding: 0.35rem 0.45rem;
+      font: inherit;
+      color: var(--glass-text, #e8eef7);
+      background: var(--glass-bg-elevated-solid, #1a2740);
+      border: 1px solid var(--glass-border-strong, #2a3548);
+      border-radius: var(--glass-radius-sm, 4px);
+      cursor: pointer;
+    }
+    .path-item.path-sel {
+      border-color: var(--glass-accent, #4c8dff);
+      background: var(--glass-accent-soft, rgba(76, 141, 255, 0.15));
+    }
+    .path-id { color: var(--glass-accent, #4c8dff); font-family: ui-monospace, monospace; }
+    .path-loss { font-family: ui-monospace, monospace; }
+  </style>
+</head>
+<body class="glass-app map-page">
+  <div id="auth-gate">
+    <section class="card">
+      <h2>Sign in required</h2>
+      <p class="hint">Lab session cookie is required before loading the status map.</p>
+      <label>Password
+        <input id="gatePw" type="password" value="lab" autocomplete="current-password"/>
+      </label>
+      <div class="row">
+        <button type="button" id="gateLogin">Log in</button>
+        <a class="btn secondary" href="/">Home</a>
+      </div>
+      <pre id="gateOut" class="compact"></pre>
+    </section>
+  </div>
+
+  <div class="map-topbar hidden" id="mapTopbar" hidden>
+    <div>
+      <span class="title">edgehost status map</span>
+      <span class="meta" id="mapUser"></span>
+    </div>
+    <div class="row" style="margin:0">
+      <a href="/">Home</a>
+      <a href="/lab/">Lab console</a>
+      <a href="/health" target="_blank" rel="noopener">/health</a>
+    </div>
+  </div>
+
+  <!-- libwebmap demo shell (main.js expects these ids) -->
+  <header class="glass-header">
+    <h1>edgehost status map</h1>
+    <p>OSM basemap + fiber design packages via edgehost SPA.</p>
+  </header>
+  <div id="wrap" class="glass-shell sidebar-collapsed hidden" hidden>
+    <div id="map" class="glass-map">
+      <canvas id="c"></canvas>
+      <canvas id="labels"></canvas>
+      <div id="path-list" class="glass-float glass-float--bottom-left" hidden aria-live="polite"></div>
+    </div>
+    <aside id="sidebar" class="glass-sidebar" aria-label="Map details">
+      <button
+        type="button"
+        id="sidebar-toggle"
+        class="glass-sidebar-toggle"
+        aria-expanded="false"
+        aria-controls="sidebar-body"
+        title="Expand sidebar"
+      >Info ›</button>
+      <div id="sidebar-body" class="glass-sidebar-body">
+        <div id="status">Waiting for session…</div>
+        <p><strong>Controls</strong>: drag pan · wheel zoom · hover magnifier · click fiber for path-trace · Esc clears path</p>
+        <p class="glass-muted">Data linked from libwebmap demo by <code>run-status-map.sh</code>. If tiles fail to load, re-run the script from the edgehost repo root.</p>
+        <h3>Dynamic feed</h3>
+        <div id="dynamic-feed-hud" class="glass-hud">—</div>
+        <h3>Memory</h3>
+        <div id="mem-hud" class="glass-hud">—</div>
+        <h3>Log</h3>
+        <div id="log" class="glass-log"></div>
+      </div>
+    </aside>
+  </div>
+
+  <script type="module" src="./map_boot.js"></script>
+</body>
+</html>

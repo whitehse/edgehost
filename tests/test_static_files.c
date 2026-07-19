@@ -34,7 +34,7 @@ static void test_resolve_safe(void)
 
 static void test_load_spa_fixture(void)
 {
-    char buf[4096];
+    char buf[8192];
     size_t n = 0;
     char ctype[64];
 
@@ -47,6 +47,14 @@ static void test_load_spa_fixture(void)
     assert(edge_static_load("spa", "/app.js", buf, sizeof(buf), &n, ctype,
                             sizeof(ctype)) == 0);
     assert(strstr(ctype, "javascript") != NULL);
+
+    /* Directory URL → index.html (status map shell) */
+    assert(edge_static_load("spa", "/map/", buf, sizeof(buf), &n, ctype,
+                            sizeof(ctype)) == 0);
+    assert(n > 0);
+    assert(strstr(buf, "status map") != NULL || strstr(buf, "map_boot") != NULL);
+    assert(strstr(ctype, "text/html") != NULL);
+
     printf("  PASS: load spa fixtures\n");
 }
 

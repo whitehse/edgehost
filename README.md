@@ -18,7 +18,12 @@ cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on
 # full lab E2E (auth + SPA console + packages + state + mobile sync):
 ./scripts/lab-e2e.sh
 # docs: docs/guides/lab-e2e.md
-# browser console: KEEP_RUNNING=1 ./scripts/lab-e2e.sh → http://127.0.0.1:18080/
+# browser lab API console: KEEP_RUNNING=1 ./scripts/lab-e2e.sh → http://127.0.0.1:18080/lab/
+
+# status map (login + WebGPU map, links libwebmap demo assets):
+./scripts/run-status-map.sh
+# docs: docs/guides/status-map.md
+# browser: http://127.0.0.1:18080/  → login → /map/
 
 # lab_password manual:
 #   EDGEHOST_LAB_PASSWORD + EDGEHOST_SESSION_HMAC

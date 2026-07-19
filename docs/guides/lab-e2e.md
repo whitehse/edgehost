@@ -101,7 +101,8 @@ curl -b cookies.txt -H 'Content-Type: application/json' \
 | Path | Role |
 |------|------|
 | `config/edgehost.lab.yaml` | Lab auth + SPA + packages |
-| `spa/` | Lab console (login, state, WS, packages) |
+| `spa/` | Company home + lab console (`/lab/`) + status map shell (`/map/`) |
+| `spa/lab/` | Phase-1 API lab console (login, state, WS, packages) |
 | `packages/fixture_basemap/` | Offline basemap fixture (3 tiles) |
 | `packages/index.json` | Package catalog for SPA |
 | `scripts/lab-e2e.sh` | Automated smoke |

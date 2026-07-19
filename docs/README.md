@@ -16,6 +16,8 @@
 |-------|-------|
 | [state-namespaces.md](guides/state-namespaces.md) | Extra ns config + ingest hooks (P1.14) |
 | [prometheus.md](guides/prometheus.md) | `/health` JSON + scrape notes (P1.15) |
+| [lab-e2e.md](guides/lab-e2e.md) | Lab auth + SPA console + packages E2E |
+| [status-map.md](guides/status-map.md) | Login + WebGPU status map (libwebmap demo) |
 
 ## Decisions
 

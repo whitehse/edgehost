@@ -236,7 +236,9 @@ fi
 
 echo
 echo "ALL LAB E2E CHECKS PASSED"
-echo "  console: ${BASE}/"
+echo "  home:    ${BASE}/"
+echo "  lab:     ${BASE}/lab/"
+echo "  map:     ${BASE}/map/  (use ./scripts/run-status-map.sh for demo tiles)"
 echo "  password: ${PASS}"
 if [[ "$KEEP_RUNNING" == "1" ]]; then
   echo "  edgehost still running (pid $EDGE_PID)"

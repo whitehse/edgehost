@@ -197,9 +197,22 @@ int edge_static_load(const char *root, const char *url_path, void *buf,
                      size_t ctype_sz)
 {
     char fspath[1024];
+    struct stat st;
 
     if (edge_static_resolve(root, url_path, fspath, sizeof(fspath)) != 0) {
         return -1;
+    }
+    /* Directory URL → index.html (e.g. /map/ → spa/map/index.html). */
+    if (stat(fspath, &st) == 0 && S_ISDIR(st.st_mode)) {
+        size_t n = strlen(fspath);
+        if (n + 12 >= sizeof(fspath)) {
+            return -1;
+        }
+        if (fspath[n - 1] != '/') {
+            fspath[n++] = '/';
+            fspath[n] = '\0';
+        }
+        memcpy(fspath + n, "index.html", 11);
     }
     if (edge_static_read_file(fspath, buf, max_bytes, out_len) < 0) {
         return -1;
