@@ -14,6 +14,7 @@
 
 #include "edge_auth.h"
 #include "edge_config.h"
+#include "edge_e7_callhome.h"
 #include "edge_metrics.h"
 #include "edge_plugin_host.h"
 #include "edge_state.h"
@@ -64,6 +65,12 @@ typedef struct {
     edge_plugin_host_t *plugins;
     /** Service API key for Bearer → service_openai (optional). */
     const char *service_api_key;
+    /**
+     * Optional E7 Call Home engine (PR-4a). Not destroyed (caller-owned).
+     * When non-NULL and enabled, second listen fd is accepted via domain demux
+     * (UD_DOMAIN_E7); session I/O is pumped on tick (poll path).
+     */
+    edge_e7_callhome_t *e7;
 } edge_iouring_opts_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o);

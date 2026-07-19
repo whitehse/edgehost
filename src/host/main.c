@@ -6,6 +6,7 @@
 #include "edge_auth_host.h"
 #include "edge_config.h"
 #include "edge_config_hup.h"
+#include "edge_e7_callhome.h"
 #include "edge_iouring.h"
 #include "edge_openai_proxy.h"
 #include "edge_plugin_host.h"
@@ -58,6 +59,7 @@ int main(int argc, char **argv)
     edge_slack_config_t slack_cfg, slack_store;
     edge_teams_config_t teams_cfg, teams_store;
     edge_state_store_t *store = NULL;
+    edge_e7_callhome_t *e7 = NULL;
     char service_key_buf[256];
     const char *service_key = NULL;
     edge_event_t ev;
@@ -165,16 +167,16 @@ int main(int argc, char **argv)
         const edge_config_t *ac = edgecore_config(core);
         int need_ph =
             ac->openai_enabled || ac->slack_enabled || ac->teams_enabled;
-        if (need_ph) {
-            edge_plugin_host_config_t phc;
-            {
-                edge_state_config_t sc =
-                    edge_state_config_from_edge_config(ac);
-                store = edge_state_create_with_config(&sc);
-            }
+        int need_store = need_ph || ac->e7_enabled;
+        if (need_store) {
+            edge_state_config_t sc = edge_state_config_from_edge_config(ac);
+            store = edge_state_create_with_config(&sc);
             if (store) {
                 edge_state_apply_config(store, ac);
             }
+        }
+        if (need_ph) {
+            edge_plugin_host_config_t phc;
             memset(&phc, 0, sizeof(phc));
             phc.max_pending = ac->http_max_pending_outbound;
             phc.state = store;
@@ -264,6 +266,36 @@ int main(int argc, char **argv)
         if (ac->tls_cert[0] && ac->tls_key[0]) {
             fprintf(stderr, "edgehost: TLS server cert=%s\n", ac->tls_cert);
         }
+        if (ac->e7_enabled) {
+            edge_e7_callhome_opts_t eopts;
+            memset(&eopts, 0, sizeof(eopts));
+            eopts.cfg = ac;
+            eopts.state = store;
+            eopts.hub = NULL; /* PR-4b: wire hub for coalesced notify */
+            e7 = edge_e7_callhome_create(&eopts);
+            if (!e7) {
+#if EDGEHOST_HAVE_LIBNETCONF
+                fprintf(stderr,
+                        "edgehost: e7_callhome create failed "
+                        "(check max_sessions/rss_budget)\n");
+                if (ph) {
+                    edge_plugin_host_destroy(ph);
+                }
+                edge_state_destroy(store);
+                edgecore_destroy(core);
+                return 1;
+#else
+                fprintf(stderr,
+                        "edgehost: e7_callhome enabled but libnetconf not "
+                        "linked; Call Home listen skipped\n");
+#endif
+            } else {
+                fprintf(stderr,
+                        "edgehost: e7_callhome enabled transport=%s port=%u\n",
+                        ac->e7_transport[0] ? ac->e7_transport : "raw",
+                        (unsigned)ac->e7_listen_port);
+            }
+        }
     }
 
     edge_iouring_opts_defaults(&iopts);
@@ -271,6 +303,7 @@ int main(int argc, char **argv)
     iopts.auth = &auth;
     iopts.plugins = ph;
     iopts.service_api_key = service_key;
+    iopts.e7 = e7;
     if (store) {
         iopts.state = store;
     }
@@ -283,6 +316,9 @@ int main(int argc, char **argv)
     (void)edgehost_hup_take();
 
     rc = edge_iouring_run(edgecore_config(core), &iopts);
+    if (e7) {
+        edge_e7_callhome_destroy(e7);
+    }
     if (ph) {
         edge_plugin_host_destroy(ph);
     }

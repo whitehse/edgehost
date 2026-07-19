@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <liburing.h>
@@ -31,11 +32,21 @@
 #include "websocket.h"
 #include "protocol_events.h"
 
+/* Domain demux in user_data high byte (design pack_ud3). HTTP domain 0 keeps
+ * legacy user_data layout for op values < 2^24. */
+#define UD_DOMAIN_HTTP 0u
+#define UD_DOMAIN_E7   1u
+
 enum {
     OP_ACCEPT = 1,
     OP_RECV   = 2,
     OP_SEND   = 3,
     OP_POLL   = 4
+};
+
+enum {
+    E7_OP_ACCEPT = 1
+    /* Session RECV/SEND remain on tick poll in PR-4a; full CQE demux later. */
 };
 
 typedef enum {
@@ -89,6 +100,11 @@ typedef struct {
     SSL_CTX                   *tls_ctx; /* NULL => plain TCP */
     edge_pq_sidecar_config_t   pq_cfg;
     uint64_t                   last_scrape_ms;
+    edge_e7_callhome_t        *e7; /* optional; not owned */
+    int                        e7_accept_pending;
+    struct sockaddr_storage    e7_client_addr;
+    socklen_t                  e7_client_addr_len;
+    uint64_t                   mono_ms;
 } server_t;
 
 static int promote_to_ws(server_t *srv, conn_t *c);
@@ -115,17 +131,36 @@ void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
     o->auth = NULL;
     o->plugins = NULL;
     o->service_api_key = NULL;
+    o->e7 = NULL;
 }
 
+static uint64_t pack_ud3(uint8_t domain, uint32_t op, uint32_t slot)
+{
+    return ((uint64_t)domain << 56) | ((uint64_t)(op & 0xffffffu) << 32) |
+           (uint64_t)slot;
+}
+
+static void unpack_ud3(uint64_t ud, uint8_t *domain, uint32_t *op,
+                       uint32_t *slot)
+{
+    *domain = (uint8_t)(ud >> 56);
+    *op = (uint32_t)((ud >> 32) & 0xffffffu);
+    *slot = (uint32_t)(ud & 0xffffffffu);
+}
+
+/* HTTP-domain convenience (domain 0). */
 static uint64_t pack_ud(int op, int slot)
 {
-    return ((uint64_t)(uint32_t)op << 32) | (uint32_t)slot;
+    return pack_ud3(UD_DOMAIN_HTTP, (uint32_t)op, (uint32_t)slot);
 }
 
-static void unpack_ud(uint64_t ud, int *op, int *slot)
+static uint64_t mono_now_ms(void)
 {
-    *op = (int)(ud >> 32);
-    *slot = (int)(ud & 0xffffffffu);
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
 static int set_nonblock(int fd)
@@ -274,8 +309,32 @@ static int submit_accept(server_t *srv)
     io_uring_prep_accept(sqe, srv->listen_fd,
                          (struct sockaddr *)&srv->client_addr,
                          &srv->client_addr_len, SOCK_CLOEXEC);
-    io_uring_sqe_set_data64(sqe, pack_ud(OP_ACCEPT, 0));
+    io_uring_sqe_set_data64(sqe, pack_ud3(UD_DOMAIN_HTTP, OP_ACCEPT, 0));
     srv->accept_pending = 1;
+    return 0;
+}
+
+static int submit_e7_accept(server_t *srv)
+{
+    struct io_uring_sqe *sqe;
+    int e7_fd;
+
+    if (!srv->e7 || srv->e7_accept_pending) {
+        return 0;
+    }
+    e7_fd = edge_e7_callhome_listen_fd(srv->e7);
+    if (e7_fd < 0) {
+        return 0;
+    }
+    sqe = io_uring_get_sqe(&srv->ring);
+    if (!sqe) {
+        return -1;
+    }
+    srv->e7_client_addr_len = sizeof(srv->e7_client_addr);
+    io_uring_prep_accept(sqe, e7_fd, (struct sockaddr *)&srv->e7_client_addr,
+                         &srv->e7_client_addr_len, SOCK_CLOEXEC);
+    io_uring_sqe_set_data64(sqe, pack_ud3(UD_DOMAIN_E7, E7_OP_ACCEPT, 0));
+    srv->e7_accept_pending = 1;
     return 0;
 }
 
@@ -771,6 +830,9 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     srv.auth = opts->auth;
     srv.plugins = opts->plugins;
     srv.service_api_key = opts->service_api_key;
+    srv.e7 = opts->e7;
+    srv.e7_accept_pending = 0;
+    srv.mono_ms = mono_now_ms();
     if (edge_tls_config_enabled(cfg->tls_cert, cfg->tls_key)) {
         edge_tls_config_t tc;
         memset(&tc, 0, sizeof(tc));
@@ -852,6 +914,24 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         }
     }
 
+    /* Optional E7 Call Home second listen (bind if not already). */
+    if (srv.e7 && edge_e7_callhome_enabled(srv.e7)) {
+        if (edge_e7_callhome_listen_fd(srv.e7) < 0) {
+            if (edge_e7_callhome_bind(srv.e7) != 0) {
+                fprintf(stderr, "edgehost: e7_callhome bind failed\n");
+                io_uring_queue_exit(&srv.ring);
+                close(srv.listen_fd);
+                free(srv.conns);
+                edge_ws_hub_destroy(srv.hub);
+                edge_tls_ctx_free(srv.tls_ctx);
+                if (srv.store_owned && srv.store) {
+                    edge_state_destroy(srv.store);
+                }
+                return 1;
+            }
+        }
+    }
+
     if (submit_accept(&srv) != 0) {
         io_uring_queue_exit(&srv.ring);
         close(srv.listen_fd);
@@ -862,6 +942,20 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             edge_state_destroy(srv.store);
         }
         return 1;
+    }
+    if (srv.e7 && edge_e7_callhome_listen_fd(srv.e7) >= 0) {
+        if (submit_e7_accept(&srv) != 0) {
+            fprintf(stderr, "edgehost: e7 accept submit failed\n");
+            io_uring_queue_exit(&srv.ring);
+            close(srv.listen_fd);
+            free(srv.conns);
+            edge_ws_hub_destroy(srv.hub);
+            edge_tls_ctx_free(srv.tls_ctx);
+            if (srv.store_owned && srv.store) {
+                edge_state_destroy(srv.store);
+            }
+            return 1;
+        }
     }
     io_uring_submit(&srv.ring);
 
@@ -876,18 +970,25 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     while (!should_stop(&srv)) {
         struct io_uring_cqe *cqe = NULL;
         struct __kernel_timespec ts;
+        uint8_t domain;
+        uint32_t uop, uslot;
         int op, slot;
         int res;
 
         ts.tv_sec = 0;
         ts.tv_nsec = 200 * 1000 * 1000L;
         rc = io_uring_wait_cqe_timeout(&srv.ring, &cqe, &ts);
+        srv.mono_ms = mono_now_ms();
         if (rc == -ETIME || rc == -EAGAIN) {
             if (should_stop(&srv)) {
                 break;
             }
             /* opportunistic fan-out flush */
             ws_flush_all_pending(&srv);
+            /* PR-4a: E7 session pump (identity + CLIENT hello I/O) */
+            if (srv.e7) {
+                edge_e7_callhome_on_tick(srv.e7, srv.mono_ms);
+            }
             /* P1.11: periodic pqproxy metrics scrape */
             if (srv.pq_cfg.enabled && srv.store) {
                 static uint64_t tick;
@@ -900,6 +1001,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
                     ws_flush_all_pending(&srv);
                 }
             }
+            (void)submit_e7_accept(&srv);
             io_uring_submit(&srv.ring);
             continue;
         }
@@ -913,8 +1015,31 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         }
 
         res = cqe->res;
-        unpack_ud(cqe->user_data, &op, &slot);
+        unpack_ud3(cqe->user_data, &domain, &uop, &uslot);
+        op = (int)uop;
+        slot = (int)uslot;
         io_uring_cqe_seen(&srv.ring, cqe);
+
+        if (domain == UD_DOMAIN_E7) {
+            if (op == E7_OP_ACCEPT) {
+                srv.e7_accept_pending = 0;
+                if (res >= 0 && srv.e7) {
+                    (void)edge_e7_callhome_on_accept(
+                        srv.e7, res,
+                        (struct sockaddr *)&srv.e7_client_addr,
+                        srv.e7_client_addr_len);
+                    edge_e7_callhome_on_tick(srv.e7, srv.mono_ms);
+                } else if (res < 0 && res != -EAGAIN && res != -ECONNABORTED &&
+                           res != -EINTR) {
+                    fprintf(stderr, "edgehost: e7 accept: %s\n",
+                            strerror(-res));
+                }
+                (void)submit_e7_accept(&srv);
+            }
+            /* TODO PR-4+: full E7 RECV/SEND CQE demux; tick poll for now */
+            io_uring_submit(&srv.ring);
+            continue;
+        }
 
         if (op == OP_ACCEPT) {
             srv.accept_pending = 0;
@@ -988,11 +1113,19 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             }
         }
 
+        if (srv.e7) {
+            edge_e7_callhome_on_tick(srv.e7, srv.mono_ms);
+            (void)submit_e7_accept(&srv);
+        }
         io_uring_submit(&srv.ring);
     }
 
     for (i = 0; i < srv.max_conns; i++) {
         close_conn(&srv, &srv.conns[i]);
+    }
+    if (srv.e7) {
+        /* Leave sessions; caller owns destroy. Close listen only if we bound. */
+        edge_e7_callhome_close_all(srv.e7);
     }
     io_uring_queue_exit(&srv.ring);
     close(srv.listen_fd);

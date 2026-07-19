@@ -320,7 +320,8 @@ static void test_load_e7_lab_path(void)
         return;
     }
     assert(edge_config_load_yaml_path(path, &cfg, err, sizeof(err)) == 0);
-    assert(cfg.e7_enabled == 0);
+    /* PR-4a: lab YAML enables Call Home listen */
+    assert(cfg.e7_enabled == 1);
     assert(cfg.e7_listen_port == 4334);
     assert(cfg.e7_shelf_count >= 1);
     assert(cfg.e7_shelves[0].mac[0] != '\0');

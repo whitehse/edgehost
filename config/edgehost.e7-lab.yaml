@@ -1,12 +1,12 @@
-# Lab E7 Call Home config skeleton (PR-2).
-# enabled may be true for future PR-4 listen; PR-2 only parses/validates.
+# Lab E7 Call Home config (PR-4a: listen + identity + CLIENT hello).
 # Raw transport on loopback:4334 — no lab_insecure_raw required.
 #
 #   export EDGEHOST_LAB_PASSWORD=lab
 #   export EDGEHOST_SESSION_HMAC='dev-hmac-key-32-bytes-minimum!!'
 #   ./build/edgehost --config config/edgehost.e7-lab.yaml --host 127.0.0.1 --port 18080
 #
-# NOTE: Call Home TCP listen / libnetconf session pump is NOT implemented yet.
+# Call Home: identity preamble → NETCONF CLIENT hello → SESSION_OPEN.
+# Subscription + lab.v1 apply + WS coalesce land in PR-4b.
 
 listen:
   host: 127.0.0.1
@@ -63,7 +63,7 @@ plugins:
   pqproxy:
     enabled: false
   e7_callhome:
-    enabled: false              # set true once PR-4 listen lands
+    enabled: true
     listen_host: 127.0.0.1
     listen_port: 4334
     transport: raw

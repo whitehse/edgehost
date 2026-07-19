@@ -124,13 +124,29 @@ target_include_directories(edgehost_alloc PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# --- Host: E7 lab.v1 event apply (pure helpers; no TCP) ---
-add_library(edgehost_e7 STATIC src/host/e7_event_apply.c)
+# --- Host: E7 event apply + Call Home listen/pump (PR-3 / PR-4a) ---
+add_library(edgehost_e7 STATIC
+  src/host/e7_event_apply.c
+  src/host/e7_callhome.c
+)
 target_include_directories(edgehost_e7 PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(edgehost_e7 PUBLIC edgecore)
+if(Libnetconf_FOUND)
+  target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_HAVE_LIBNETCONF=1)
+  if(TARGET Libnetconf::netconf)
+    target_link_libraries(edgehost_e7 PUBLIC Libnetconf::netconf)
+  elseif(LIBNETCONF_LIBRARY)
+    target_link_libraries(edgehost_e7 PUBLIC ${LIBNETCONF_LIBRARY})
+  endif()
+  if(TARGET Libnetconf::headers)
+    target_link_libraries(edgehost_e7 PUBLIC Libnetconf::headers)
+  endif()
+else()
+  target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_HAVE_LIBNETCONF=0)
+endif()
 
 
 # --- Host: YAML config + auth secret resolve ---
@@ -187,7 +203,7 @@ target_include_directories(edgehost_iouring PUBLIC
 )
 target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
 target_link_libraries(edgehost_iouring PUBLIC
-  edgecore edgehost_http edgehost_tls ${LIBURING_LIBRARY})
+  edgecore edgehost_http edgehost_tls edgehost_e7 ${LIBURING_LIBRARY})
 
 # --- Host: class-A sim_main ---
 if(Libsim_FOUND AND LIBSIM_LIBRARY)
@@ -215,7 +231,7 @@ endif()
 # edgehost binary
 add_executable(edgehost src/host/main.c)
 target_link_libraries(edgehost PRIVATE
-  edgecore edgehost_config edgehost_iouring edgehost_plugins)
+  edgecore edgehost_config edgehost_iouring edgehost_plugins edgehost_e7)
 
 # Sibling header smoke
 add_library(edgehost_deps INTERFACE)
@@ -300,6 +316,20 @@ target_link_libraries(edgehost_sidecar_test PRIVATE
 add_executable(edgehost_e7_event_apply_test tests/test_e7_event_apply.c)
 target_link_libraries(edgehost_e7_event_apply_test PRIVATE edgehost_e7)
 
+add_executable(edgehost_e7_callhome_test tests/test_e7_callhome.c)
+target_link_libraries(edgehost_e7_callhome_test PRIVATE edgehost_e7 pthread)
+if(Libnetconf_FOUND)
+  # Dialectic peer uses CALLHOME_SERVER role from libnetconf
+  if(TARGET Libnetconf::netconf)
+    target_link_libraries(edgehost_e7_callhome_test PRIVATE Libnetconf::netconf)
+  elseif(LIBNETCONF_LIBRARY)
+    target_link_libraries(edgehost_e7_callhome_test PRIVATE ${LIBNETCONF_LIBRARY})
+  endif()
+  if(TARGET Libnetconf::headers)
+    target_link_libraries(edgehost_e7_callhome_test PRIVATE Libnetconf::headers)
+  endif()
+endif()
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -318,6 +348,8 @@ add_test(NAME edgehost_plugin_stubs COMMAND edgehost_stubs_test)
 add_test(NAME edgehost_tls_server COMMAND edgehost_tls_test)
 add_test(NAME edgehost_sidecar_notify COMMAND edgehost_sidecar_test)
 add_test(NAME edgehost_e7_event_apply COMMAND edgehost_e7_event_apply_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME edgehost_e7_callhome COMMAND edgehost_e7_callhome_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 
