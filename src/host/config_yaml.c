@@ -164,6 +164,21 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->http_max_upstream_body_bytes = sz;
         return 0;
     }
+    if (strcmp(key, "state.max_keys_default") == 0 ||
+        strcmp(key, "state.max_keys_per_ns") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_max_keys_default = sz;
+        return 0;
+    }
+    if (strcmp(key, "state.max_value_bytes") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_max_value_bytes = sz;
+        return 0;
+    }
     if (strcmp(key, "state.namespaces.net_core.enabled") == 0 ||
         strcmp(key, "state.net_core.enabled") == 0 ||
         strcmp(key, "state.enable_net_core") == 0) {
@@ -212,6 +227,48 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
             FAIL("invalid bool");
         }
         c->state_inventory_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.net_core.max_keys") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_net_core_max_keys = sz;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.map_dynamic.max_keys") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_map_dynamic_max_keys = sz;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.net_pon.max_keys") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_net_pon_max_keys = sz;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.net_home.max_keys") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_net_home_max_keys = sz;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.electric.max_keys") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_electric_max_keys = sz;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.inventory.max_keys") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->state_inventory_max_keys = sz;
         return 0;
     }
     if (strcmp(key, "auth.mode") == 0) {
@@ -492,12 +549,21 @@ static const char *const g_paths[] = {
     "http.max_body_bytes",
     "http.max_pending_outbound",
     "http.max_upstream_body_bytes",
+    "state.max_keys_default",
+    "state.max_keys_per_ns",
+    "state.max_value_bytes",
     "state.namespaces.net_core.enabled",
     "state.namespaces.map_dynamic.enabled",
     "state.namespaces.net_pon.enabled",
     "state.namespaces.net_home.enabled",
     "state.namespaces.electric.enabled",
     "state.namespaces.inventory.enabled",
+    "state.namespaces.net_core.max_keys",
+    "state.namespaces.map_dynamic.max_keys",
+    "state.namespaces.net_pon.max_keys",
+    "state.namespaces.net_home.max_keys",
+    "state.namespaces.electric.max_keys",
+    "state.namespaces.inventory.max_keys",
     "state.net_core.enabled",
     "state.map_dynamic.enabled",
     "state.net_pon.enabled",

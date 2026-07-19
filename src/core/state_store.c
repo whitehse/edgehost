@@ -1,6 +1,10 @@
 /**
  * @file state_store.c
- * @brief Multi-namespace key/value store (P1.7a). Create-time alloc only.
+ * @brief Multi-namespace key/value store (P1.7a / K10).
+ *
+ * Create/enable-time alloc only: value buffers are calloc'd when a namespace
+ * table is allocated (enable or create for default-enabled ns). Put path never
+ * mallocs value buffers (ADR-007). Disabled namespaces are name stubs only.
  */
 
 #include "edge_state.h"
@@ -21,15 +25,16 @@ typedef struct {
     char name[64];
     int  enabled;
     int  registered;
-    edge_state_entry_t *entries;
-    size_t capacity;
+    edge_state_entry_t *entries; /* NULL until enable/create allocates */
+    size_t max_keys;             /* configured cap (0 → store default) */
+    size_t capacity;             /* allocated slots; 0 if entries == NULL */
     size_t count;
 } edge_state_ns_t;
 
 struct edge_state_store {
     edge_state_ns_t ns[EDGE_STATE_NS_MAX];
     size_t          n_ns;
-    size_t          max_keys;
+    size_t          max_keys;  /* store-wide default */
     size_t          max_value;
 };
 
@@ -38,6 +43,24 @@ edge_state_config_t edge_state_default_config(void)
     edge_state_config_t c;
     c.max_keys_per_ns = EDGE_STATE_KEYS_DEFAULT;
     c.max_value_bytes = EDGE_STATE_VALUE_DEFAULT;
+    return c;
+}
+
+edge_state_config_t edge_state_config_from_edge_config(const edge_config_t *cfg)
+{
+    edge_state_config_t c = edge_state_default_config();
+    if (!cfg) {
+        return c;
+    }
+    if (cfg->state_max_keys_default > 0) {
+        c.max_keys_per_ns = cfg->state_max_keys_default;
+    }
+    if (cfg->state_max_value_bytes > 0) {
+        c.max_value_bytes = cfg->state_max_value_bytes;
+        if (c.max_value_bytes > EDGE_STATE_VALUE_MAX) {
+            c.max_value_bytes = EDGE_STATE_VALUE_MAX;
+        }
+    }
     return c;
 }
 
@@ -120,33 +143,56 @@ static edge_state_ns_t *find_ns_const(const edge_state_store_t *st, const char *
     return find_ns((edge_state_store_t *)st, ns);
 }
 
-static int register_ns(edge_state_store_t *st, const char *name, int enabled)
+static size_t resolve_max_keys(const edge_state_store_t *st, size_t max_keys)
 {
-    edge_state_ns_t *n;
-    size_t i;
+    if (max_keys > 0) {
+        return max_keys;
+    }
+    return st->max_keys > 0 ? st->max_keys : EDGE_STATE_KEYS_DEFAULT;
+}
 
-    if (!st || !name || !name[0] || strlen(name) >= 64) {
+/** Free entry table; keep max_keys for re-enable. */
+static void ns_free_table(edge_state_ns_t *n)
+{
+    size_t j;
+    if (!n || !n->entries) {
+        return;
+    }
+    for (j = 0; j < n->capacity; j++) {
+        free(n->entries[j].value);
+        n->entries[j].value = NULL;
+    }
+    free(n->entries);
+    n->entries = NULL;
+    n->capacity = 0;
+    n->count = 0;
+}
+
+/**
+ * Eager-allocate entry array + value buffers (enable/create-time only).
+ * Uses n->max_keys (0 → store default). No-op if already allocated at same size.
+ */
+static int ns_alloc_table(edge_state_store_t *st, edge_state_ns_t *n)
+{
+    size_t i;
+    size_t cap;
+
+    if (!st || !n) {
         return -1;
     }
-    n = find_ns(st, name);
-    if (n) {
-        n->enabled = enabled ? 1 : 0;
+    cap = resolve_max_keys(st, n->max_keys);
+    if (n->entries && n->capacity == cap) {
         return 0;
     }
-    if (st->n_ns >= EDGE_STATE_NS_MAX) {
-        return -1;
+    if (n->entries) {
+        ns_free_table(n);
     }
-    n = &st->ns[st->n_ns];
-    memset(n, 0, sizeof(*n));
-    snprintf(n->name, sizeof(n->name), "%s", name);
-    n->enabled = enabled ? 1 : 0;
-    n->registered = 1;
-    n->capacity = st->max_keys;
-    n->entries = (edge_state_entry_t *)calloc(n->capacity, sizeof(*n->entries));
+    n->entries = (edge_state_entry_t *)calloc(cap, sizeof(*n->entries));
     if (!n->entries) {
+        n->capacity = 0;
         return -1;
     }
-    for (i = 0; i < n->capacity; i++) {
+    for (i = 0; i < cap; i++) {
         n->entries[i].value = (char *)calloc(1, st->max_value + 1);
         if (!n->entries[i].value) {
             size_t j;
@@ -155,8 +201,54 @@ static int register_ns(edge_state_store_t *st, const char *name, int enabled)
             }
             free(n->entries);
             n->entries = NULL;
+            n->capacity = 0;
             return -1;
         }
+    }
+    n->capacity = cap;
+    n->count = 0;
+    return 0;
+}
+
+static int register_ns(edge_state_store_t *st, const char *name, int enabled,
+                       size_t max_keys)
+{
+    edge_state_ns_t *n;
+
+    if (!st || !name || !name[0] || strlen(name) >= 64) {
+        return -1;
+    }
+    n = find_ns(st, name);
+    if (n) {
+        n->max_keys = max_keys;
+        if (enabled) {
+            if (ns_alloc_table(st, n) != 0) {
+                return -1;
+            }
+            n->enabled = 1;
+        } else {
+            n->enabled = 0;
+            ns_free_table(n);
+        }
+        return 0;
+    }
+    if (st->n_ns >= EDGE_STATE_NS_MAX) {
+        return -1;
+    }
+    n = &st->ns[st->n_ns];
+    memset(n, 0, sizeof(*n));
+    snprintf(n->name, sizeof(n->name), "%s", name);
+    n->registered = 1;
+    n->max_keys = max_keys;
+    n->entries = NULL;
+    n->capacity = 0;
+    n->count = 0;
+    n->enabled = 0;
+    if (enabled) {
+        if (ns_alloc_table(st, n) != 0) {
+            return -1;
+        }
+        n->enabled = 1;
     }
     st->n_ns++;
     return 0;
@@ -193,45 +285,84 @@ edge_state_store_t *edge_state_create_with_config(const edge_state_config_t *cfg
     st->max_keys = c.max_keys_per_ns;
     st->max_value = c.max_value_bytes;
 
-    /* v1 fully enabled namespaces */
-    if (register_ns(st, "net.core", 1) != 0 ||
-        register_ns(st, "map.dynamic", 1) != 0) {
+    /* v1 fully enabled namespaces — allocate tables now */
+    if (register_ns(st, "net.core", 1, 0) != 0 ||
+        register_ns(st, "map.dynamic", 1, 0) != 0) {
         edge_state_destroy(st);
         return NULL;
     }
-    /* Registered disabled hooks */
-    (void)register_ns(st, "net.pon", 0);
-    (void)register_ns(st, "net.home", 0);
-    (void)register_ns(st, "electric", 0);
-    (void)register_ns(st, "inventory", 0);
+    /* Registered disabled hooks — name stubs only, no entry tables (K10) */
+    if (register_ns(st, "net.pon", 0, 0) != 0 ||
+        register_ns(st, "net.home", 0, 0) != 0 ||
+        register_ns(st, "electric", 0, 0) != 0 ||
+        register_ns(st, "inventory", 0, 0) != 0) {
+        edge_state_destroy(st);
+        return NULL;
+    }
 
     return st;
 }
 
 void edge_state_destroy(edge_state_store_t *st)
 {
-    size_t i, j;
+    size_t i;
     if (!st) {
         return;
     }
     for (i = 0; i < st->n_ns; i++) {
-        if (st->ns[i].entries) {
-            for (j = 0; j < st->ns[i].capacity; j++) {
-                free(st->ns[i].entries[j].value);
-            }
-            free(st->ns[i].entries);
-        }
+        ns_free_table(&st->ns[i]);
     }
     free(st);
+}
+
+int edge_state_ns_set_capacity(edge_state_store_t *st, const char *ns,
+                               size_t max_keys)
+{
+    edge_state_ns_t *n;
+    size_t cap;
+
+    if (!st || !ns || !ns[0] || strlen(ns) >= 64) {
+        return -1;
+    }
+    cap = max_keys; /* 0 means "use store default" when allocating */
+    n = find_ns(st, ns);
+    if (!n) {
+        return register_ns(st, ns, 0, cap);
+    }
+    if (n->max_keys == cap && n->entries &&
+        n->capacity == resolve_max_keys(st, cap)) {
+        return 0;
+    }
+    n->max_keys = cap;
+    if (n->entries) {
+        int was_enabled = n->enabled;
+        ns_free_table(n);
+        if (was_enabled) {
+            if (ns_alloc_table(st, n) != 0) {
+                n->enabled = 0;
+                return -1;
+            }
+        }
+    }
+    return 0;
 }
 
 int edge_state_ns_set_enabled(edge_state_store_t *st, const char *ns, int enabled)
 {
     edge_state_ns_t *n = find_ns(st, ns);
     if (!n) {
-        return register_ns(st, ns, enabled);
+        return register_ns(st, ns, enabled, 0);
     }
-    n->enabled = enabled ? 1 : 0;
+    if (enabled) {
+        if (ns_alloc_table(st, n) != 0) {
+            return -1;
+        }
+        n->enabled = 1;
+    } else {
+        n->enabled = 0;
+        /* Free on disable to reclaim RSS (PR-2a / K10). */
+        ns_free_table(n);
+    }
     return 0;
 }
 
@@ -241,11 +372,44 @@ int edge_state_ns_enabled(const edge_state_store_t *st, const char *ns)
     return n && n->enabled;
 }
 
+size_t edge_state_ns_max_keys(const edge_state_store_t *st, const char *ns)
+{
+    const edge_state_ns_t *n = find_ns_const(st, ns);
+    if (!st) {
+        return 0;
+    }
+    if (!n) {
+        return st->max_keys;
+    }
+    return resolve_max_keys(st, n->max_keys);
+}
+
+size_t edge_state_ns_capacity(const edge_state_store_t *st, const char *ns)
+{
+    const edge_state_ns_t *n = find_ns_const(st, ns);
+    if (!n || !n->entries) {
+        return 0;
+    }
+    return n->capacity;
+}
+
 void edge_state_apply_config(edge_state_store_t *st, const edge_config_t *cfg)
 {
     if (!st || !cfg) {
         return;
     }
+    /* Capacities first so enable-time alloc uses configured sizes (K10). */
+    (void)edge_state_ns_set_capacity(st, "net.core", cfg->state_net_core_max_keys);
+    (void)edge_state_ns_set_capacity(st, "map.dynamic",
+                                     cfg->state_map_dynamic_max_keys);
+    (void)edge_state_ns_set_capacity(st, "net.pon", cfg->state_net_pon_max_keys);
+    (void)edge_state_ns_set_capacity(st, "net.home",
+                                     cfg->state_net_home_max_keys);
+    (void)edge_state_ns_set_capacity(st, "electric",
+                                     cfg->state_electric_max_keys);
+    (void)edge_state_ns_set_capacity(st, "inventory",
+                                     cfg->state_inventory_max_keys);
+
     (void)edge_state_ns_set_enabled(st, "net.core", cfg->state_net_core_enabled);
     (void)edge_state_ns_set_enabled(st, "map.dynamic",
                                     cfg->state_map_dynamic_enabled);
@@ -259,6 +423,9 @@ void edge_state_apply_config(edge_state_store_t *st, const edge_config_t *cfg)
 static edge_state_entry_t *find_entry(edge_state_ns_t *n, const char *key)
 {
     size_t i;
+    if (!n || !n->entries) {
+        return NULL;
+    }
     for (i = 0; i < n->capacity; i++) {
         if (n->entries[i].used && strcmp(n->entries[i].key, key) == 0) {
             return &n->entries[i];
@@ -270,6 +437,9 @@ static edge_state_entry_t *find_entry(edge_state_ns_t *n, const char *key)
 static edge_state_entry_t *find_free(edge_state_ns_t *n)
 {
     size_t i;
+    if (!n || !n->entries) {
+        return NULL;
+    }
     for (i = 0; i < n->capacity; i++) {
         if (!n->entries[i].used) {
             return &n->entries[i];
@@ -295,6 +465,10 @@ edge_state_err_t edge_state_put(edge_state_store_t *st, const char *ns,
     if (!n->enabled) {
         return EDGE_STATE_NS_DISABLED;
     }
+    if (!n->entries) {
+        /* Enabled without table should not happen; treat as OOM, not malloc. */
+        return EDGE_STATE_NOMEM;
+    }
     if (!edge_state_key_valid(key)) {
         return EDGE_STATE_BAD_KEY;
     }
@@ -315,6 +489,7 @@ edge_state_err_t edge_state_put(edge_state_store_t *st, const char *ns,
         e->used = 1;
         n->count++;
     }
+    /* Pre-allocated value buffer — no put-path malloc (ADR-007). */
     memcpy(e->value, value, value_len);
     e->value[value_len] = '\0';
     e->value_len = value_len;
@@ -340,6 +515,9 @@ edge_state_err_t edge_state_get(const edge_state_store_t *st, const char *ns,
     }
     if (!edge_state_key_valid(key)) {
         return EDGE_STATE_BAD_KEY;
+    }
+    if (!n->entries) {
+        return EDGE_STATE_NOT_FOUND;
     }
     for (i = 0; i < n->capacity; i++) {
         if (n->entries[i].used && strcmp(n->entries[i].key, key) == 0) {
@@ -403,6 +581,9 @@ int edge_state_list(const edge_state_store_t *st, const char *ns,
     n = find_ns_const(st, ns);
     if (!n || !n->enabled) {
         return -1;
+    }
+    if (!n->entries) {
+        return 0;
     }
     if (prefix) {
         plen = strlen(prefix);

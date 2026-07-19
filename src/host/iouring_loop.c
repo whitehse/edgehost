@@ -750,7 +750,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         srv.store = opts->state;
         srv.store_owned = 0;
     } else {
-        edge_state_config_t sc = edge_state_default_config();
+        edge_state_config_t sc = edge_state_config_from_edge_config(cfg);
         srv.store = edge_state_create_with_config(&sc);
         srv.store_owned = 1;
     }

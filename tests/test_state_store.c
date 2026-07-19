@@ -1,5 +1,5 @@
 /**
- * P1.7a: state store unit + REST via edge_http1_serve.
+ * P1.7a / K10 PR-2a: state store unit + REST via edge_http1_serve.
  */
 #include "edge_http1_serve.h"
 #include "edge_metrics.h"
@@ -197,6 +197,177 @@ static void test_apply_config_enable_hooks(void)
     printf("  PASS: apply_config enable hooks + ext.*\n");
 }
 
+/** K10: disabled ns has no entry table (capacity 0 / stub only). */
+static void test_disabled_ns_no_table(void)
+{
+    edge_state_store_t *st = edge_state_create();
+
+    assert(st);
+    assert(!edge_state_ns_enabled(st, "net.pon"));
+    assert(edge_state_ns_capacity(st, "net.pon") == 0);
+    assert(edge_state_ns_capacity(st, "net.home") == 0);
+    assert(edge_state_ns_capacity(st, "electric") == 0);
+    assert(edge_state_ns_capacity(st, "inventory") == 0);
+    /* Default-enabled ns have tables */
+    assert(edge_state_ns_capacity(st, "net.core") == EDGE_STATE_KEYS_DEFAULT);
+    assert(edge_state_ns_capacity(st, "map.dynamic") == EDGE_STATE_KEYS_DEFAULT);
+
+    edge_state_destroy(st);
+    printf("  PASS: disabled ns no entry table\n");
+}
+
+/** K10: enable with max_keys=100 → 100 puts ok, 101st NS_FULL. */
+static void test_per_ns_capacity_full(void)
+{
+    edge_state_store_t *st = edge_state_create();
+    edge_state_err_t e;
+    char key[64];
+    int i;
+
+    assert(st);
+    assert(edge_state_ns_set_capacity(st, "net.pon", 100) == 0);
+    assert(edge_state_ns_set_enabled(st, "net.pon", 1) == 0);
+    assert(edge_state_ns_enabled(st, "net.pon"));
+    assert(edge_state_ns_capacity(st, "net.pon") == 100);
+    assert(edge_state_ns_max_keys(st, "net.pon") == 100);
+
+    for (i = 0; i < 100; i++) {
+        snprintf(key, sizeof(key), "k/%d", i);
+        e = edge_state_put(st, "net.pon", key, "{}", 2);
+        assert(e == EDGE_STATE_OK);
+    }
+    e = edge_state_put(st, "net.pon", "k/overflow", "{}", 2);
+    assert(e == EDGE_STATE_NS_FULL);
+    assert(edge_state_count(st, "net.pon") == 100);
+
+    edge_state_destroy(st);
+    printf("  PASS: per-ns capacity full at max_keys\n");
+}
+
+/** K10: different namespaces may have different capacities. */
+static void test_different_ns_capacities(void)
+{
+    edge_state_store_t *st = edge_state_create();
+    edge_config_t cfg;
+    edge_state_err_t e;
+    char key[64];
+    int i;
+
+    assert(st);
+    edge_config_defaults(&cfg);
+    cfg.state_net_pon_enabled = 1;
+    cfg.state_inventory_enabled = 1;
+    cfg.state_net_pon_max_keys = 50;
+    cfg.state_inventory_max_keys = 10;
+    edge_state_apply_config(st, &cfg);
+
+    assert(edge_state_ns_capacity(st, "net.pon") == 50);
+    assert(edge_state_ns_capacity(st, "inventory") == 10);
+    assert(edge_state_ns_capacity(st, "net.core") == EDGE_STATE_KEYS_DEFAULT);
+
+    for (i = 0; i < 10; i++) {
+        snprintf(key, sizeof(key), "a/%d", i);
+        e = edge_state_put(st, "inventory", key, "{}", 2);
+        assert(e == EDGE_STATE_OK);
+    }
+    e = edge_state_put(st, "inventory", "a/x", "{}", 2);
+    assert(e == EDGE_STATE_NS_FULL);
+
+    for (i = 0; i < 50; i++) {
+        snprintf(key, sizeof(key), "p/%d", i);
+        e = edge_state_put(st, "net.pon", key, "{}", 2);
+        assert(e == EDGE_STATE_OK);
+    }
+    e = edge_state_put(st, "net.pon", "p/x", "{}", 2);
+    assert(e == EDGE_STATE_NS_FULL);
+
+    edge_state_destroy(st);
+    printf("  PASS: different ns capacities\n");
+}
+
+/**
+ * K10 / ADR-007: put path still uses pre-allocated value buffers.
+ * Fill all keys in a tiny ns; overwrite existing key still works (no malloc).
+ */
+static void test_no_put_path_malloc_overwrite(void)
+{
+    edge_state_config_t sc = edge_state_default_config();
+    edge_state_store_t *st;
+    edge_state_err_t e;
+    char buf[128];
+    size_t n = 0;
+    const char *v1 = "{\"n\":1}";
+    const char *v2 = "{\"n\":2,\"extra\":true}";
+
+    sc.max_keys_per_ns = 4;
+    sc.max_value_bytes = 64;
+    st = edge_state_create_with_config(&sc);
+    assert(st);
+
+    e = edge_state_put(st, "net.core", "a", v1, strlen(v1));
+    assert(e == EDGE_STATE_OK);
+    e = edge_state_put(st, "net.core", "a", v2, strlen(v2));
+    assert(e == EDGE_STATE_OK);
+    e = edge_state_get(st, "net.core", "a", buf, sizeof(buf), &n);
+    assert(e == EDGE_STATE_OK);
+    assert(n == strlen(v2));
+    assert(strcmp(buf, v2) == 0);
+
+    /* Free on disable reclaims table */
+    assert(edge_state_ns_set_enabled(st, "net.core", 0) == 0);
+    assert(edge_state_ns_capacity(st, "net.core") == 0);
+    e = edge_state_put(st, "net.core", "a", v1, strlen(v1));
+    assert(e == EDGE_STATE_NS_DISABLED);
+
+    edge_state_destroy(st);
+    printf("  PASS: put overwrite + free on disable\n");
+}
+
+/** YAML-shaped apply: max_value_bytes via create + per-ns max_keys. */
+static void test_config_from_edge_config(void)
+{
+    edge_config_t cfg;
+    edge_state_config_t sc;
+    edge_state_store_t *st;
+    edge_state_err_t e;
+
+    edge_config_defaults(&cfg);
+    cfg.state_max_keys_default = 32;
+    cfg.state_max_value_bytes = 2048;
+    cfg.state_net_pon_enabled = 1;
+    cfg.state_net_pon_max_keys = 16;
+    cfg.state_inventory_enabled = 1;
+    cfg.state_inventory_max_keys = 8;
+
+    sc = edge_state_config_from_edge_config(&cfg);
+    assert(sc.max_keys_per_ns == 32);
+    assert(sc.max_value_bytes == 2048);
+
+    st = edge_state_create_with_config(&sc);
+    assert(st);
+    edge_state_apply_config(st, &cfg);
+
+    assert(edge_state_ns_capacity(st, "net.core") == 32);
+    assert(edge_state_ns_capacity(st, "net.pon") == 16);
+    assert(edge_state_ns_capacity(st, "inventory") == 8);
+
+    e = edge_state_put(st, "net.pon", "x", "{\"ok\":1}", 8);
+    assert(e == EDGE_STATE_OK);
+    /* value larger than 2048 rejected */
+    {
+        char big[2100];
+        memset(big, 'x', sizeof(big));
+        big[0] = '"';
+        big[2098] = '"';
+        big[2099] = '\0';
+        e = edge_state_put(st, "net.pon", "big", big, 2099);
+        assert(e == EDGE_STATE_TOO_LARGE);
+    }
+
+    edge_state_destroy(st);
+    printf("  PASS: config_from_edge_config + compact max_value\n");
+}
+
 int main(void)
 {
     printf("state_store:\n");
@@ -204,6 +375,11 @@ int main(void)
     test_rest_put_get_delete();
     test_rest_disabled_ns();
     test_apply_config_enable_hooks();
+    test_disabled_ns_no_table();
+    test_per_ns_capacity_full();
+    test_different_ns_capacities();
+    test_no_put_path_malloc_overwrite();
+    test_config_from_edge_config();
     printf("all passed\n");
     return 0;
 }

@@ -42,6 +42,10 @@ static void test_defaults_validate(void)
     assert(c.state_net_home_enabled == 0);
     assert(c.state_electric_enabled == 0);
     assert(c.state_inventory_enabled == 0);
+    assert(c.state_max_keys_default == 0);
+    assert(c.state_max_value_bytes == 0);
+    assert(c.state_net_pon_max_keys == 0);
+    assert(c.state_inventory_max_keys == 0);
     /* E7 Call Home lab-safe defaults (PR-2) */
     assert(c.e7_enabled == 0);
     assert(c.e7_listen_port == 4334);
@@ -320,8 +324,50 @@ static void test_load_e7_lab_path(void)
     assert(cfg.e7_listen_port == 4334);
     assert(cfg.e7_shelf_count >= 1);
     assert(cfg.e7_shelves[0].mac[0] != '\0');
+    /* K10 / PR-2a: e7-lab enables net.pon + inventory with higher caps */
+    assert(cfg.state_max_value_bytes == 2048);
+    assert(cfg.state_max_keys_default == 1024);
+    assert(cfg.state_net_pon_enabled == 1);
+    assert(cfg.state_net_pon_max_keys == 16384);
+    assert(cfg.state_inventory_enabled == 1);
+    assert(cfg.state_inventory_max_keys == 512);
     assert(edge_config_validate(&cfg, err, sizeof(err)) == 0);
     printf("  PASS: load e7-lab path (%s)\n", path);
+}
+
+/** K10: state.max_keys_default / max_value_bytes / per-ns max_keys. */
+static void test_state_capacity_yaml(void)
+{
+    const char *yaml =
+        "state:\n"
+        "  max_keys_default: 256\n"
+        "  max_value_bytes: 2048\n"
+        "  namespaces:\n"
+        "    net_core:\n"
+        "      enabled: true\n"
+        "      max_keys: 128\n"
+        "    map_dynamic:\n"
+        "      enabled: true\n"
+        "    net_pon:\n"
+        "      enabled: true\n"
+        "      max_keys: 16384\n"
+        "    inventory:\n"
+        "      enabled: true\n"
+        "      max_keys: 512\n";
+    edge_config_t cfg;
+    char err[128];
+
+    assert(edge_config_load_yaml_buf(yaml, strlen(yaml), &cfg, err,
+                                     sizeof(err)) == 0);
+    assert(cfg.state_max_keys_default == 256);
+    assert(cfg.state_max_value_bytes == 2048);
+    assert(cfg.state_net_core_max_keys == 128);
+    assert(cfg.state_net_pon_enabled == 1);
+    assert(cfg.state_net_pon_max_keys == 16384);
+    assert(cfg.state_inventory_enabled == 1);
+    assert(cfg.state_inventory_max_keys == 512);
+    assert(edge_config_validate(&cfg, err, sizeof(err)) == 0);
+    printf("  PASS: state capacity yaml parse\n");
 }
 
 int main(void)
@@ -335,6 +381,7 @@ int main(void)
     test_e7_callhome_yaml();
     test_e7_raw_non_loopback_requires_lab_flag();
     test_load_e7_lab_path();
+    test_state_capacity_yaml();
     printf("all passed\n");
     return 0;
 }

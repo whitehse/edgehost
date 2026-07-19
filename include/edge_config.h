@@ -56,17 +56,29 @@ typedef struct {
     size_t http_max_upstream_body_bytes;
 
     /**
-     * State namespaces (1 = enabled). Underscore YAML keys map to dotted ns
-     * names (libyaml knowledge paths split on '.'). Defaults: net.core +
-     * map.dynamic on; net.pon / net.home / electric / inventory off until a
-     * producer enables them (P1.14 / ADR-007).
+     * State store limits + namespaces (P1.14 / ADR-007 / K10 PR-2a).
+     * Underscore YAML keys map to dotted ns names (libyaml knowledge paths
+     * split on '.'). Defaults: net.core + map.dynamic on; net.pon / net.home /
+     * electric / inventory off until a producer enables them.
+     *
+     * max_keys_default / max_value_bytes feed edge_state_create_with_config.
+     * Per-ns max_keys (0 = use max_keys_default) applied at enable via
+     * edge_state_apply_config — tables allocate only when ns is enabled.
      */
-    int state_net_core_enabled;
-    int state_map_dynamic_enabled;
-    int state_net_pon_enabled;
-    int state_net_home_enabled;
-    int state_electric_enabled;
-    int state_inventory_enabled;
+    size_t state_max_keys_default;  /* 0 → EDGE_STATE_KEYS_DEFAULT (1024) */
+    size_t state_max_value_bytes;   /* 0 → EDGE_STATE_VALUE_DEFAULT (4096) */
+    int    state_net_core_enabled;
+    int    state_map_dynamic_enabled;
+    int    state_net_pon_enabled;
+    int    state_net_home_enabled;
+    int    state_electric_enabled;
+    int    state_inventory_enabled;
+    size_t state_net_core_max_keys;    /* 0 → store default */
+    size_t state_map_dynamic_max_keys;
+    size_t state_net_pon_max_keys;
+    size_t state_net_home_max_keys;
+    size_t state_electric_max_keys;
+    size_t state_inventory_max_keys;
 
     /**
      * Auth (P1.7c / ADR-013). mode: open | lab_password | proxy_headers.

@@ -24,7 +24,10 @@ http:
   max_pending_outbound: 256
   max_upstream_body_bytes: 4194304
 
+# Per-ns capacity + compact values (K10 / PR-2a). Tables only when enabled.
 state:
+  max_keys_default: 1024
+  max_value_bytes: 2048
   namespaces:
     net_core:
       enabled: true
@@ -32,12 +35,14 @@ state:
       enabled: true
     net_pon:
       enabled: true
+      max_keys: 16384
     net_home:
       enabled: false
     electric:
       enabled: false
     inventory:
       enabled: true
+      max_keys: 512
 
 auth:
   mode: lab_password

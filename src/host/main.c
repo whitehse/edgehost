@@ -167,7 +167,11 @@ int main(int argc, char **argv)
             ac->openai_enabled || ac->slack_enabled || ac->teams_enabled;
         if (need_ph) {
             edge_plugin_host_config_t phc;
-            store = edge_state_create();
+            {
+                edge_state_config_t sc =
+                    edge_state_config_from_edge_config(ac);
+                store = edge_state_create_with_config(&sc);
+            }
             if (store) {
                 edge_state_apply_config(store, ac);
             }
