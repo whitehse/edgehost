@@ -22,7 +22,7 @@ Split the tree in-process:
 | Layer | Path | Owns |
 |-------|------|------|
 | **libedgecore** | `src/core/*`, `include/edgecore.h` | Connections, HTTP bridge drivers, router, state SMs, plugin SMs as pure machines; **pull** events via `edgecore_next_event`; **no** sockets/files/clocks/signals |
-| **Host** | `src/host/*` | io_uring accept/read/write, static files, YAML load + SIGHUP, **mbedTLS**, signals, process `malloc` for edgecore buffers (`host_alloc` — P1.2) |
+| **Host** | `src/host/*` | io_uring accept/read/write, static files, YAML load + SIGHUP, **OpenSSL non-blocking** (P1.13), signals, process `malloc` for edgecore buffers (`host_alloc` — P1.2) |
 | **Plugins** | `src/plugins/*` | Grand functions linked into the host; edgecore sees buffer-level kinds only |
 
 API spine (grows by PR):
@@ -30,7 +30,8 @@ API spine (grows by PR):
 - P1.1: `edgecore_create` / `edgecore_destroy` / `edgecore_next_event`
 - P1.2: `request_alloc` / `request_realloc` / `provide_buffer` + `host_alloc`
 - P1.3: `edgecore_apply_config` + host YAML/HUP (`edgehost_reload_config`)
-- Later: `feed_net`, state, auth, plugin pending HTTP
+- P1.4a: `edge_iouring_run` plain TCP static response
+- Later: shaggy feed, state, auth, OpenSSL TLS, plugin pending HTTP
 
 Event kinds are defined in `edgecore.h` (program design). Host consumes
 `EDGE_EVENT_OUTBOUND_DONE` internally; SPA clients never see it.

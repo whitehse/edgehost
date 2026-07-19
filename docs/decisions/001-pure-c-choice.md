@@ -11,8 +11,9 @@ Accepted
 ## Context
 
 edgehost must compose pure-C sibling libraries (shaggy, libyaml, librest,
-pique, libsim, …), run under Linux io_uring with mbedTLS, and stay embeddable
-in the same agent-driven C11 workflow as the rest of the Edge Platform.
+pique, libsim, …), run under Linux io_uring with OpenSSL non-blocking TLS
+(later), and stay embeddable in the same agent-driven C11 workflow as the rest
+of the Edge Platform.
 
 ## Decision
 

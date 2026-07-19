@@ -2,22 +2,27 @@
 
 **Project identity**: Multi-plugin **io_uring** webserver for the Edge Platform.
 Syscall-free **`libedgecore`** (buffers + events) plus a Linux host that owns
-sockets, files, signals, TLS (**mbedTLS**), and process malloc. Composes sibling
-protocol libraries (shaggy, libyaml, librest, …) — does not reimplement them.
+sockets, files, signals, TLS (**OpenSSL non-blocking**, P1.13+), and process
+malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
+does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.3** — YAML load + SIGHUP apply + ADR-005.
+**Current milestone**: **P1.4a** — io_uring accept + fixed static response.
 
 ## Key commands
 
 ```bash
 cmake -B build -S . && cmake --build build
 ctest --test-dir build --output-on-failure
-deps/verify_pins.sh              # local SHAs vs deps/pins.txt
-deps/update_pins.sh              # refresh pins from ~/ siblings
+# plain static server (P1.4a)
+./build/edgehost --host 127.0.0.1 --port 8080
+# or with YAML:
+./build/edgehost --config config/edgehost.example.yaml
+deps/verify_pins.sh
+deps/update_pins.sh
 ```
 
-Requires sibling **libyaml** built (`~/libyaml/build/libyaml.a`) for config tests.
+Requires: **liburing-dev**, sibling **libyaml** built (`~/libyaml/build/libyaml.a`).
 
 Optional roots (same pattern as pqproxy):
 
@@ -53,6 +58,7 @@ cmake -B build -S . \
 | [005](docs/decisions/005-yaml-sighup-apply.md) | YAML + SIGHUP shadow apply |
 | [011](docs/decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](docs/decisions/012-agent-ready-documentation.md) | Doc layout + no stub ADRs |
+| [014](docs/decisions/014-tls-openssl-edgehost.md) | edgehost OpenSSL NB; CPE mbedTLS |
 
 ## Dependency pins
 
@@ -88,5 +94,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.3 complete**: YAML load, shadow apply, SIGHUP flag + reload, ADR-005.  
-**Next**: **P1.4a** — io_uring accept + fixed static response.
+**P1.4a complete**: io_uring accept + fixed static HTTP-ish response (plain TCP).  
+**Next**: **P1.4b** — shaggy HTTP/1 parse bridge.

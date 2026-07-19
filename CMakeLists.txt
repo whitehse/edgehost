@@ -1,12 +1,12 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.3: YAML load + SIGHUP shadow apply + ADR-005.
+# P1.4a: io_uring accept + fixed static response (plain TCP).
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.3.0)
+project(edgehost LANGUAGES C VERSION 0.4.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS ON) # liburing / Linux later
+set(CMAKE_C_EXTENSIONS ON) # liburing / Linux
 
 if(NOT MSVC)
   add_compile_options(-Wall -Wextra -Wpedantic -Werror)
@@ -22,7 +22,6 @@ option(EDGEHOST_REQUIRE_SIBLINGS
 option(EDGEHOST_REQUIRE_LIBSIM
   "Fail configure if libsim is missing (soft until class-A fuzz)" OFF)
 
-# --- Phase-1 composition roots ---
 if(EDGEHOST_REQUIRE_SIBLINGS)
   find_package(Shaggy REQUIRED)
   find_package(Libyaml REQUIRED)
@@ -44,6 +43,13 @@ else()
   find_package(Libsim QUIET)
 endif()
 
+find_library(LIBURING_LIBRARY uring)
+find_path(LIBURING_INCLUDE_DIR liburing.h)
+if(NOT LIBURING_LIBRARY OR NOT LIBURING_INCLUDE_DIR)
+  message(FATAL_ERROR "liburing required for P1.4a (install liburing-dev)")
+endif()
+message(STATUS "  liburing    ${LIBURING_LIBRARY}")
+
 message(STATUS "edgehost dependency map:")
 message(STATUS "  SIBLING_ROOT=${SIBLING_ROOT}")
 message(STATUS "  shaggy     FOUND=${Shaggy_FOUND} ROOT=${SHAGGY_ROOT}")
@@ -56,12 +62,7 @@ message(STATUS "  libteams   FOUND=${Libteams_FOUND} ROOT=${LIBTEAMS_ROOT}")
 message(STATUS "  libwebmap  FOUND=${Libwebmap_FOUND} ROOT=${LIBWEBMAP_ROOT}")
 message(STATUS "  libsim     FOUND=${Libsim_FOUND} ROOT=${LIBSIM_ROOT}")
 
-if(Libyaml_FOUND AND NOT TARGET Libyaml::yaml AND NOT LIBYAML_LIBRARY)
-  message(WARNING "libyaml headers found but no build/libyaml.a — "
-    "config tests need: cmake -B ${LIBYAML_ROOT}/build -S ${LIBYAML_ROOT} && cmake --build ${LIBYAML_ROOT}/build")
-endif()
-
-# --- libedgecore (syscall-free) ---
+# --- libedgecore ---
 add_library(edgecore STATIC
   src/core/edgecore.c
   src/core/edge_config.c
@@ -71,10 +72,8 @@ target_include_directories(edgecore PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# --- Host pieces: alloc + YAML config + HUP ---
-add_library(edgehost_alloc STATIC
-  src/host/host_alloc.c
-)
+# --- Host libraries ---
+add_library(edgehost_alloc STATIC src/host/host_alloc.c)
 target_include_directories(edgehost_alloc PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -98,7 +97,19 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-# Interface target for sibling headers (deps smoke).
+add_library(edgehost_iouring STATIC src/host/iouring_loop.c)
+target_include_directories(edgehost_iouring PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
+target_link_libraries(edgehost_iouring PUBLIC edgecore ${LIBURING_LIBRARY})
+
+# edgehost binary
+add_executable(edgehost src/host/main.c)
+target_link_libraries(edgehost PRIVATE edgecore edgehost_config edgehost_iouring)
+
+# Sibling header smoke
 add_library(edgehost_deps INTERFACE)
 if(Shaggy_FOUND)
   target_link_libraries(edgehost_deps INTERFACE Shaggy::headers)
@@ -110,7 +121,6 @@ if(Librest_FOUND)
   target_link_libraries(edgehost_deps INTERFACE Librest::headers)
 endif()
 
-# --- Tests ---
 add_executable(edgehost_deps_smoke tests/deps_smoke.c)
 target_link_libraries(edgehost_deps_smoke PRIVATE edgehost_deps)
 if(Shaggy_FOUND)
@@ -132,12 +142,16 @@ target_link_libraries(edgecore_alloc_test PRIVATE edgecore edgehost_alloc)
 add_executable(edgecore_config_test tests/test_edgecore_config.c)
 target_link_libraries(edgecore_config_test PRIVATE edgecore edgehost_config)
 
+add_executable(edgehost_iouring_test tests/test_iouring_static.c)
+target_link_libraries(edgehost_iouring_test PRIVATE edgehost_iouring)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
 add_test(NAME edgecore_alloc COMMAND edgecore_alloc_test)
 add_test(NAME edgecore_config COMMAND edgecore_config_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME edgehost_iouring_static COMMAND edgehost_iouring_test)
 
 find_program(EDGEHOST_BASH bash)
 if(EDGEHOST_BASH)
@@ -149,8 +163,10 @@ if(EDGEHOST_BASH)
 endif()
 
 include(GNUInstallDirs)
-install(TARGETS edgecore edgehost_alloc edgehost_config
-  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS edgecore edgehost_alloc edgehost_config edgehost_iouring edgehost
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY cmake/

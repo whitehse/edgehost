@@ -4,16 +4,19 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.3 — edgecore + `host_alloc` + YAML/SIGHUP config apply.
-No listen socket yet.
+**Status:** P1.4a — plain TCP **io_uring** accept + fixed static response.
+TLS will be **OpenSSL non-blocking** (P1.13); CPE agent uses **mbedTLS**.
 
 ## Build
 
 ```bash
-# siblings expected under $HOME (or set SIBLING_ROOT / *_ROOT)
+# needs liburing-dev; siblings under $HOME (or SIBLING_ROOT / *_ROOT)
 cmake -B build -S .
 cmake --build build
 ctest --test-dir build --output-on-failure
+
+./build/edgehost --host 127.0.0.1 --port 8080
+# curl -v http://127.0.0.1:8080/
 ```
 
 ## Dependency pins

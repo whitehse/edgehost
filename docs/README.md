@@ -19,5 +19,6 @@
 | [005](decisions/005-yaml-sighup-apply.md) | YAML + SIGHUP shadow apply |
 | [011](decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](decisions/012-agent-ready-documentation.md) | Agent-ready docs |
+| [014](decisions/014-tls-openssl-edgehost.md) | edgehost OpenSSL NB; CPE mbedTLS |
 
 Program-wide design: `~/edge-platform-program-design.md`.
