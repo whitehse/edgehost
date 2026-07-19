@@ -22,7 +22,15 @@ typedef struct {
     char     listen_host[EDGE_CONFIG_HOST_MAX];
     uint16_t listen_port;
 
+    /** Document root for company SPA (index.html, assets). */
     char spa_root[EDGE_CONFIG_PATH_MAX];
+    /**
+     * Root for map/package files (libwebmap .wmap etc.), served under
+     * URL prefix /packages/ (P1.6).
+     */
+    char packages_root[EDGE_CONFIG_PATH_MAX];
+    /** Max static file bytes loaded into response buffer (0 → default 64 KiB). */
+    size_t static_max_file_bytes;
 
     size_t http_max_body_bytes;
     size_t http_max_pending_outbound;

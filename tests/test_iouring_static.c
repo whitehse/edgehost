@@ -79,6 +79,9 @@ static int start_server(uint16_t port, int max_accepts, pid_t *out_pid)
         edge_config_defaults(&cfg);
         snprintf(cfg.listen_host, sizeof(cfg.listen_host), "127.0.0.1");
         cfg.listen_port = port;
+        /* Unit tests do not assume SPA fixtures on cwd; clear docroots. */
+        cfg.spa_root[0] = '\0';
+        cfg.packages_root[0] = '\0';
         edge_iouring_opts_defaults(&opts);
         opts.max_accepts = max_accepts;
         _exit(edge_iouring_run(&cfg, &opts) == 0 ? 0 : 1);

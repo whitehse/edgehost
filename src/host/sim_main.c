@@ -18,6 +18,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Sim/fuzz does not depend on process cwd for SPA files; roots stay unset
+ * (GET / → plain ok). Production iouring_loop sets roots from applied config. */
+static void apply_default_docroots(edge_http1_serve_t *s)
+{
+    edge_http1_serve_set_docroots(s, NULL);
+}
+
 static void drain_cq(sim_uring_t *r)
 {
     sim_cqe_t *cqe;
@@ -127,6 +134,7 @@ static void sim_http_exchange(const uint8_t *req, size_t req_len,
     if (!srv) {
         goto out;
     }
+    apply_default_docroots(srv);
     pr = edge_http1_serve_feed(srv, rbuf, (size_t)n, metrics, resp,
                                sizeof(resp), &resp_len);
     if (pr == 0) {
@@ -265,6 +273,7 @@ int edge_sim_drive(const uint8_t *data, size_t size)
         char resp[2048];
         size_t rlen = 0;
         if (s) {
+            apply_default_docroots(s);
             (void)edge_http1_serve_feed(s, http_buf, http_len, &metrics, resp,
                                         sizeof(resp), &rlen);
             edge_http1_serve_destroy(s);

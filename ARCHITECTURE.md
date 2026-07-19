@@ -2,46 +2,45 @@
 
 ## Status
 
-**P1.5**: production io_uring HTTP/1 + `/health`, and class-A **sim_main**
-fuzz path via libsim (no real sockets).
+**P1.6**: io_uring HTTP/1, `/health` metrics, **static SPA** under `spa.root`,
+and **package files** under `packages.root` at URL `/packages/…`.
 
-## Split (ADR-002)
+## Split
 
 | Layer | Path | Rules |
 |-------|------|-------|
-| **libedgecore** | `src/core/*` | Syscall-free; events; NEED_*; apply_config |
-| **HTTP/1 serve** | `src/host/edge_http1_serve.c` | Shared shaggy parse + route (prod + sim) |
-| **Metrics** | `src/host/edge_metrics.c` | Counters; `/health` JSON |
-| **io_uring host** | `src/host/iouring_loop.c`, `main.c` | Real kernel accept/recv/send |
-| **sim_main** | `src/host/sim_main.c` | Class A: libsim net/uring + same HTTP serve |
-| **YAML + HUP** | `src/host/config_*.c` | libyaml; SIGHUP flag |
-| **TLS (later)** | P1.13 | OpenSSL non-blocking |
+| **libedgecore** | `src/core/*` | Syscall-free SMs |
+| **HTTP/1 serve** | `edge_http1_serve.c` | Route + metrics; calls static loader |
+| **Static files** | `static_files.c` | Safe join, MIME, size cap (host I/O) |
+| **io_uring** | `iouring_loop.c` | Real sockets; sets docroots from config |
+| **sim_main** | `sim_main.c` | Class A fuzz (no SPA cwd dependency) |
 
 ## HTTP routes
 
 | Path | Response |
 |------|----------|
 | `GET /health` | JSON metrics |
-| `GET /` | plain `ok` |
-| other GET | 404 |
+| `GET /packages/…` | file under `packages.root` |
+| `GET /…` | file under `spa.root` ( `/` → `index.html` ) |
+| SPA miss | try `index.html` (client router) then 404 |
 | parse error | 400 |
 
-## Class-A sim / fuzz (ADR-011)
+Path traversal (`..`) is rejected.
 
-```
-edge_sim_drive(data):
-  sim_fuzz_drive_a          # libsim clock/timer/net/uring opcodes
-  edgecore NEED_ALLOC path  # host_alloc provide
-  edge_http1_serve_feed     # direct buffer path
-  sim_net + sim_uring       # accept/recv/send HTTP exchange
-```
+## Config (YAML)
 
-Harness: `fuzz/fuzz_edgehost_a.c` (`-DBUILD_FUZZ=ON`, clang + libFuzzer).
+```yaml
+spa:
+  root: ./spa
+  max_file_bytes: 65536
+packages:
+  root: ./packages
+```
 
 ## TLS (ADR-014)
 
-edgehost → OpenSSL non-blocking (later); CPE → mbedTLS.
+edgehost → OpenSSL non-blocking (P1.13); CPE → mbedTLS.
 
-## Deliberate absences
+## Next
 
-SPA root (P1.6), state store, plugins, OpenSSL, Prometheus (P1.15).
+P1.7a state store (`net.core`, `map.dynamic`) + REST GET/PUT.

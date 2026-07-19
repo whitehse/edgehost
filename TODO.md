@@ -10,10 +10,10 @@
 - [x] **P1.4b** shaggy HTTP/1 parse bridge (static simple body)
 - [x] **P1.4c** `GET /health` JSON + metrics counters
 - [x] **P1.5** sim_main class-A fuzz path (libsim + edge_http1_serve)
+- [x] **P1.6** static SPA root + package path (`/packages/`)
 
 ## Next (program Track 1)
 
-- [ ] **P1.6** static SPA root + package path
 - [ ] **P1.7a–d** state store, WS stream, auth ladder
 - [ ] **P1.8a–b** plugin ABI + openai_proxy E2E
 - [ ] **P1.9–P1.10** slack/teams stubs

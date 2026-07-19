@@ -17,6 +17,8 @@ void edge_config_defaults(edge_config_t *c)
     snprintf(c->listen_host, sizeof(c->listen_host), "0.0.0.0");
     c->listen_port = 8080;
     snprintf(c->spa_root, sizeof(c->spa_root), "./spa");
+    snprintf(c->packages_root, sizeof(c->packages_root), "./packages");
+    c->static_max_file_bytes = 64u * 1024u;
     c->http_max_body_bytes = 1024u * 1024u;
     c->http_max_pending_outbound = 256;
     c->http_max_upstream_body_bytes = 4u * 1024u * 1024u;

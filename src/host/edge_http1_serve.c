@@ -1,9 +1,11 @@
 /**
  * @file edge_http1_serve.c
- * @brief Shared HTTP/1 parse + routing (health JSON / root ok / 404 / 400).
+ * @brief HTTP/1 parse + routing: /health, SPA static, /packages/, 404/400.
  */
 
 #include "edge_http1_serve.h"
+
+#include "edge_static.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,11 +15,12 @@
 #include "protocol_events.h"
 
 struct edge_http1_serve {
-    http1_ctx_t *h1;
-    char         method[16];
-    char         path[256];
-    int          headers_done;
-    int          done; /* already produced a response */
+    http1_ctx_t        *h1;
+    char                method[16];
+    char                path[256];
+    int                 headers_done;
+    int                 done;
+    edge_http1_docroot_t roots;
 };
 
 static int path_is_health(const char *path)
@@ -29,6 +32,26 @@ static int path_is_health(const char *path)
         return 1;
     }
     if (strncmp(path, "/health?", 8) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static int path_is_packages(const char *path, const char **suffix_out)
+{
+    if (!path) {
+        return 0;
+    }
+    if (strncmp(path, "/packages/", 10) == 0) {
+        if (suffix_out) {
+            *suffix_out = path + 9; /* keep leading / for resolve */
+        }
+        return 1;
+    }
+    if (strcmp(path, "/packages") == 0) {
+        if (suffix_out) {
+            *suffix_out = "/";
+        }
         return 1;
     }
     return 0;
@@ -87,17 +110,68 @@ static void note_response(edge_metrics_t *m, int status)
     }
 }
 
+/**
+ * Try to serve a static file into out. body starts after headers in out —
+ * we build headers after reading body into a temp area at the end of out,
+ * or use a stack buffer for body.
+ */
+static int try_static(const char *root, const char *url_path, size_t max_file,
+                      char *out, size_t out_cap, size_t *out_len)
+{
+    char *body;
+    size_t body_cap;
+    size_t body_len = 0;
+    char ctype[96];
+    size_t hdr_room = 256;
+
+    if (!root || !root[0] || !out || out_cap <= hdr_room + 1) {
+        return -1;
+    }
+    if (max_file == 0) {
+        max_file = EDGE_STATIC_MAX_FILE;
+    }
+    body_cap = out_cap - hdr_room;
+    if (body_cap > max_file) {
+        body_cap = max_file;
+    }
+    body = out + hdr_room; /* temporary: load body at end of buffer */
+
+    if (edge_static_load(root, url_path, body, body_cap, &body_len, ctype,
+                         sizeof(ctype)) != 0) {
+        return -1;
+    }
+    /* Rebuild full response at start of out (may overlap — copy body first). */
+    {
+        char *tmp = (char *)malloc(body_len ? body_len : 1);
+        if (!tmp && body_len > 0) {
+            return -1;
+        }
+        if (body_len > 0) {
+            memcpy(tmp, body, body_len);
+        }
+        if (build_response(out, out_cap, 200, "OK", ctype, tmp, body_len,
+                           out_len) != 0) {
+            free(tmp);
+            return -1;
+        }
+        free(tmp);
+    }
+    return 0;
+}
+
 static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
                     size_t out_cap, size_t *out_len)
 {
     char json[512];
     int jn;
     static const char ok_body[] = "ok\n";
-    static const char bad_body[] = "bad request\n";
     static const char nf_body[] = "not found\n";
     static const char ma_body[] = "method not allowed\n";
+    size_t max_file;
+    const char *pkg_suffix = NULL;
 
-    (void)bad_body;
+    max_file = s->roots.max_file_bytes ? s->roots.max_file_bytes
+                                       : EDGE_STATIC_MAX_FILE;
 
     if (s->method[0] && strcmp(s->method, "GET") != 0) {
         if (build_response(out, out_cap, 405, "Method Not Allowed", "text/plain",
@@ -107,6 +181,7 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
         note_response(metrics, 405);
         return 1;
     }
+
     if (path_is_health(s->path)) {
         if (!metrics) {
             edge_metrics_t tmp;
@@ -131,7 +206,40 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
         note_response(metrics, 200);
         return 1;
     }
-    if (s->path[0] == '\0' || strcmp(s->path, "/") == 0) {
+
+    /* /packages/... → packages_root */
+    if (path_is_packages(s->path, &pkg_suffix)) {
+        if (s->roots.packages_root && s->roots.packages_root[0] &&
+            try_static(s->roots.packages_root, pkg_suffix, max_file, out,
+                       out_cap, out_len) == 0) {
+            note_response(metrics, 200);
+            return 1;
+        }
+        if (build_response(out, out_cap, 404, "Not Found", "text/plain",
+                           nf_body, sizeof(nf_body) - 1, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 404);
+        return 1;
+    }
+
+    /* SPA root: / and any other path under spa_root */
+    if (s->roots.spa_root && s->roots.spa_root[0]) {
+        const char *url = s->path[0] ? s->path : "/";
+        if (try_static(s->roots.spa_root, url, max_file, out, out_cap,
+                       out_len) == 0) {
+            note_response(metrics, 200);
+            return 1;
+        }
+        /* SPA fallback: unknown path → index.html (client-side router) */
+        if (strcmp(url, "/") != 0 &&
+            try_static(s->roots.spa_root, "/index.html", max_file, out, out_cap,
+                       out_len) == 0) {
+            note_response(metrics, 200);
+            return 1;
+        }
+    } else if (s->path[0] == '\0' || strcmp(s->path, "/") == 0) {
+        /* No SPA root configured: keep plain ok for lab */
         if (build_response(out, out_cap, 200, "OK", "text/plain", ok_body,
                            sizeof(ok_body) - 1, out_len) != 0) {
             return -1;
@@ -139,6 +247,7 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
         note_response(metrics, 200);
         return 1;
     }
+
     if (build_response(out, out_cap, 404, "Not Found", "text/plain", nf_body,
                        sizeof(nf_body) - 1, out_len) != 0) {
         return -1;
@@ -183,6 +292,20 @@ void edge_http1_serve_reset(edge_http1_serve_t *s)
     s->method[0] = s->path[0] = '\0';
     s->headers_done = 0;
     s->done = 0;
+    /* keep roots */
+}
+
+void edge_http1_serve_set_docroots(edge_http1_serve_t *s,
+                                   const edge_http1_docroot_t *roots)
+{
+    if (!s) {
+        return;
+    }
+    if (!roots) {
+        memset(&s->roots, 0, sizeof(s->roots));
+        return;
+    }
+    s->roots = *roots;
 }
 
 int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len,

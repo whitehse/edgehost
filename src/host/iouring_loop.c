@@ -19,6 +19,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* malloc used for per-conn send buffers (host-owned, large SPA assets). */
+
 #include <liburing.h>
 
 enum {
@@ -40,7 +42,8 @@ typedef struct {
     int                  recv_pending;
     int                  send_pending;
     uint8_t              recv_buf[4096];
-    char                 send_buf[2048];
+    char                *send_buf; /* heap: large enough for SPA assets */
+    size_t               send_cap;
     size_t               send_len;
     size_t               send_off;
     edge_http1_serve_t  *http;
@@ -59,6 +62,8 @@ typedef struct {
     int                        accept_pending;
     edge_metrics_t            *metrics;
     edge_metrics_t             metrics_local;
+    edge_http1_docroot_t       docroots;
+    size_t                     send_cap;
 } server_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
@@ -151,6 +156,9 @@ static void close_conn(server_t *srv, conn_t *c)
         edge_http1_serve_destroy(c->http);
         c->http = NULL;
     }
+    free(c->send_buf);
+    c->send_buf = NULL;
+    c->send_cap = 0;
     if (c->fd >= 0) {
         close(c->fd);
         c->fd = -1;
@@ -173,10 +181,18 @@ static conn_t *alloc_conn(server_t *srv)
             c->slot = i;
             c->fd = -1;
             c->state = CS_RECV;
-            c->http = edge_http1_serve_create();
-            if (!c->http) {
+            c->send_cap = srv->send_cap;
+            c->send_buf = (char *)malloc(c->send_cap);
+            if (!c->send_buf) {
                 return NULL;
             }
+            c->http = edge_http1_serve_create();
+            if (!c->http) {
+                free(c->send_buf);
+                c->send_buf = NULL;
+                return NULL;
+            }
+            edge_http1_serve_set_docroots(c->http, &srv->docroots);
             return c;
         }
     }
@@ -237,7 +253,8 @@ static int submit_send(server_t *srv, conn_t *c)
     if (!sqe) {
         return -1;
     }
-    io_uring_prep_send(sqe, c->fd, c->send_buf + c->send_off, n, 0);
+    io_uring_prep_send(sqe, c->fd, (const void *)(c->send_buf + c->send_off), n,
+                       0);
     io_uring_sqe_set_data64(sqe, pack_ud(OP_SEND, c->slot));
     c->send_pending = 1;
     return 0;
@@ -260,7 +277,7 @@ static int begin_bad_request_plain(server_t *srv, conn_t *c)
         "Connection: close\r\n"
         "\r\n"
         "bad request\n";
-    if (sizeof(resp) - 1 >= sizeof(c->send_buf)) {
+    if (!c->send_buf || sizeof(resp) - 1 >= c->send_cap) {
         return -1;
     }
     memcpy(c->send_buf, resp, sizeof(resp) - 1);
@@ -345,6 +362,19 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     srv.opts = opts;
     srv.listen_fd = -1;
     srv.max_conns = opts->max_conns > 0 ? opts->max_conns : 64;
+    {
+        size_t maxf = cfg->static_max_file_bytes
+                          ? cfg->static_max_file_bytes
+                          : (64u * 1024u);
+        srv.send_cap = maxf + 512u; /* headers + body */
+        if (srv.send_cap < 4096u) {
+            srv.send_cap = 4096u;
+        }
+    }
+    srv.docroots.spa_root = cfg->spa_root[0] ? cfg->spa_root : NULL;
+    srv.docroots.packages_root =
+        cfg->packages_root[0] ? cfg->packages_root : NULL;
+    srv.docroots.max_file_bytes = cfg->static_max_file_bytes;
     if (opts->metrics) {
         srv.metrics = opts->metrics;
         if (srv.metrics->started_at == 0) {
@@ -392,9 +422,11 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     io_uring_submit(&srv.ring);
 
     fprintf(stderr,
-            "edgehost: listening on %s:%u (HTTP/1 + /health)\n",
+            "edgehost: listening on %s:%u (SPA=%s packages=%s)\n",
             cfg->listen_host[0] ? cfg->listen_host : "0.0.0.0",
-            (unsigned)cfg->listen_port);
+            (unsigned)cfg->listen_port,
+            cfg->spa_root[0] ? cfg->spa_root : "(none)",
+            cfg->packages_root[0] ? cfg->packages_root : "(none)");
 
     while (!should_stop(&srv)) {
         struct io_uring_cqe *cqe = NULL;
@@ -450,8 +482,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
                 } else {
                     pr = edge_http1_serve_feed(c->http, c->recv_buf,
                                                (size_t)res, srv.metrics,
-                                               c->send_buf, sizeof(c->send_buf),
-                                               &rlen);
+                                               c->send_buf, c->send_cap, &rlen);
                     if (pr < 0) {
                         close_conn(&srv, c);
                     } else if (pr == 0) {

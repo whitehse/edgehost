@@ -8,6 +8,12 @@ listen:
 
 spa:
   root: ./spa
+  # optional override; default 65536
+  # max_file_bytes: 65536
+
+# Map / package files (libwebmap .wmap, etc.) — URL prefix /packages/
+packages:
+  root: ./packages
 
 http:
   max_body_bytes: 1048576

@@ -19,6 +19,8 @@
 | **CONFIG_REJECTED** | Event when load/validate fails; previous config kept |
 | **/health** | `GET` JSON liveness + basic counters (`edge_metrics`) |
 | **Metrics** | Host process counters (accepts, requests, 2xx/4xx, bytes, …) |
+| **SPA root** | Filesystem dir for company UI (`spa.root`, default `./spa`) |
+| **packages root** | Map/package files (`packages.root`); URL prefix `/packages/` |
 
 Public API: `edgecore.h`, `edge_config.h`, `edge_config_hup.h`, `edge_iouring.h`,
 `edge_metrics.h`, `host_alloc.h`. Example: `config/edgehost.example.yaml`.

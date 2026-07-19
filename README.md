@@ -4,9 +4,9 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.5 — production **io_uring** HTTP/1 + `/health`, and class-A
-**sim_main** fuzz path (libsim). TLS later: **OpenSSL non-blocking**; CPE
-uses **mbedTLS**.
+**Status:** P1.6 — **io_uring** HTTP/1, `/health`, static **SPA** (`spa/`),
+and **packages** (`/packages/…`). Class-A sim fuzz available. TLS later:
+**OpenSSL non-blocking**; CPE uses **mbedTLS**.
 
 ## Build
 
@@ -16,9 +16,11 @@ cmake -B build -S .
 cmake --build build
 ctest --test-dir build --output-on-failure
 
-./build/edgehost --host 127.0.0.1 --port 8080
-# curl -s http://127.0.0.1:8080/health
+# run from repo root so ./spa and ./packages resolve
+./build/edgehost --host 127.0.0.1 --port 8080 --config config/edgehost.example.yaml
 # curl -s http://127.0.0.1:8080/
+# curl -s http://127.0.0.1:8080/health
+# curl -s http://127.0.0.1:8080/packages/demo.wmap
 ```
 
 ## Dependency pins

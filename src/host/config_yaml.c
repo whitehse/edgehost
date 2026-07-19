@@ -127,6 +127,22 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         }
         return 0;
     }
+    if (strcmp(key, "packages.root") == 0 ||
+        strcmp(key, "packages_root") == 0 ||
+        strcmp(key, "spa.packages") == 0) {
+        if (copy_str(c->packages_root, sizeof(c->packages_root), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "spa.max_file_bytes") == 0 ||
+        strcmp(key, "static.max_file_bytes") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->static_max_file_bytes = sz;
+        return 0;
+    }
     if (strcmp(key, "http.max_body_bytes") == 0) {
         if (parse_size(val, &sz) != 0 || sz == 0) {
             FAIL("invalid size");
@@ -175,6 +191,11 @@ static const char *const g_paths[] = {
     "listen.port",
     "spa.root",
     "spa_root",
+    "packages.root",
+    "packages_root",
+    "spa.packages",
+    "spa.max_file_bytes",
+    "static.max_file_bytes",
     "http.max_body_bytes",
     "http.max_pending_outbound",
     "http.max_upstream_body_bytes",

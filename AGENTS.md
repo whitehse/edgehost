@@ -7,7 +7,7 @@ malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
 does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.5** — class-A sim_main + libsim fuzz path.
+**Current milestone**: **P1.6** — static SPA root + package path.
 
 ## Key commands
 
@@ -104,5 +104,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.5 complete**: class-A `edge_sim_drive` + optional `fuzz_edgehost_a`.  
-**Next**: **P1.6** — static SPA root + package path.
+**P1.6 complete**: SPA static files + `/packages/` map package path.  
+**Next**: **P1.7a** — state store core (`net.core`, `map.dynamic`) + REST.
