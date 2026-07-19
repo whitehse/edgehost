@@ -1,10 +1,11 @@
 /**
  * @file edge_http1_serve.h
- * @brief Shared shaggy HTTP/1 request → response (health, SPA, packages, state, WS).
+ * @brief Shared shaggy HTTP/1 request → response (health, SPA, packages, state, WS, auth).
  */
 #ifndef EDGE_HTTP1_SERVE_H
 #define EDGE_HTTP1_SERVE_H
 
+#include "edge_auth.h"
 #include "edge_metrics.h"
 #include "edge_state.h"
 #include "edge_ws.h"
@@ -39,6 +40,11 @@ void edge_http1_serve_set_state(edge_http1_serve_t *s, edge_state_store_t *st);
  * Successful PUT/DELETE enqueue STATE_CHANGED for all subscribers.
  */
 void edge_http1_serve_set_ws_hub(edge_http1_serve_t *s, edge_ws_hub_t *hub);
+
+/**
+ * Attach auth context (not owned; may be NULL → treat as OPEN).
+ */
+void edge_http1_serve_set_auth(edge_http1_serve_t *s, edge_auth_ctx_t *auth);
 
 /**
  * Feed inbound bytes.

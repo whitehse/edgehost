@@ -24,6 +24,12 @@ void edge_config_defaults(edge_config_t *c)
     c->http_max_upstream_body_bytes = 4u * 1024u * 1024u;
     c->state_net_core_enabled = 1;
     c->state_map_dynamic_enabled = 1;
+    snprintf(c->auth_mode, sizeof(c->auth_mode), "open");
+    snprintf(c->auth_lab_password_env, sizeof(c->auth_lab_password_env),
+             "EDGEHOST_LAB_PASSWORD");
+    snprintf(c->auth_session_hmac_key_env, sizeof(c->auth_session_hmac_key_env),
+             "EDGEHOST_SESSION_HMAC");
+    c->auth_session_ttl_s = 28800;
     c->generation = 0;
 }
 
@@ -62,6 +68,21 @@ int edge_config_validate(const edge_config_t *c, char *err, size_t err_len)
     if (c->http_max_upstream_body_bytes == 0) {
         if (err && err_len) {
             snprintf(err, err_len, "http.max_upstream_body_bytes must be > 0");
+        }
+        return -1;
+    }
+    if (c->auth_mode[0] != '\0' &&
+        strcmp(c->auth_mode, "open") != 0 &&
+        strcmp(c->auth_mode, "lab_password") != 0 &&
+        strcmp(c->auth_mode, "proxy_headers") != 0) {
+        if (err && err_len) {
+            snprintf(err, err_len, "auth.mode invalid (open|lab_password|proxy_headers)");
+        }
+        return -1;
+    }
+    if (c->auth_session_ttl_s == 0) {
+        if (err && err_len) {
+            snprintf(err, err_len, "auth.session_ttl_s must be > 0");
         }
         return -1;
     }

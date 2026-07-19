@@ -7,6 +7,7 @@
 
 #include "edge_iouring.h"
 
+#include "edge_auth.h"
 #include "edge_http1_serve.h"
 #include "edge_state.h"
 #include "edge_ws.h"
@@ -74,6 +75,7 @@ typedef struct {
     edge_state_store_t        *store;
     int                        store_owned;
     edge_ws_hub_t             *hub;
+    edge_auth_ctx_t           *auth; /* not owned; may be NULL */
 } server_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
@@ -91,6 +93,7 @@ void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
     o->static_body_len = 0;
     o->metrics = NULL;
     o->state = NULL;
+    o->auth = NULL;
 }
 
 static uint64_t pack_ud(int op, int slot)
@@ -214,6 +217,7 @@ static conn_t *alloc_conn(server_t *srv)
             edge_http1_serve_set_docroots(c->http, &srv->docroots);
             edge_http1_serve_set_state(c->http, srv->store);
             edge_http1_serve_set_ws_hub(c->http, srv->hub);
+            edge_http1_serve_set_auth(c->http, srv->auth);
             return c;
         }
     }
@@ -551,6 +555,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         srv.metrics = &srv.metrics_local;
     }
 
+    srv.auth = opts->auth;
     srv.hub = edge_ws_hub_create((size_t)srv.max_conns);
     if (!srv.hub) {
         if (srv.store_owned && srv.store) {

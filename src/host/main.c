@@ -1,8 +1,9 @@
 /**
  * @file main.c
- * @brief edgehost process entry — config load + io_uring HTTP/1 + /health (P1.4c).
+ * @brief edgehost process entry — config, auth, io_uring HTTP/WS (P1.7c).
  */
 
+#include "edge_auth_host.h"
 #include "edge_config.h"
 #include "edge_config_hup.h"
 #include "edge_iouring.h"
@@ -42,6 +43,7 @@ int main(int argc, char **argv)
     edge_config_t cfg;
     edgecore_t *core;
     edge_iouring_opts_t iopts;
+    edge_auth_ctx_t auth;
     edge_event_t ev;
     char err[160];
     int rc;
@@ -124,8 +126,20 @@ int main(int argc, char **argv)
     }
     edgehost_hup_install();
 
+    if (edge_auth_ctx_from_config(edgecore_config(core), &auth, err,
+                                  sizeof(err)) != 0) {
+        fprintf(stderr, "edgehost: auth init failed: %s\n", err);
+        edgecore_destroy(core);
+        return 1;
+    }
+    if (auth.mode == EDGE_AUTH_MODE_LAB_PASSWORD) {
+        fprintf(stderr,
+                "edgehost: auth mode=lab_password (POST /auth/lab-login)\n");
+    }
+
     edge_iouring_opts_defaults(&iopts);
     iopts.stop = &g_stop;
+    iopts.auth = &auth;
     if (once) {
         iopts.max_accepts = 1;
     }

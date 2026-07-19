@@ -182,6 +182,33 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->state_map_dynamic_enabled = iv;
         return 0;
     }
+    if (strcmp(key, "auth.mode") == 0) {
+        if (copy_str(c->auth_mode, sizeof(c->auth_mode), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "auth.lab_password_env") == 0) {
+        if (copy_str(c->auth_lab_password_env, sizeof(c->auth_lab_password_env),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "auth.session_hmac_key_env") == 0) {
+        if (copy_str(c->auth_session_hmac_key_env,
+                     sizeof(c->auth_session_hmac_key_env), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "auth.session_ttl_s") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid ttl");
+        }
+        c->auth_session_ttl_s = (uint32_t)sz;
+        return 0;
+    }
 #undef FAIL
     return 0; /* unknown keys ignored */
 }
@@ -205,6 +232,10 @@ static const char *const g_paths[] = {
     "state.map_dynamic.enabled",
     "state.enable_net_core",
     "state.enable_map_dynamic",
+    "auth.mode",
+    "auth.lab_password_env",
+    "auth.session_hmac_key_env",
+    "auth.session_ttl_s",
     NULL
 };
 

@@ -1,6 +1,6 @@
 /**
  * @file edge_http1_serve.c
- * @brief HTTP/1 parse + routing: health, SPA, packages, state REST, WS stream.
+ * @brief HTTP/1 parse + routing: health, SPA, packages, state, WS, lab auth.
  */
 
 #include "edge_http1_serve.h"
@@ -25,8 +25,10 @@ struct edge_http1_serve {
     edge_http1_docroot_t roots;
     edge_state_store_t  *store; /* not owned */
     edge_ws_hub_t       *hub;   /* not owned */
+    edge_auth_ctx_t     *auth;  /* not owned */
+    edge_principal_t     principal;
 
-    /* Accumulated request for body (PUT) — host buffer */
+    /* Accumulated request for body (PUT/POST) — host buffer */
     uint8_t              acc[EDGE_HTTP_ACC_MAX];
     size_t               acc_len;
     long                 content_length; /* -1 unknown */
@@ -38,6 +40,9 @@ struct edge_http1_serve {
     char                 ws_key[EDGE_WS_KEY_MAX];
     char                 request_id[EDGE_WS_REQUEST_ID];
 };
+
+static void note_response(edge_metrics_t *m, int status);
+static void mark_body_off(edge_http1_serve_t *s);
 
 static int path_is_health(const char *path)
 {
@@ -151,9 +156,10 @@ static int path_is_state(const char *path, char *ns_out, size_t ns_sz,
     }
 }
 
-static int build_response(char *out, size_t out_cap, int status,
-                          const char *reason, const char *ctype,
-                          const char *body, size_t body_len, size_t *out_len)
+static int build_response_ex(char *out, size_t out_cap, int status,
+                             const char *reason, const char *ctype,
+                             const char *extra_headers, const char *body,
+                             size_t body_len, size_t *out_len)
 {
     int n;
 
@@ -170,13 +176,17 @@ static int build_response(char *out, size_t out_cap, int status,
         body = "";
         body_len = 0;
     }
+    if (!extra_headers) {
+        extra_headers = "";
+    }
     n = snprintf(out, out_cap,
                  "HTTP/1.1 %d %s\r\n"
                  "Content-Type: %s\r\n"
                  "Content-Length: %zu\r\n"
+                 "%s"
                  "Connection: close\r\n"
                  "\r\n",
-                 status, reason, ctype, body_len);
+                 status, reason, ctype, body_len, extra_headers);
     if (n < 0 || (size_t)n >= out_cap) {
         return -1;
     }
@@ -189,6 +199,108 @@ static int build_response(char *out, size_t out_cap, int status,
     }
     *out_len = (size_t)n;
     return 0;
+}
+
+static int build_response(char *out, size_t out_cap, int status,
+                          const char *reason, const char *ctype,
+                          const char *body, size_t body_len, size_t *out_len)
+{
+    return build_response_ex(out, out_cap, status, reason, ctype, NULL, body,
+                             body_len, out_len);
+}
+
+static int auth_enforced(const edge_http1_serve_t *s)
+{
+    return s && s->auth && s->auth->mode == EDGE_AUTH_MODE_LAB_PASSWORD;
+}
+
+static int deny_unauthorized(edge_metrics_t *metrics, char *out, size_t out_cap,
+                             size_t *out_len)
+{
+    static const char body[] = "{\"error\":\"UNAUTHORIZED\"}";
+    if (build_response(out, out_cap, 401, "Unauthorized", "application/json",
+                       body, sizeof(body) - 1, out_len) != 0) {
+        return -1;
+    }
+    note_response(metrics, 401);
+    return 1;
+}
+
+static int deny_forbidden(edge_metrics_t *metrics, char *out, size_t out_cap,
+                          size_t *out_len)
+{
+    static const char body[] = "{\"error\":\"FORBIDDEN\"}";
+    if (build_response(out, out_cap, 403, "Forbidden", "application/json", body,
+                       sizeof(body) - 1, out_len) != 0) {
+        return -1;
+    }
+    note_response(metrics, 403);
+    return 1;
+}
+
+/** @return 0 allowed, 1 response written (deny), -1 hard error */
+static int require_rbac(edge_http1_serve_t *s, edge_auth_resource_t res,
+                        const char *ns, const char *key, edge_metrics_t *metrics,
+                        char *out, size_t out_cap, size_t *out_len)
+{
+    edge_auth_decision_t d;
+
+    if (!auth_enforced(s) || res == EDGE_RES_NONE) {
+        return 0;
+    }
+    if (!s->principal.authenticated) {
+        return deny_unauthorized(metrics, out, out_cap, out_len);
+    }
+    d = edge_auth_rbac_check(&s->principal, res, ns, key);
+    if (d != EDGE_AUTH_ALLOW) {
+        return deny_forbidden(metrics, out, out_cap, out_len);
+    }
+    return 0;
+}
+
+static int path_is_lab_login(const char *path)
+{
+    return path && (strcmp(path, "/auth/lab-login") == 0 ||
+                    strncmp(path, "/auth/lab-login?", 16) == 0);
+}
+
+static int path_is_auth_me(const char *path)
+{
+    return path &&
+           (strcmp(path, "/auth/me") == 0 || strncmp(path, "/auth/me?", 9) == 0);
+}
+
+static int wait_full_body(edge_http1_serve_t *s)
+{
+    size_t have = 0;
+    if (s->content_length <= 0) {
+        return 1;
+    }
+    if (!s->have_body_off) {
+        mark_body_off(s);
+    }
+    if (s->have_body_off) {
+        have = s->acc_len - s->body_off;
+    }
+    return have >= (size_t)s->content_length;
+}
+
+static int get_body(edge_http1_serve_t *s, const char **body, size_t *blen)
+{
+    if (!s->have_body_off) {
+        mark_body_off(s);
+    }
+    if (!s->have_body_off) {
+        *body = "";
+        *blen = 0;
+        return 0;
+    }
+    *body = (const char *)(s->acc + s->body_off);
+    *blen = s->acc_len > s->body_off ? s->acc_len - s->body_off : 0;
+    if (s->content_length >= 0 && *blen > (size_t)s->content_length) {
+        *blen = (size_t)s->content_length;
+    }
+    return 1;
 }
 
 static void note_response(edge_metrics_t *m, int status)
@@ -302,11 +414,146 @@ static void notify_state_changed(edge_http1_serve_t *s, const char *ns,
                                               value_len, s->request_id);
 }
 
+static int dispatch_lab_login(edge_http1_serve_t *s, edge_metrics_t *metrics,
+                              char *out, size_t out_cap, size_t *out_len)
+{
+    const char *body;
+    size_t blen;
+    char password[EDGE_AUTH_PASSWORD_MAX];
+    char cookie_val[EDGE_AUTH_COOKIE_MAX];
+    char set_cookie[EDGE_AUTH_COOKIE_MAX + 128];
+    char json[256];
+    edge_principal_t issued;
+    int n;
+    uint32_t ttl;
+
+    if (!path_is_lab_login(s->path)) {
+        return 0;
+    }
+    if (strcmp(s->method, "POST") != 0) {
+        if (build_response(out, out_cap, 405, "Method Not Allowed",
+                           "application/json", "{\"error\":\"METHOD\"}", 18,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 405);
+        return 1;
+    }
+    if (!s->auth || s->auth->mode != EDGE_AUTH_MODE_LAB_PASSWORD) {
+        if (build_response(out, out_cap, 503, "Service Unavailable",
+                           "application/json",
+                           "{\"error\":\"AUTH_DISABLED\"}", 26, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 503);
+        return 1;
+    }
+    if (!wait_full_body(s)) {
+        return 0;
+    }
+    get_body(s, &body, &blen);
+    if (edge_auth_parse_login_password(body, blen, password, sizeof(password)) !=
+        0) {
+        if (build_response(out, out_cap, 400, "Bad Request", "application/json",
+                           "{\"error\":\"BAD_BODY\"}", 19, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 400);
+        return 1;
+    }
+    if (!edge_auth_password_ok(s->auth, password, strlen(password))) {
+        if (build_response(out, out_cap, 401, "Unauthorized", "application/json",
+                           "{\"error\":\"BAD_PASSWORD\"}", 24, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 401);
+        return 1;
+    }
+    if (edge_auth_session_issue(s->auth, "lab", EDGE_ROLE_EMPLOYEE, cookie_val,
+                                sizeof(cookie_val), &issued) != 0) {
+        if (build_response(out, out_cap, 500, "Internal Server Error",
+                           "application/json", "{\"error\":\"SESSION\"}", 19,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 500);
+        return 1;
+    }
+    s->principal = issued;
+    ttl = s->auth->session_ttl_s ? s->auth->session_ttl_s : 28800;
+    n = snprintf(set_cookie, sizeof(set_cookie),
+                 "Set-Cookie: %s=%s; HttpOnly; Path=/; SameSite=Lax; Max-Age=%u\r\n",
+                 EDGE_AUTH_COOKIE_NAME, cookie_val, (unsigned)ttl);
+    if (n < 0 || (size_t)n >= sizeof(set_cookie)) {
+        return -1;
+    }
+    n = snprintf(json, sizeof(json),
+                 "{\"ok\":true,\"sub\":\"%s\",\"roles\":[\"employee\"],\"exp\":%lld}",
+                 issued.sub, (long long)issued.exp);
+    if (n < 0 || (size_t)n >= sizeof(json)) {
+        return -1;
+    }
+    if (build_response_ex(out, out_cap, 200, "OK", "application/json", set_cookie,
+                          json, (size_t)n, out_len) != 0) {
+        return -1;
+    }
+    note_response(metrics, 200);
+    return 1;
+}
+
+static int dispatch_auth_me(edge_http1_serve_t *s, edge_metrics_t *metrics,
+                            char *out, size_t out_cap, size_t *out_len)
+{
+    char json[256];
+    int n;
+
+    if (!path_is_auth_me(s->path)) {
+        return 0;
+    }
+    if (strcmp(s->method, "GET") != 0) {
+        if (build_response(out, out_cap, 405, "Method Not Allowed",
+                           "application/json", "{\"error\":\"METHOD\"}", 18,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 405);
+        return 1;
+    }
+    if (!s->principal.authenticated) {
+        return deny_unauthorized(metrics, out, out_cap, out_len);
+    }
+    n = snprintf(json, sizeof(json),
+                 "{\"sub\":\"%s\",\"roles\":[\"employee\"],\"exp\":%lld}",
+                 s->principal.sub, (long long)s->principal.exp);
+    if (edge_auth_role_has(s->principal.roles, EDGE_ROLE_EMPLOYEE_ADMIN)) {
+        n = snprintf(json, sizeof(json),
+                     "{\"sub\":\"%s\",\"roles\":[\"employee\",\"employee_admin\"],"
+                     "\"exp\":%lld}",
+                     s->principal.sub, (long long)s->principal.exp);
+    }
+    if (n < 0 || (size_t)n >= sizeof(json)) {
+        return -1;
+    }
+    if (build_response(out, out_cap, 200, "OK", "application/json", json,
+                       (size_t)n, out_len) != 0) {
+        return -1;
+    }
+    note_response(metrics, 200);
+    return 1;
+}
+
 static int dispatch_stream(edge_http1_serve_t *s, edge_metrics_t *metrics,
                            char *out, size_t out_cap, size_t *out_len)
 {
+    int gate;
+
     if (!edge_ws_path_is_stream(s->path)) {
         return 0;
+    }
+    gate = require_rbac(s, EDGE_RES_WS_STREAM, NULL, NULL, metrics, out, out_cap,
+                        out_len);
+    if (gate != 0) {
+        return gate;
     }
     if (strcmp(s->method, "GET") != 0) {
         if (build_response(out, out_cap, 405, "Method Not Allowed",
@@ -356,10 +603,18 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
     char errbody[128];
     char valbuf[EDGE_STATE_VALUE_MAX + 1];
     size_t vlen = 0;
+    edge_auth_resource_t res;
+    int gate;
 
     if (!path_is_state(s->path, ns, sizeof(ns), key, sizeof(key), prefix,
                        sizeof(prefix), &is_list)) {
         return 0; /* not state path */
+    }
+    res = edge_auth_classify(s->method, s->path, is_list);
+    gate = require_rbac(s, res, ns, key[0] ? key : NULL, metrics, out, out_cap,
+                        out_len);
+    if (gate != 0) {
+        return gate;
     }
     if (!s->store) {
         if (build_response(out, out_cap, 503, "Service Unavailable",
@@ -530,6 +785,16 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
     max_file = s->roots.max_file_bytes ? s->roots.max_file_bytes
                                        : EDGE_STATIC_MAX_FILE;
 
+    /* Auth routes (P1.7c) */
+    st = dispatch_lab_login(s, metrics, out, out_cap, out_len);
+    if (st != 0) {
+        return st;
+    }
+    st = dispatch_auth_me(s, metrics, out, out_cap, out_len);
+    if (st != 0) {
+        return st;
+    }
+
     /* WebSocket stream upgrade (P1.7b) */
     if (edge_ws_path_is_stream(s->path)) {
         st = dispatch_stream(s, metrics, out, out_cap, out_len);
@@ -581,6 +846,11 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
     }
 
     if (path_is_packages(s->path, &pkg_suffix)) {
+        st = require_rbac(s, EDGE_RES_PACKAGES, NULL, NULL, metrics, out,
+                          out_cap, out_len);
+        if (st != 0) {
+            return st;
+        }
         if (s->roots.packages_root && s->roots.packages_root[0] &&
             try_static(s->roots.packages_root, pkg_suffix, max_file, out,
                        out_cap, out_len) == 0) {
@@ -669,6 +939,7 @@ void edge_http1_serve_reset(edge_http1_serve_t *s)
     s->ws_upgrade = 0;
     s->ws_key[0] = '\0';
     s->request_id[0] = '\0';
+    edge_principal_clear(&s->principal);
 }
 
 void edge_http1_serve_set_docroots(edge_http1_serve_t *s,
@@ -695,6 +966,13 @@ void edge_http1_serve_set_ws_hub(edge_http1_serve_t *s, edge_ws_hub_t *hub)
 {
     if (s) {
         s->hub = hub;
+    }
+}
+
+void edge_http1_serve_set_auth(edge_http1_serve_t *s, edge_auth_ctx_t *auth)
+{
+    if (s) {
+        s->auth = auth;
     }
 }
 
@@ -769,6 +1047,8 @@ int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len
                      ev.u.http1_request.path);
         } else if (ev.type == HTTP1_EVENT_HEADERS_COMPLETE) {
             char rid[EDGE_WS_REQUEST_ID];
+            char cookie_hdr[768];
+            char cookie_val[EDGE_AUTH_COOKIE_MAX];
             s->headers_done = 1;
             headers_just_done = 1;
             mark_body_off(s);
@@ -791,6 +1071,15 @@ int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len
             } else {
                 snprintf(s->request_id, sizeof(s->request_id), "eh0");
             }
+            edge_principal_clear(&s->principal);
+            if (s->auth && s->auth->mode == EDGE_AUTH_MODE_LAB_PASSWORD &&
+                http1_get_header(s->h1, "Cookie", cookie_hdr,
+                                 sizeof(cookie_hdr)) == 0 &&
+                edge_auth_cookie_extract(cookie_hdr, cookie_val,
+                                         sizeof(cookie_val)) == 0) {
+                (void)edge_auth_session_verify(s->auth, cookie_val,
+                                               &s->principal);
+            }
         } else if (ev.type == HTTP1_EVENT_BODY_CHUNK) {
             /* body also in acc; length tracked via content_length */
         }
@@ -811,16 +1100,10 @@ int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len
         return 0;
     }
 
-    /* PUT with body: wait until full body present in acc */
-    if (strcmp(s->method, "PUT") == 0 && s->content_length > 0) {
-        size_t have = 0;
-        if (!s->have_body_off) {
-            mark_body_off(s);
-        }
-        if (s->have_body_off) {
-            have = s->acc_len - s->body_off;
-        }
-        if (have < (size_t)s->content_length) {
+    /* PUT/POST with body: wait until full body present in acc */
+    if ((strcmp(s->method, "PUT") == 0 || strcmp(s->method, "POST") == 0) &&
+        s->content_length > 0) {
+        if (!wait_full_body(s)) {
             (void)headers_just_done;
             return 0;
         }

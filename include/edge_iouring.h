@@ -12,6 +12,7 @@
 #ifndef EDGE_IOURING_H
 #define EDGE_IOURING_H
 
+#include "edge_auth.h"
 #include "edge_config.h"
 #include "edge_metrics.h"
 #include "edge_state.h"
@@ -51,6 +52,11 @@ typedef struct {
      * and destroyed on exit. Not destroyed if caller-provided.
      */
     edge_state_store_t *state;
+    /**
+     * Optional auth context (P1.7c). If NULL, auth mode OPEN (no checks).
+     * Not destroyed (caller-owned).
+     */
+    edge_auth_ctx_t *auth;
 } edge_iouring_opts_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o);

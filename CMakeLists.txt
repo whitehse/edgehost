@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.7b: WS /api/v1/stream fan-out STATE_CHANGED.
+# P1.7c: auth_rbac + lab password session (ADR-013).
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.7.1)
+project(edgehost LANGUAGES C VERSION 0.7.2)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -75,6 +75,7 @@ add_library(edgecore STATIC
   src/core/edgecore.c
   src/core/edge_config.c
   src/core/state_store.c
+  src/core/auth_rbac.c
 )
 target_include_directories(edgecore PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -88,10 +89,11 @@ target_include_directories(edgehost_alloc PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# --- Host: YAML config ---
+# --- Host: YAML config + auth secret resolve ---
 add_library(edgehost_config STATIC
   src/host/config_yaml.c
   src/host/config_hup.c
+  src/host/auth_host.c
 )
 target_include_directories(edgehost_config PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -212,6 +214,9 @@ target_link_libraries(edgehost_state_test PRIVATE edgecore edgehost_http)
 add_executable(edgehost_ws_test tests/test_ws_stream.c)
 target_link_libraries(edgehost_ws_test PRIVATE edgecore edgehost_http)
 
+add_executable(edgehost_auth_test tests/test_auth.c)
+target_link_libraries(edgehost_auth_test PRIVATE edgecore edgehost_http edgehost_config)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -223,6 +228,7 @@ add_test(NAME edgehost_static_files COMMAND edgehost_static_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME edgehost_state_store COMMAND edgehost_state_test)
 add_test(NAME edgehost_ws_stream COMMAND edgehost_ws_test)
+add_test(NAME edgehost_auth COMMAND edgehost_auth_test)
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)

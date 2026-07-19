@@ -28,3 +28,14 @@ state:
       enabled: true
     map_dynamic:
       enabled: true
+
+# Auth (P1.7c / ADR-013). Default open for local tests without secrets.
+# For lab SPA: mode lab_password and export:
+#   EDGEHOST_LAB_PASSWORD=...
+#   EDGEHOST_SESSION_HMAC=...
+auth:
+  mode: open                  # open | lab_password (proxy_headers = P1.7d)
+  lab_password_env: EDGEHOST_LAB_PASSWORD
+  session_hmac_key_env: EDGEHOST_SESSION_HMAC
+  session_ttl_s: 28800
+
