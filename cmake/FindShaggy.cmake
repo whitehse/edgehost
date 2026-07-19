@@ -8,8 +8,11 @@ edgehost_resolve_sibling_root(_shaggy_root "shaggy" SHAGGY_ROOT)
 set(SHAGGY_ROOT "${_shaggy_root}" CACHE PATH "Path to shaggy checkout")
 
 edgehost_find_header_tree(SHAGGY_INCLUDE_DIRS "${SHAGGY_ROOT}" "http1.h")
-edgehost_try_import_static(SHAGGY_LIBRARY "${SHAGGY_ROOT}" "http" "${SHAGGY_INCLUDE_DIRS}")
-# shaggy library target name may be libhttp / libshaggy depending on tree
+# Prefer libhttp1.a (current shaggy CMake); fall back to legacy names.
+edgehost_try_import_static(SHAGGY_LIBRARY "${SHAGGY_ROOT}" "http1" "${SHAGGY_INCLUDE_DIRS}")
+if(NOT SHAGGY_LIBRARY)
+  edgehost_try_import_static(SHAGGY_LIBRARY "${SHAGGY_ROOT}" "http" "${SHAGGY_INCLUDE_DIRS}")
+endif()
 if(NOT SHAGGY_LIBRARY)
   edgehost_try_import_static(SHAGGY_LIBRARY "${SHAGGY_ROOT}" "shaggy" "${SHAGGY_INCLUDE_DIRS}")
 endif()

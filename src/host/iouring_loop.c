@@ -1,9 +1,10 @@
 /**
  * @file iouring_loop.c
- * @brief P1.4a: io_uring accept + fixed static TCP response (no shaggy, no TLS).
+ * @brief P1.4b: io_uring accept + shaggy HTTP/1 parse + simple static body.
  *
- * Pattern follows pqproxy/src/iouring_loop.c (accept/recv/send user_data packing)
- * without protocol machines.
+ * Accept/recv/send packing follows pqproxy. Request parsing uses shaggy
+ * HTTP1_ROLE_SERVER (feed_input / next_event). Response bytes are host-built
+ * (shaggy server does not serialize responses); body stays static until P1.4c.
  */
 
 #define _GNU_SOURCE
@@ -21,6 +22,9 @@
 #include <unistd.h>
 
 #include <liburing.h>
+
+#include "http1.h"
+#include "protocol_events.h"
 
 enum {
     OP_ACCEPT = 1,
@@ -42,33 +46,31 @@ typedef struct {
     int           recv_pending;
     int           send_pending;
     uint8_t       recv_buf[4096];
-    const char   *send_ptr;
+    char          send_buf[1024];
     size_t        send_len;
     size_t        send_off;
+    http1_ctx_t  *h1;
+    char          method[16];
+    char          path[256];
+    int           headers_done;
 } conn_t;
 
 typedef struct {
-    const edge_config_t      *cfg;
+    const edge_config_t       *cfg;
     const edge_iouring_opts_t *opts;
-    struct io_uring           ring;
-    int                       listen_fd;
-    conn_t                   *conns;
-    int                       max_conns;
-    struct sockaddr_storage   client_addr;
-    socklen_t                 client_addr_len;
-    int                       accepts_done;
-    int                       accept_pending;
-    const char               *static_resp;
-    size_t                    static_resp_len;
+    struct io_uring            ring;
+    int                        listen_fd;
+    conn_t                    *conns;
+    int                        max_conns;
+    struct sockaddr_storage    client_addr;
+    socklen_t                  client_addr_len;
+    int                        accepts_done;
+    int                        accept_pending;
+    const char                *static_body;
+    size_t                     static_body_len;
 } server_t;
 
-static const char k_default_resp[] =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/plain\r\n"
-    "Content-Length: 3\r\n"
-    "Connection: close\r\n"
-    "\r\n"
-    "ok\n";
+static const char k_default_body[] = "ok\n";
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
 {
@@ -81,8 +83,8 @@ void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
     o->backlog = 128;
     o->max_accepts = 0;
     o->stop = NULL;
-    o->static_response = NULL;
-    o->static_response_len = 0;
+    o->static_body = NULL;
+    o->static_body_len = 0;
 }
 
 static uint64_t pack_ud(int op, int slot)
@@ -150,6 +152,26 @@ static int create_listen_socket(const edge_config_t *cfg, int backlog)
     return fd;
 }
 
+static void close_conn(conn_t *c)
+{
+    if (!c || c->state == CS_FREE) {
+        return;
+    }
+    if (c->h1) {
+        http1_destroy(c->h1);
+        c->h1 = NULL;
+    }
+    if (c->fd >= 0) {
+        close(c->fd);
+        c->fd = -1;
+    }
+    c->state = CS_FREE;
+    c->recv_pending = c->send_pending = 0;
+    c->send_len = c->send_off = 0;
+    c->headers_done = 0;
+    c->method[0] = c->path[0] = '\0';
+}
+
 static conn_t *alloc_conn(server_t *srv)
 {
     int i;
@@ -160,25 +182,14 @@ static conn_t *alloc_conn(server_t *srv)
             c->slot = i;
             c->fd = -1;
             c->state = CS_RECV;
+            c->h1 = http1_create(HTTP1_ROLE_SERVER);
+            if (!c->h1) {
+                return NULL;
+            }
             return c;
         }
     }
     return NULL;
-}
-
-static void close_conn(conn_t *c)
-{
-    if (!c || c->state == CS_FREE) {
-        return;
-    }
-    if (c->fd >= 0) {
-        close(c->fd);
-        c->fd = -1;
-    }
-    c->state = CS_FREE;
-    c->recv_pending = c->send_pending = 0;
-    c->send_len = c->send_off = 0;
-    c->send_ptr = NULL;
 }
 
 static int submit_accept(server_t *srv)
@@ -209,7 +220,7 @@ static int submit_recv(server_t *srv, conn_t *c)
 {
     struct io_uring_sqe *sqe;
 
-    if (c->recv_pending || c->state == CS_FREE || c->state == CS_CLOSING) {
+    if (c->recv_pending || c->state != CS_RECV) {
         return 0;
     }
     sqe = io_uring_get_sqe(&srv->ring);
@@ -235,19 +246,117 @@ static int submit_send(server_t *srv, conn_t *c)
     if (!sqe) {
         return -1;
     }
-    io_uring_prep_send(sqe, c->fd, c->send_ptr + c->send_off, n, 0);
+    io_uring_prep_send(sqe, c->fd, c->send_buf + c->send_off, n, 0);
     io_uring_sqe_set_data64(sqe, pack_ud(OP_SEND, c->slot));
     c->send_pending = 1;
     return 0;
 }
 
-static int begin_static_send(server_t *srv, conn_t *c)
+/**
+ * Build a simple HTTP/1.1 response into c->send_buf and start send.
+ * body may be NULL for empty body.
+ */
+static int begin_response(server_t *srv, conn_t *c, int status,
+                          const char *reason, const char *ctype,
+                          const char *body, size_t body_len)
 {
-    c->state = CS_SEND;
-    c->send_ptr = srv->static_resp;
-    c->send_len = srv->static_resp_len;
+    int n;
+
+    if (!reason) {
+        reason = "OK";
+    }
+    if (!ctype) {
+        ctype = "text/plain";
+    }
+    if (!body) {
+        body = "";
+        body_len = 0;
+    }
+
+    n = snprintf(c->send_buf, sizeof(c->send_buf),
+                 "HTTP/1.1 %d %s\r\n"
+                 "Content-Type: %s\r\n"
+                 "Content-Length: %zu\r\n"
+                 "Connection: close\r\n"
+                 "\r\n",
+                 status, reason, ctype, body_len);
+    if (n < 0 || (size_t)n >= sizeof(c->send_buf)) {
+        return -1;
+    }
+    if (body_len > 0) {
+        if ((size_t)n + body_len >= sizeof(c->send_buf)) {
+            return -1;
+        }
+        memcpy(c->send_buf + n, body, body_len);
+        n += (int)body_len;
+    }
+    c->send_len = (size_t)n;
     c->send_off = 0;
+    c->state = CS_SEND;
+    (void)srv;
     return submit_send(srv, c);
+}
+
+static int begin_ok(server_t *srv, conn_t *c)
+{
+    return begin_response(srv, c, 200, "OK", "text/plain",
+                          srv->static_body, srv->static_body_len);
+}
+
+static int begin_bad_request(server_t *srv, conn_t *c)
+{
+    static const char body[] = "bad request\n";
+    return begin_response(srv, c, 400, "Bad Request", "text/plain", body,
+                          sizeof(body) - 1);
+}
+
+/**
+ * Feed bytes into shaggy and act on events.
+ * @return 1 response started, 0 need more data, -1 close
+ */
+static int on_http1_bytes(server_t *srv, conn_t *c, const uint8_t *data,
+                          size_t len)
+{
+    protocol_event_t ev;
+    int respond = 0;
+    int bad = 0;
+
+    if (!c->h1 || len == 0) {
+        return -1;
+    }
+
+    (void)http1_feed_input(c->h1, data, len);
+
+    while (http1_next_event(c->h1, &ev)) {
+        if (ev.type == PROTOCOL_EVENT_ERROR) {
+            bad = 1;
+            break;
+        }
+        if (ev.type == HTTP1_EVENT_REQUEST_LINE) {
+            snprintf(c->method, sizeof(c->method), "%s",
+                     ev.u.http1_request.method);
+            snprintf(c->path, sizeof(c->path), "%s",
+                     ev.u.http1_request.path);
+        } else if (ev.type == HTTP1_EVENT_HEADERS_COMPLETE) {
+            c->headers_done = 1;
+            respond = 1;
+            /* P1.4b: respond after headers; body ignored for static reply. */
+        }
+    }
+
+    if (bad) {
+        if (begin_bad_request(srv, c) != 0) {
+            return -1;
+        }
+        return 1;
+    }
+    if (respond) {
+        if (begin_ok(srv, c) != 0) {
+            return -1;
+        }
+        return 1;
+    }
+    return 0;
 }
 
 static int accept_one(server_t *srv, int client_fd)
@@ -283,7 +392,6 @@ static int should_stop(const server_t *srv)
     if (srv->opts->max_accepts > 0 &&
         srv->accepts_done >= srv->opts->max_accepts) {
         int i;
-        /* Wait until no live conns and no pending accept. */
         if (srv->accept_pending) {
             return 0;
         }
@@ -318,12 +426,12 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     srv.opts = opts;
     srv.listen_fd = -1;
     srv.max_conns = opts->max_conns > 0 ? opts->max_conns : 64;
-    if (opts->static_response && opts->static_response_len > 0) {
-        srv.static_resp = opts->static_response;
-        srv.static_resp_len = opts->static_response_len;
+    if (opts->static_body && opts->static_body_len > 0) {
+        srv.static_body = opts->static_body;
+        srv.static_body_len = opts->static_body_len;
     } else {
-        srv.static_resp = k_default_resp;
-        srv.static_resp_len = sizeof(k_default_resp) - 1;
+        srv.static_body = k_default_body;
+        srv.static_body_len = sizeof(k_default_body) - 1;
     }
 
     srv.conns = (conn_t *)calloc((size_t)srv.max_conns, sizeof(conn_t));
@@ -362,7 +470,8 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     }
     io_uring_submit(&srv.ring);
 
-    fprintf(stderr, "edgehost: listening on %s:%u (plain TCP static P1.4a)\n",
+    fprintf(stderr,
+            "edgehost: listening on %s:%u (HTTP/1 shaggy bridge P1.4b)\n",
             cfg->listen_host[0] ? cfg->listen_host : "0.0.0.0",
             (unsigned)cfg->listen_port);
 
@@ -373,7 +482,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         int res;
 
         ts.tv_sec = 0;
-        ts.tv_nsec = 200 * 1000 * 1000L; /* 200ms — notice stop/HUP later */
+        ts.tv_nsec = 200 * 1000 * 1000L;
         rc = io_uring_wait_cqe_timeout(&srv.ring, &cqe, &ts);
         if (rc == -ETIME || rc == -EAGAIN) {
             if (should_stop(&srv)) {
@@ -407,20 +516,30 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             conn_t *c = (slot >= 0 && slot < srv.max_conns)
                             ? &srv.conns[slot]
                             : NULL;
-            if (c && c->state != CS_FREE) {
+            if (c && c->state == CS_RECV) {
+                int pr;
                 c->recv_pending = 0;
                 if (res < 0) {
                     close_conn(c);
                 } else if (res == 0) {
-                    /* peer closed before request — still try static send once */
-                    if (begin_static_send(&srv, c) != 0) {
+                    /* peer closed mid-headers → 400 if nothing sent yet */
+                    if (!c->headers_done) {
+                        if (begin_bad_request(&srv, c) != 0) {
+                            close_conn(c);
+                        }
+                    } else {
                         close_conn(c);
                     }
                 } else {
-                    /* Any inbound data → fixed static response (no parse). */
-                    if (begin_static_send(&srv, c) != 0) {
+                    pr = on_http1_bytes(&srv, c, c->recv_buf, (size_t)res);
+                    if (pr < 0) {
                         close_conn(c);
+                    } else if (pr == 0) {
+                        if (submit_recv(&srv, c) != 0) {
+                            close_conn(c);
+                        }
                     }
+                    /* pr == 1 → send already submitted */
                 }
             }
         } else if (op == OP_SEND) {

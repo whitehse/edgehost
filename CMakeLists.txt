@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.4a: io_uring accept + fixed static response (plain TCP).
+# P1.4b: io_uring + shaggy HTTP/1 parse bridge (static simple body).
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.4.0)
+project(edgehost LANGUAGES C VERSION 0.4.1)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -61,6 +61,17 @@ message(STATUS "  libslack   FOUND=${Libslack_FOUND} ROOT=${LIBSLACK_ROOT}")
 message(STATUS "  libteams   FOUND=${Libteams_FOUND} ROOT=${LIBTEAMS_ROOT}")
 message(STATUS "  libwebmap  FOUND=${Libwebmap_FOUND} ROOT=${LIBWEBMAP_ROOT}")
 message(STATUS "  libsim     FOUND=${Libsim_FOUND} ROOT=${LIBSIM_ROOT}")
+if(Shaggy_FOUND)
+  message(STATUS "  shaggy lib  ${SHAGGY_LIBRARY}")
+endif()
+
+if(EDGEHOST_REQUIRE_SIBLINGS AND Shaggy_FOUND AND NOT SHAGGY_LIBRARY)
+  message(FATAL_ERROR
+    "shaggy headers found but no static lib (expected "
+    "${SHAGGY_ROOT}/build/libhttp1.a). Build shaggy: "
+    "cmake -B ${SHAGGY_ROOT}/build -S ${SHAGGY_ROOT} && "
+    "cmake --build ${SHAGGY_ROOT}/build --target http1")
+endif()
 
 # --- libedgecore ---
 add_library(edgecore STATIC
@@ -104,6 +115,14 @@ target_include_directories(edgehost_iouring PUBLIC
 )
 target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
 target_link_libraries(edgehost_iouring PUBLIC edgecore ${LIBURING_LIBRARY})
+if(TARGET Shaggy::shaggy)
+  target_link_libraries(edgehost_iouring PUBLIC Shaggy::shaggy)
+elseif(SHAGGY_LIBRARY)
+  target_link_libraries(edgehost_iouring PUBLIC ${SHAGGY_LIBRARY})
+endif()
+if(Shaggy_FOUND AND TARGET Shaggy::headers)
+  target_link_libraries(edgehost_iouring PUBLIC Shaggy::headers)
+endif()
 
 # edgehost binary
 add_executable(edgehost src/host/main.c)

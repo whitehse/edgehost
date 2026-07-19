@@ -7,10 +7,10 @@
 - [x] **P1.2** host_alloc + NEED_ALLOC/NEED_REALLOC + ADR-003
 - [x] **P1.3** YAML load + SIGHUP apply + ADR-005
 - [x] **P1.4a** io_uring accept + fixed static response (plain TCP)
+- [x] **P1.4b** shaggy HTTP/1 parse bridge (static simple body)
 
 ## Next (program Track 1)
 
-- [ ] **P1.4b** shaggy HTTP/1 parse bridge
 - [ ] **P1.4c** `GET /health` JSON + metrics counters
 - [ ] **P1.5** sim_main fuzz (needs libsim P0.3)
 - [ ] **P1.6** static SPA root + package path

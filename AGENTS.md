@@ -7,7 +7,7 @@ malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
 does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.4a** — io_uring accept + fixed static response.
+**Current milestone**: **P1.4b** — shaggy HTTP/1 parse bridge.
 
 ## Key commands
 
@@ -22,7 +22,8 @@ deps/verify_pins.sh
 deps/update_pins.sh
 ```
 
-Requires: **liburing-dev**, sibling **libyaml** built (`~/libyaml/build/libyaml.a`).
+Requires: **liburing-dev**, sibling **libyaml** (`~/libyaml/build/libyaml.a`),
+sibling **shaggy** HTTP/1 (`~/shaggy/build/libhttp1.a`).
 
 Optional roots (same pattern as pqproxy):
 
@@ -94,5 +95,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.4a complete**: io_uring accept + fixed static HTTP-ish response (plain TCP).  
-**Next**: **P1.4b** — shaggy HTTP/1 parse bridge.
+**P1.4b complete**: shaggy HTTP/1 parse bridge; static simple body until P1.4c.  
+**Next**: **P1.4c** — `GET /health` JSON + metrics counters.

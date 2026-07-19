@@ -2,8 +2,8 @@
 
 ## Status
 
-**P1.4a**: plain TCP io_uring accept + fixed static response. No shaggy parse,
-no TLS yet.
+**P1.4b**: plain TCP io_uring accept + **shaggy HTTP/1** parse bridge.
+Response body is still a simple static `ok\n` (P1.4c adds real `/health` JSON).
 
 ## Split (ADR-002)
 
@@ -11,42 +11,43 @@ no TLS yet.
 |-------|------|-------|
 | **libedgecore** | `src/core/*` | Syscall-free; pull events; NEED_* memory; apply_config |
 | **YAML + HUP** | `src/host/config_*.c` | libyaml load; SIGHUP flag → reload |
-| **io_uring host** | `src/host/iouring_loop.c`, `main.c` | accept/recv/send; process binary |
+| **io_uring + HTTP/1** | `src/host/iouring_loop.c`, `main.c` | accept/recv/send; drives shaggy `http1_*` |
 | **host_alloc** | `src/host/host_alloc.c` | Process malloc for edgecore data |
-| **TLS (later)** | P1.13 | **OpenSSL non-blocking** (ADR-014); not mbedTLS |
+| **TLS (later)** | P1.13 | **OpenSSL non-blocking** (ADR-014) |
 | **Plugins / SPA** | planned | Grand functions; static UI |
 
-## TLS (ADR-014 / Key Decision 21 corrected)
+## HTTP/1 bridge (P1.4b)
+
+```
+accept → recv
+  → http1_create(HTTP1_ROLE_SERVER)
+  → http1_feed_input / http1_next_event
+  → HEADERS_COMPLETE → host-built HTTP/1.1 200 + static body
+  → PROTOCOL_EVENT_ERROR → 400 Bad Request
+  → close after send
+```
+
+- shaggy parses only; **response bytes are host-built** (shaggy server does not serialize replies).
+- Current shaggy request-line detector is **GET-oriented** (sibling limitation).
+- Partial feeds re-recv until headers complete.
+
+## TLS (ADR-014)
 
 | Host | Library |
 |------|---------|
-| edgehost | **OpenSSL** non-blocking (`SSL_set_fd` + uring POLL) |
+| edgehost | **OpenSSL** non-blocking (P1.13) |
 | CPE agent | **mbedTLS** |
-| pqproxy side-car | OpenSSL/kTLS (unchanged) |
+| pqproxy side-car | OpenSSL/kTLS |
 
-P1.4a is **plain TCP only**.
+## Config (ADR-005)
 
-## Accept loop (P1.4a)
-
-```
-listen (nonblock) → io_uring accept
-  → recv any bytes
-  → send fixed static response (default HTTP/1.1 200 "ok")
-  → close
-```
-
-No HTTP parse (P1.4b shaggy). No TLS (P1.13).
-
-## Config flow (ADR-005)
-
-Shadow YAML load → `edgecore_apply_config` → CONFIG_APPLIED / REJECTED.
-SIGHUP sets flag; full live rebind of listen fd is later work.
+Shadow YAML → `edgecore_apply_config` → CONFIG_APPLIED / REJECTED.
 
 ## Deliberate absences
 
-- shaggy bridge (P1.4b), `/health` JSON (P1.4c), state store, plugins, OpenSSL.
+- Real `/health` JSON + metrics (P1.4c), OpenSSL, state store, plugins.
 
 ## Related
 
 - Program design: `~/edge-platform-program-design.md`
-- Example: `config/edgehost.example.yaml`
+- shaggy examples: `~/shaggy/examples/liburing_http2_kv.c` (HTTP/2; we use HTTP/1 for P1.4b)

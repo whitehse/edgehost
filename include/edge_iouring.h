@@ -1,9 +1,9 @@
 /**
  * @file edge_iouring.h
- * @brief Class-A io_uring accept loop — plain TCP static response (P1.4a).
+ * @brief Class-A io_uring accept loop with shaggy HTTP/1 parse (P1.4b).
  *
- * No shaggy/HTTP parse yet: any inbound bytes → fixed static response → close.
- * TLS (OpenSSL non-blocking) lands in P1.13.
+ * Plain TCP: accept → recv → http1_feed_input → static simple response.
+ * TLS (OpenSSL non-blocking) lands in P1.13. Real /health JSON is P1.4c.
  */
 #ifndef EDGE_IOURING_H
 #define EDGE_IOURING_H
@@ -29,11 +29,13 @@ typedef struct {
     /** Optional external stop flag (SIGINT handler may set it). */
     volatile sig_atomic_t *stop;
     /**
-     * Fixed response bytes. If NULL, a built-in HTTP/1.1 200 "ok" is used.
+     * Optional override for the successful (parsed) response body payload.
+     * If NULL, built-in "ok\n" is used. Status line / headers still built
+     * by the host after shaggy HEADERS_COMPLETE.
      * Not copied — must remain valid for the duration of edge_iouring_run.
      */
-    const char *static_response;
-    size_t      static_response_len;
+    const char *static_body;
+    size_t      static_body_len;
 } edge_iouring_opts_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o);
