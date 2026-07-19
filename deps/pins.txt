@@ -4,7 +4,7 @@
 # Update with: deps/update_pins.sh
 # name       git-sha                                          notes
 libsim       3506f14ec4fd34cbf605a91ec4cc277eaa051a09          # Track 0 complete (P0.1–P0.4)
-shaggy       72aef5cffef946fbeb3dab173951ce876db05960          # HTTP/1+2+WS SM
+shaggy       aac47184787cf9634741ddc9a1d4afa8a50d5981          # HTTP/1+2+WS SM (PUT/DELETE request line)
 librest      81dbead63ba0c2ad04b48d9004869eb7397d1e21          # REST/WS helpers on shaggy
 libyaml      bc78f853213efdd70e470fbb3f12b9a6437dc172          # YAML SM (config + HUP)
 pique        05923bd80c7741edd7476536748977f62d18b4dc          # pqwire (side-car / NOTIFY later)
