@@ -41,3 +41,27 @@
 
 - [x] libsim P0.1–P0.4 (separate repo; pin in deps/pins.txt)
 - [x] Class-A fuzz path (P1.5); optional BUILD_FUZZ harness
+
+## E7 NETCONF Call Home
+
+Design: `docs/designs/e7-netconf-callhome.md` · ADR-018 · guide
+`docs/guides/e7-callhome.md` · lab YAML `config/edgehost.e7-lab.yaml`.
+
+### Foundation (implemented)
+
+- [x] **PR-1** `edge_state_put_and_notify` + plugin hub wiring (K6)
+- [x] **PR-2** FindLibnetconf + `plugins.e7_callhome` YAML skeleton
+- [x] **PR-2a** Per-ns capacity + enable-time tables (K10 / ADR-007)
+- [x] **PR-3** lab.v1 ONT/PON apply + fixtures (`tests/fixtures/e7/`)
+- [x] **PR-4a** Call Home listen + identity preamble + raw CLIENT pump
+- [x] **PR-4b** Subscribe + lab.v1 apply + coalesced WS (K16)
+- [x] **PR-5** REST `/api/v1/e7/*` + command placeholder
+- [x] **PR-6** SPA `/e7/`
+- [x] **PR-7** Docs / ADR-018 / lab guide / indexes
+
+### Deferred / gated
+
+- [ ] **PR-8** SSH Call Home (libnetconf libassh milestone)
+- [ ] **PR-9** Map phase 2 ONT points
+- [ ] **PR-10** Optional Postgres durable allowlist
+- [ ] Real Calix notification samples → `calix.e7.*` extractors

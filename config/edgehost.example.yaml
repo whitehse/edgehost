@@ -84,13 +84,15 @@ plugins:
     enabled: false              # P1.11 scrape side-car /metrics
     metrics_url: "http://127.0.0.1:9108/metrics"
     scrape_interval_ms: 5000
-  # E7 NETCONF Call Home (PR-2 config skeleton — no listen until PR-4).
+  # E7 NETCONF Call Home (lab foundation). See docs/guides/e7-callhome.md.
+  # Lab profile: config/edgehost.e7-lab.yaml (enabled + sample shelf).
   # transport=raw on non-loopback requires lab_insecure_raw: true.
+  # Never ship 0.0.0.0 + raw without that flag and a lab banner.
   e7_callhome:
     enabled: false
     listen_host: 127.0.0.1
     listen_port: 4334
-    transport: raw              # raw | ssh
+    transport: raw              # raw | ssh (ssh = PR-8 / libassh)
     lab_insecure_raw: false
     reload_policy: merge        # merge | replace_all (K15)
     auto_subscribe_unknown: false

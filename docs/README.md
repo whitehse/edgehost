@@ -5,8 +5,9 @@
 | [../AGENTS.md](../AGENTS.md) | Agent operating contract + pin policy |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | Module boundaries |
 | [DOMAIN.md](DOMAIN.md) | Glossary |
-| [../TODO.md](../TODO.md) | Track 1 PR checklist |
+| [../TODO.md](../TODO.md) | Track 1 + E7 Call Home checklist |
 | [decisions/](decisions/) | ADRs (write when work lands) |
+| [designs/](designs/) | Longer design docs |
 | [guides/](guides/) | How-tos |
 | [../deploy/](../deploy/) | systemd unit + install sketch |
 
@@ -18,6 +19,13 @@
 | [prometheus.md](guides/prometheus.md) | `/health` JSON + scrape notes (P1.15) |
 | [lab-e2e.md](guides/lab-e2e.md) | Lab auth + SPA console + packages E2E |
 | [status-map.md](guides/status-map.md) | Login + WebGPU status map (libwebmap demo) |
+| [e7-callhome.md](guides/e7-callhome.md) | E7 Call Home lab (YAML, 4334, SPA `/e7/`, REST) |
+
+## Designs
+
+| Design | Title |
+|--------|-------|
+| [e7-netconf-callhome.md](designs/e7-netconf-callhome.md) | NETCONF Call Home for Calix E7 (approved rev 4) |
 
 ## Decisions
 
@@ -33,5 +41,6 @@
 | [014](decisions/014-tls-openssl-edgehost.md) | edgehost OpenSSL NB; CPE mbedTLS |
 | [015](decisions/015-pqproxy-notify.md) | pqproxy scrape + NOTIFY apply |
 | [016](decisions/016-extra-ns-deploy.md) | Extra ns config + deploy/Prometheus (P1.14–15) |
+| [018](decisions/018-e7-netconf-callhome.md) | E7 NETCONF Call Home lab foundation |
 
 Program-wide design: `~/edge-platform-program-design.md`.
