@@ -2,45 +2,28 @@
 
 ## Status
 
-**P1.6**: io_uring HTTP/1, `/health` metrics, **static SPA** under `spa.root`,
-and **package files** under `packages.root` at URL `/packages/…`.
+**P1.7a**: state store (`net.core`, `map.dynamic`) + REST GET/PUT/DELETE/list.
 
-## Split
+## Layers
 
-| Layer | Path | Rules |
-|-------|------|-------|
-| **libedgecore** | `src/core/*` | Syscall-free SMs |
-| **HTTP/1 serve** | `edge_http1_serve.c` | Route + metrics; calls static loader |
-| **Static files** | `static_files.c` | Safe join, MIME, size cap (host I/O) |
-| **io_uring** | `iouring_loop.c` | Real sockets; sets docroots from config |
-| **sim_main** | `sim_main.c` | Class A fuzz (no SPA cwd dependency) |
+| Layer | Path |
+|-------|------|
+| **edgecore** | events, config apply, buffers, **state_store** |
+| **HTTP serve** | health, SPA, packages, **`/api/v1/state/…`** |
+| **io_uring** | production sockets |
+| **sim_main** | class-A fuzz |
 
-## HTTP routes
+## State REST (lab open)
 
-| Path | Response |
-|------|----------|
-| `GET /health` | JSON metrics |
-| `GET /packages/…` | file under `packages.root` |
-| `GET /…` | file under `spa.root` ( `/` → `index.html` ) |
-| SPA miss | try `index.html` (client router) then 404 |
-| parse error | 400 |
+| Method | Path |
+|--------|------|
+| GET | `/api/v1/state/{ns}/{key}` |
+| PUT | `/api/v1/state/{ns}/{key}` JSON body |
+| DELETE | `/api/v1/state/{ns}/{key}` |
+| GET | `/api/v1/state/{ns}?prefix=` |
 
-Path traversal (`..`) is rejected.
-
-## Config (YAML)
-
-```yaml
-spa:
-  root: ./spa
-  max_file_bytes: 65536
-packages:
-  root: ./packages
-```
-
-## TLS (ADR-014)
-
-edgehost → OpenSSL non-blocking (P1.13); CPE → mbedTLS.
+Enabled ns: `net.core`, `map.dynamic`. Disabled stubs: `net.pon`, etc.
 
 ## Next
 
-P1.7a state store (`net.core`, `map.dynamic`) + REST GET/PUT.
+P1.7b WebSocket STATE_CHANGED; P1.7c auth.

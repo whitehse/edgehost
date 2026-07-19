@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.6: static SPA root + package path.
+# P1.7a: state store (net.core, map.dynamic) + REST GET/PUT/DELETE.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.6.0)
+project(edgehost LANGUAGES C VERSION 0.7.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -74,6 +74,7 @@ endif()
 add_library(edgecore STATIC
   src/core/edgecore.c
   src/core/edge_config.c
+  src/core/state_store.c
 )
 target_include_directories(edgecore PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -116,6 +117,7 @@ target_include_directories(edgehost_http PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+target_link_libraries(edgehost_http PUBLIC edgecore)
 if(TARGET Shaggy::shaggy)
   target_link_libraries(edgehost_http PUBLIC Shaggy::shaggy)
 elseif(SHAGGY_LIBRARY)
@@ -200,6 +202,9 @@ target_link_libraries(edgehost_iouring_test PRIVATE edgehost_iouring)
 add_executable(edgehost_static_test tests/test_static_files.c)
 target_link_libraries(edgehost_static_test PRIVATE edgehost_http edgehost_config)
 
+add_executable(edgehost_state_test tests/test_state_store.c)
+target_link_libraries(edgehost_state_test PRIVATE edgecore edgehost_http)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -209,6 +214,7 @@ add_test(NAME edgecore_config COMMAND edgecore_config_test
 add_test(NAME edgehost_iouring_static COMMAND edgehost_iouring_test)
 add_test(NAME edgehost_static_files COMMAND edgehost_static_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME edgehost_state_store COMMAND edgehost_state_test)
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)

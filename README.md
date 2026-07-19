@@ -4,23 +4,20 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.6 — **io_uring** HTTP/1, `/health`, static **SPA** (`spa/`),
-and **packages** (`/packages/…`). Class-A sim fuzz available. TLS later:
-**OpenSSL non-blocking**; CPE uses **mbedTLS**.
+**Status:** P1.7a — HTTP/1 + SPA + packages + **state store REST**
+(`/api/v1/state/{ns}/{key}`). Auth open in lab until P1.7c.
 
 ## Build
 
 ```bash
-# needs liburing-dev; siblings under $HOME (or SIBLING_ROOT / *_ROOT)
-cmake -B build -S .
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on-failure
 
-# run from repo root so ./spa and ./packages resolve
+# from repo root:
 ./build/edgehost --host 127.0.0.1 --port 8080 --config config/edgehost.example.yaml
-# curl -s http://127.0.0.1:8080/
-# curl -s http://127.0.0.1:8080/health
-# curl -s http://127.0.0.1:8080/packages/demo.wmap
+curl -s http://127.0.0.1:8080/health
+curl -s -X PUT http://127.0.0.1:8080/api/v1/state/net.core/router/r1 \
+  -H 'Content-Type: application/json' -d '{"id":"r1","status":"ok"}'
+curl -s http://127.0.0.1:8080/api/v1/state/net.core/router/r1
 ```
 
 ## Dependency pins

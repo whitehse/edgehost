@@ -7,7 +7,7 @@ malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
 does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.6** — static SPA root + package path.
+**Current milestone**: **P1.7a** — state store + REST GET/PUT/DELETE.
 
 ## Key commands
 
@@ -68,6 +68,7 @@ cmake -B build -S . \
 | [005](docs/decisions/005-yaml-sighup-apply.md) | YAML + SIGHUP shadow apply |
 | [011](docs/decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](docs/decisions/012-agent-ready-documentation.md) | Doc layout + no stub ADRs |
+| [007](docs/decisions/007-state-store.md) | State store net.core / map.dynamic |
 | [014](docs/decisions/014-tls-openssl-edgehost.md) | edgehost OpenSSL NB; CPE mbedTLS |
 
 ## Dependency pins
@@ -104,5 +105,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.6 complete**: SPA static files + `/packages/` map package path.  
-**Next**: **P1.7a** — state store core (`net.core`, `map.dynamic`) + REST.
+**P1.7a complete**: state store + REST under `/api/v1/state/…` (open lab auth).  
+**Next**: **P1.7b** — WS `/api/v1/stream` fan-out STATE_CHANGED.

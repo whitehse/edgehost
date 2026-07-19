@@ -8,6 +8,7 @@
 #include "edge_iouring.h"
 
 #include "edge_http1_serve.h"
+#include "edge_state.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -64,6 +65,8 @@ typedef struct {
     edge_metrics_t             metrics_local;
     edge_http1_docroot_t       docroots;
     size_t                     send_cap;
+    edge_state_store_t        *store;
+    int                        store_owned;
 } server_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
@@ -80,6 +83,7 @@ void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
     o->static_body = NULL;
     o->static_body_len = 0;
     o->metrics = NULL;
+    o->state = NULL;
 }
 
 static uint64_t pack_ud(int op, int slot)
@@ -193,6 +197,7 @@ static conn_t *alloc_conn(server_t *srv)
                 return NULL;
             }
             edge_http1_serve_set_docroots(c->http, &srv->docroots);
+            edge_http1_serve_set_state(c->http, srv->store);
             return c;
         }
     }
@@ -375,6 +380,21 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     srv.docroots.packages_root =
         cfg->packages_root[0] ? cfg->packages_root : NULL;
     srv.docroots.max_file_bytes = cfg->static_max_file_bytes;
+    if (opts->state) {
+        srv.store = opts->state;
+        srv.store_owned = 0;
+    } else {
+        edge_state_config_t sc = edge_state_default_config();
+        /* Respect config namespace enable flags for v1 ns */
+        srv.store = edge_state_create_with_config(&sc);
+        srv.store_owned = 1;
+        if (srv.store) {
+            (void)edge_state_ns_set_enabled(srv.store, "net.core",
+                                            cfg->state_net_core_enabled);
+            (void)edge_state_ns_set_enabled(srv.store, "map.dynamic",
+                                            cfg->state_map_dynamic_enabled);
+        }
+    }
     if (opts->metrics) {
         srv.metrics = opts->metrics;
         if (srv.metrics->started_at == 0) {
@@ -527,6 +547,9 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     io_uring_queue_exit(&srv.ring);
     close(srv.listen_fd);
     free(srv.conns);
+    if (srv.store_owned && srv.store) {
+        edge_state_destroy(srv.store);
+    }
     fprintf(stderr, "edgehost: iouring loop exit (%d accepts)\n",
             srv.accepts_done);
     return exit_code;

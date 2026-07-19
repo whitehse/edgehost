@@ -14,6 +14,7 @@
 
 #include "edge_config.h"
 #include "edge_metrics.h"
+#include "edge_state.h"
 
 #include <signal.h>
 #include <stddef.h>
@@ -45,6 +46,11 @@ typedef struct {
      * (caller may read after run returns, e.g. max_accepts tests).
      */
     edge_metrics_t *metrics;
+    /**
+     * Optional state store (P1.7a). If NULL, a store is created for the run
+     * and destroyed on exit. Not destroyed if caller-provided.
+     */
+    edge_state_store_t *state;
 } edge_iouring_opts_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o);

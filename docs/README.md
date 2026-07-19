@@ -17,6 +17,7 @@
 | [002](decisions/002-core-host-split.md) | Core vs host split |
 | [003](decisions/003-event-gated-memory.md) | Event-gated memory (X1) |
 | [005](decisions/005-yaml-sighup-apply.md) | YAML + SIGHUP shadow apply |
+| [007](decisions/007-state-store.md) | State store net.core / map.dynamic |
 | [011](decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](decisions/012-agent-ready-documentation.md) | Agent-ready docs |
 | [014](decisions/014-tls-openssl-edgehost.md) | edgehost OpenSSL NB; CPE mbedTLS |
