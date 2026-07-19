@@ -9,7 +9,9 @@
 #include "edge_iouring.h"
 #include "edge_openai_proxy.h"
 #include "edge_plugin_host.h"
+#include "edge_slack_plugin.h"
 #include "edge_state.h"
+#include "edge_teams_plugin.h"
 #include "edgecore.h"
 
 #include <getopt.h>
@@ -49,8 +51,12 @@ int main(int argc, char **argv)
     edge_auth_ctx_t auth;
     edge_plugin_host_t *ph = NULL;
     edge_plugin_t openai_plugin;
+    edge_plugin_t slack_plugin;
+    edge_plugin_t teams_plugin;
     edge_openai_proxy_config_t openai_cfg;
     edge_openai_proxy_config_t openai_cfg_store;
+    edge_slack_config_t slack_cfg, slack_store;
+    edge_teams_config_t teams_cfg, teams_store;
     edge_state_store_t *store = NULL;
     char service_key_buf[256];
     const char *service_key = NULL;
@@ -60,6 +66,8 @@ int main(int argc, char **argv)
     int opt;
 
     memset(&openai_plugin, 0, sizeof(openai_plugin));
+    memset(&slack_plugin, 0, sizeof(slack_plugin));
+    memset(&teams_plugin, 0, sizeof(teams_plugin));
     service_key_buf[0] = '\0';
 
     static struct option long_opts[] = {
@@ -155,8 +163,23 @@ int main(int argc, char **argv)
 
     {
         const edge_config_t *ac = edgecore_config(core);
-        if (ac->openai_enabled) {
+        int need_ph =
+            ac->openai_enabled || ac->slack_enabled || ac->teams_enabled;
+        if (need_ph) {
             edge_plugin_host_config_t phc;
+            store = edge_state_create();
+            memset(&phc, 0, sizeof(phc));
+            phc.max_pending = ac->http_max_pending_outbound;
+            phc.state = store;
+            ph = edge_plugin_host_create(&phc);
+            if (!ph) {
+                fprintf(stderr, "edgehost: plugin host create failed\n");
+                edgecore_destroy(core);
+                edge_state_destroy(store);
+                return 1;
+            }
+        }
+        if (ac->openai_enabled && ph) {
             edge_openai_proxy_config_defaults(&openai_cfg);
             openai_cfg.enabled = 1;
             snprintf(openai_cfg.upstream, sizeof(openai_cfg.upstream), "%s",
@@ -173,18 +196,6 @@ int main(int argc, char **argv)
             openai_cfg.timeout_ms = ac->openai_timeout_ms;
             openai_cfg.rate_limit_rpm = ac->openai_rate_limit_rpm;
             openai_cfg.max_concurrent_per_principal = ac->openai_max_concurrent;
-
-            store = edge_state_create();
-            memset(&phc, 0, sizeof(phc));
-            phc.max_pending = ac->http_max_pending_outbound;
-            phc.state = store;
-            ph = edge_plugin_host_create(&phc);
-            if (!ph) {
-                fprintf(stderr, "edgehost: plugin host create failed\n");
-                edgecore_destroy(core);
-                edge_state_destroy(store);
-                return 1;
-            }
             if (edge_openai_proxy_init_plugin(&openai_plugin, &openai_cfg_store,
                                               &openai_cfg) != 0) {
                 fprintf(stderr,
@@ -214,6 +225,37 @@ int main(int argc, char **argv)
             }
             fprintf(stderr, "edgehost: openai_proxy enabled upstream=%s\n",
                     openai_cfg.upstream);
+        }
+        if (ac->slack_enabled && ph) {
+            edge_slack_config_defaults(&slack_cfg);
+            slack_cfg.enabled = 1;
+            if (edge_slack_init_plugin(&slack_plugin, &slack_store, &slack_cfg) !=
+                    0 ||
+                edge_plugin_host_register(ph, &slack_plugin, NULL) != 0) {
+                fprintf(stderr, "edgehost: slack stub register failed\n");
+                edge_plugin_host_destroy(ph);
+                edge_state_destroy(store);
+                edgecore_destroy(core);
+                return 1;
+            }
+            fprintf(stderr, "edgehost: slack plugin stub registered\n");
+        }
+        if (ac->teams_enabled && ph) {
+            edge_teams_config_defaults(&teams_cfg);
+            teams_cfg.enabled = 1;
+            if (edge_teams_init_plugin(&teams_plugin, &teams_store, &teams_cfg) !=
+                    0 ||
+                edge_plugin_host_register(ph, &teams_plugin, NULL) != 0) {
+                fprintf(stderr, "edgehost: teams stub register failed\n");
+                edge_plugin_host_destroy(ph);
+                edge_state_destroy(store);
+                edgecore_destroy(core);
+                return 1;
+            }
+            fprintf(stderr, "edgehost: teams plugin stub registered\n");
+        }
+        if (ac->tls_cert[0] && ac->tls_key[0]) {
+            fprintf(stderr, "edgehost: TLS server cert=%s\n", ac->tls_cert);
         }
     }
 

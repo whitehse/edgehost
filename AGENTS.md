@@ -7,7 +7,7 @@ malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
 does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.8b** — openai_proxy E2E via PENDING.
+**Current milestone**: **P1.13** — TLS server + slack/teams stubs.
 
 ## Key commands
 
@@ -105,5 +105,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.8b complete**: openai_proxy `/v1/*` via PENDING + outbound HTTP(S).  
-**Next**: **P1.9** slack stub or **P1.13** OpenSSL non-blocking server.
+**P1.9–P1.10 + P1.13 complete**: slack/teams stubs; OpenSSL NB TLS server.  
+**Next**: **P1.11** pqproxy metrics or **P1.13b** non-blocking TLS client.

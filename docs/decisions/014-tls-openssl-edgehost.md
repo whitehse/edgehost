@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (policy; implementation P1.13 / P1.13b for edgehost; CPE when agent needs TLS)
+Accepted — policy (2026-07-18); **server implementation landed in P1.13**.
 
 ## Date
 
@@ -23,8 +23,16 @@ non-blocking mode** (io_uring-friendly, aligned with pqproxy), while the
 | **CPE agent** (`netforensics/agent`) | **mbedTLS** | As required by libuv agent loop |
 | **pqproxy** side-car | OpenSSL/kTLS | Unchanged; not linked into edgehost |
 
-- P1.4a remains **plain TCP** only.
-- P1.13 / P1.13b add OpenSSL server + client for edgehost.
+### P1.13 server implementation
+
+- `edge_tls.h` / `tls_server.c`: `SSL_CTX` from PEM cert/key; `SSL_set_fd` accept.
+- `iouring_loop`: after accept, optional `CS_TLS_HS` + `OP_POLL`; then
+  `SSL_read` / `SSL_write` with want-read/write polling.
+- Config: `tls.cert` + `tls.key` (empty ⇒ plain TCP lab mode remains).
+- Optional `tls.client_ca` for mTLS (verify peer).
+- Outbound client HTTPS remains blocking OpenSSL from P1.8b; true non-blocking
+  client polish is **P1.13b**.
+
 - Do **not** pull mbedTLS into the edgehost binary for production TLS.
 - Do **not** pull OpenSSL into the CPE agent package for production TLS.
 

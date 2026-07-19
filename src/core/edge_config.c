@@ -44,6 +44,11 @@ void edge_config_defaults(edge_config_t *c)
     c->openai_timeout_ms = 60000;
     c->openai_rate_limit_rpm = 60;
     c->openai_max_concurrent = 4;
+    c->slack_enabled = 0;
+    c->teams_enabled = 0;
+    c->tls_cert[0] = '\0';
+    c->tls_key[0] = '\0';
+    c->tls_client_ca[0] = '\0';
     c->generation = 0;
 }
 

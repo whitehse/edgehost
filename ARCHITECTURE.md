@@ -2,7 +2,7 @@
 
 ## Status
 
-**P1.8b**: state + WS + auth + plugins + **openai_proxy E2E** (ADR-014).
+**P1.13**: openai_proxy + **TLS server** + slack/teams stubs.
 
 ## Layers
 
@@ -11,7 +11,8 @@
 | **edgecore** | events, config, state, auth_rbac, **pending_table** |
 | **HTTP serve** | health, SPA, packages, state, stream, lab-login |
 | **plugin_host** | registry, host API v0, PENDING dispatch |
-| **io_uring** | production sockets; WS keep-alive |
+| **io_uring** | production sockets; WS; optional **OpenSSL TLS** |
+| **stubs** | slack / teams SESSION plugins (`enabled: false`) |
 | **sim_main** | class-A fuzz |
 
 ## Plugin ABI (P1.8a)
@@ -34,6 +35,15 @@
 | `lab_password` | `POST /auth/lab-login` → cookie |
 | `proxy_headers` | signed `X-User` headers |
 
+## TLS
+
+| Item | Detail |
+|------|--------|
+| Library | OpenSSL (not mbedTLS) |
+| Mode | `SSL_set_fd` + io_uring `POLL` want-read/write |
+| Config | `tls.cert` + `tls.key` (omit for plain lab TCP) |
+| CPE | mbedTLS in agent tree only |
+
 ## Next
 
-P1.9–P1.10 stubs; P1.13 non-blocking TLS polish.
+P1.11–P1.12 pqproxy; P1.13b non-blocking outbound TLS.

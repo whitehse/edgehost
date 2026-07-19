@@ -44,6 +44,12 @@ dns:
   allow_blocking: false       # true only in lab without upstream_addr
 
 # OpenAI-compatible proxy (P1.8b). Requires OPENAI_API_KEY when enabled.
+# TLS server (P1.13). Omit or leave empty for plain TCP lab mode.
+# tls:
+#   cert: /etc/edgehost/certs/server.crt
+#   key: /etc/edgehost/certs/server.key
+#   # client_ca: /etc/edgehost/certs/client-ca.crt  # optional mTLS
+
 plugins:
   openai_proxy:
     enabled: false
@@ -55,4 +61,8 @@ plugins:
     timeout_ms: 60000
     rate_limit_rpm: 60
     max_concurrent_per_principal: 4
+  slack:
+    enabled: false              # P1.9 stub only
+  teams:
+    enabled: false              # P1.10 stub only
 

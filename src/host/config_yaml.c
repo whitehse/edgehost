@@ -296,6 +296,41 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->openai_max_concurrent = (uint32_t)sz;
         return 0;
     }
+    if (strcmp(key, "plugins.slack.enabled") == 0 ||
+        strcmp(key, "slack.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->slack_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.teams.enabled") == 0 ||
+        strcmp(key, "teams.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->teams_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "tls.cert") == 0 || strcmp(key, "tls.cert_file") == 0) {
+        if (copy_str(c->tls_cert, sizeof(c->tls_cert), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "tls.key") == 0 || strcmp(key, "tls.key_file") == 0) {
+        if (copy_str(c->tls_key, sizeof(c->tls_key), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "tls.client_ca") == 0 ||
+        strcmp(key, "tls.client_ca_file") == 0) {
+        if (copy_str(c->tls_client_ca, sizeof(c->tls_client_ca), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
 #undef FAIL
     return 0; /* unknown keys ignored */
 }
@@ -339,6 +374,16 @@ static const char *const g_paths[] = {
     "plugins.openai_proxy.timeout_ms",
     "plugins.openai_proxy.rate_limit_rpm",
     "plugins.openai_proxy.max_concurrent_per_principal",
+    "plugins.slack.enabled",
+    "slack.enabled",
+    "plugins.teams.enabled",
+    "teams.enabled",
+    "tls.cert",
+    "tls.cert_file",
+    "tls.key",
+    "tls.key_file",
+    "tls.client_ca",
+    "tls.client_ca_file",
     NULL
 };
 

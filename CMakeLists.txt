@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.8b: openai_proxy E2E via PENDING + outbound HTTP(S) (ADR-014).
+# P1.9–P1.10 stubs + P1.13 OpenSSL non-blocking TLS server.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.8.1)
+project(edgehost LANGUAGES C VERSION 0.9.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -91,6 +91,8 @@ add_library(edgehost_plugins STATIC
   src/host/plugin_host.c
   src/host/outbound_http.c
   src/plugins/openai_proxy.c
+  src/plugins/slack_plugin.c
+  src/plugins/teams_plugin.c
 )
 target_include_directories(edgehost_plugins PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -149,14 +151,18 @@ if(Shaggy_FOUND AND TARGET Shaggy::headers)
   target_link_libraries(edgehost_http PUBLIC Shaggy::headers)
 endif()
 
-# --- Host: real io_uring loop ---
-add_library(edgehost_iouring STATIC src/host/iouring_loop.c)
+# --- Host: real io_uring loop + OpenSSL TLS server ---
+add_library(edgehost_iouring STATIC
+  src/host/iouring_loop.c
+  src/host/tls_server.c
+)
 target_include_directories(edgehost_iouring PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
-target_link_libraries(edgehost_iouring PUBLIC edgecore edgehost_http ${LIBURING_LIBRARY})
+target_link_libraries(edgehost_iouring PUBLIC
+  edgecore edgehost_http ${LIBURING_LIBRARY} OpenSSL::SSL OpenSSL::Crypto)
 
 # --- Host: class-A sim_main ---
 if(Libsim_FOUND AND LIBSIM_LIBRARY)
@@ -241,6 +247,12 @@ add_executable(edgehost_openai_test tests/test_openai_proxy.c)
 target_link_libraries(edgehost_openai_test PRIVATE
   edgecore edgehost_plugins edgehost_http pthread)
 
+add_executable(edgehost_stubs_test tests/test_plugin_stubs.c)
+target_link_libraries(edgehost_stubs_test PRIVATE edgecore edgehost_plugins edgehost_config)
+
+add_executable(edgehost_tls_test tests/test_tls_server.c)
+target_link_libraries(edgehost_tls_test PRIVATE edgehost_iouring OpenSSL::SSL OpenSSL::Crypto)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -255,6 +267,8 @@ add_test(NAME edgehost_ws_stream COMMAND edgehost_ws_test)
 add_test(NAME edgehost_auth COMMAND edgehost_auth_test)
 add_test(NAME edgehost_pending_plugin COMMAND edgehost_pending_test)
 add_test(NAME edgehost_openai_proxy COMMAND edgehost_openai_test)
+add_test(NAME edgehost_plugin_stubs COMMAND edgehost_stubs_test)
+add_test(NAME edgehost_tls_server COMMAND edgehost_tls_test)
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)

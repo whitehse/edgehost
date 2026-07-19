@@ -4,8 +4,8 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.8b — HTTP/1 + state + WS + auth + plugins + **openai_proxy**
-(`/v1/chat/completions` via PENDING). Default auth mode is `open`.
+**Status:** P1.13 — full Track 1 core: state, WS, auth, openai_proxy, **TLS
+server**, slack/teams stubs. Default auth mode is `open`; TLS optional.
 
 ## Build
 

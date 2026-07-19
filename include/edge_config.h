@@ -67,6 +67,18 @@ typedef struct {
     uint32_t openai_rate_limit_rpm;
     uint32_t openai_max_concurrent;
 
+    /** Slack / Teams stubs (P1.9 / P1.10). Default disabled. */
+    int slack_enabled;
+    int teams_enabled;
+
+    /**
+     * TLS server (P1.13). Empty cert/key ⇒ plain TCP (lab default).
+     * Paths to PEM files; not secrets themselves.
+     */
+    char tls_cert[EDGE_CONFIG_PATH_MAX];
+    char tls_key[EDGE_CONFIG_PATH_MAX];
+    char tls_client_ca[EDGE_CONFIG_PATH_MAX]; /* optional mTLS */
+
     /**
      * Set by edgecore_apply_config on success (not loaded from YAML).
      * Monotonic generation for tests and observability.
