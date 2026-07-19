@@ -1,0 +1,12 @@
+<!--
+  lab.v1 synthetic NETCONF notification — not a Calix wire format.
+  Namespace urn:edgehost:lab:e7:1.0 is lab-only (do not forge Calix URIs).
+-->
+<notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+  <eventTime>2026-07-19T12:05:00Z</eventTime>
+  <ont-event xmlns="urn:edgehost:lab:e7:1.0">
+    <ont-id>1/1/3/12</ont-id>
+    <pon-id>1/1/3</pon-id>
+    <oper-state>down</oper-state>
+  </ont-event>
+</notification>

@@ -1,0 +1,6 @@
+<!--
+  Calix-shaped Call Home identity preamble (pre-SSH; not a NETCONF hello).
+  Used by identity parse unit tests (PR-3) and later raw peer (PR-4a).
+  Field names match Calix identity framing; this file is a fixture, not live wire.
+-->
+<version>1</version><identity><mac>00:02:5d:d9:21:47</mac><serial-number>071904926728</serial-number><model-name>E7 System</model-name><source-ip>192.168.35.13</source-ip></identity>

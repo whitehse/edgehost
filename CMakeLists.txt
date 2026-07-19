@@ -124,6 +124,15 @@ target_include_directories(edgehost_alloc PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
+# --- Host: E7 lab.v1 event apply (pure helpers; no TCP) ---
+add_library(edgehost_e7 STATIC src/host/e7_event_apply.c)
+target_include_directories(edgehost_e7 PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(edgehost_e7 PUBLIC edgecore)
+
+
 # --- Host: YAML config + auth secret resolve ---
 add_library(edgehost_config STATIC
   src/host/config_yaml.c
@@ -288,6 +297,9 @@ add_executable(edgehost_sidecar_test tests/test_sidecar_notify.c)
 target_link_libraries(edgehost_sidecar_test PRIVATE
   edgecore edgehost_plugins edgehost_http pthread)
 
+add_executable(edgehost_e7_event_apply_test tests/test_e7_event_apply.c)
+target_link_libraries(edgehost_e7_event_apply_test PRIVATE edgehost_e7)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -305,6 +317,9 @@ add_test(NAME edgehost_openai_proxy COMMAND edgehost_openai_test)
 add_test(NAME edgehost_plugin_stubs COMMAND edgehost_stubs_test)
 add_test(NAME edgehost_tls_server COMMAND edgehost_tls_test)
 add_test(NAME edgehost_sidecar_notify COMMAND edgehost_sidecar_test)
+add_test(NAME edgehost_e7_event_apply COMMAND edgehost_e7_event_apply_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)
@@ -333,7 +348,7 @@ endif()
 
 include(GNUInstallDirs)
 set(_install_libs edgecore edgehost_alloc edgehost_config edgehost_tls
-  edgehost_http edgehost_plugins edgehost_iouring)
+  edgehost_http edgehost_plugins edgehost_iouring edgehost_e7)
 if(EDGEHOST_HAVE_SIM)
   list(APPEND _install_libs edgehost_sim)
 endif()
