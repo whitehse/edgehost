@@ -15,7 +15,8 @@ REST under **`/api/v1/e7/`**.
 
 ## Security banners (read first)
 
-1. **Raw is lab-only.** Production path is **SSH Call Home** (PR-8 / libassh).
+1. **Raw is lab-only.** Production path is **SSH Call Home** (PR-8 / libassh
+   when `EDGEHOST_E7_SSH_AVAILABLE=1`).
 2. **Do not** bind `transport: raw` on a reachable interface (`0.0.0.0`, LAN
    IP, etc.) without an explicit **`lab_insecure_raw: true`**. Config validate
    rejects/fails that combination when the flag is false.
@@ -54,7 +55,8 @@ This is the **documented lab profile** for E7 Call Home. Highlights:
 | HTTP listen | `127.0.0.1:18080` | SPA + REST |
 | `plugins.e7_callhome.enabled` | `true` | Turns on listener + sessions |
 | `listen_host` / `listen_port` | `127.0.0.1` / **4334** | Separate Call Home fd |
-| `transport` | `raw` | Delimiter framing; no SSH |
+| `transport` | `raw` | Delimiter framing; no SSH (default lab) |
+| `ssh_password` / `ssh_username` / `host_key_path` | (empty) | For `transport: ssh` lab; password required for password auth |
 | `lab_insecure_raw` | `false` | OK because listen is loopback |
 | `reload_policy` | `merge` | YAML MAC wins; runtime-only retained |
 | `auto_subscribe_unknown` | `false` | Unknown MAC does not auto-sub |
@@ -244,12 +246,36 @@ Fail-soft (exit 0) if ports are busy or libnetconf is not linked.
 
 ---
 
-## Production (not this guide)
+## SSH Call Home lab (PR-8)
+
+When configured with libassh (`EDGEHOST_E7_SSH_AVAILABLE=1` at build time):
+
+```yaml
+plugins:
+  e7_callhome:
+    transport: ssh
+    ssh_password: lab          # lab only; NETCONF_SSH_CALLHOME server auth
+    ssh_username: netconf      # optional expected user
+    # host_key_path: /path/to/host_key   # empty → ephemeral ed25519
+    # ssh_allow_none_auth: false
+```
+
+Wire order (Calix): **TCP accept → identity preamble (raw) → SSH (NMS server)
+→ NETCONF client** over subsystem `netconf`. Full dialectic SSH coverage lives
+in libnetconf `netconf_ssh_test`; edgehost unit tests cover create/bind +
+profile with `transport: ssh`.
+
+Without libassh, create/bind for `transport: ssh` fail with a clear stderr
+message (`EDGEHOST_E7_SSH_AVAILABLE=0`).
+
+---
+
+## Production notes
 
 | Item | Status |
 |------|--------|
-| `transport: ssh` | **Scaffold only** — YAML accepts `ssh`; engine create/bind fail until libnetconf **libassh** (`EDGEHOST_E7_SSH_AVAILABLE=0`, PR-8) |
-| Identity before SSH | Still required (K17) |
+| `transport: ssh` | **Implemented** when libassh present; lab password config above |
+| Identity before SSH | Required (K17); still raw TCP before SSH |
 | Raw on non-loopback | Forbidden without `lab_insecure_raw` (lab only) |
 | Durable allowlist | **File** via `allowlist_path` (PR-10 interim); Postgres still optional later |
 | Map home outlines | Future; ONT points with coords land in `map.dynamic` now |

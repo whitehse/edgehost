@@ -490,6 +490,34 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         }
         return 0;
     }
+    if (strcmp(key, "plugins.e7_callhome.ssh_password") == 0) {
+        if (copy_str(c->e7_ssh_password, sizeof(c->e7_ssh_password), val) !=
+            0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.ssh_username") == 0) {
+        if (copy_str(c->e7_ssh_username, sizeof(c->e7_ssh_username), val) !=
+            0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.host_key_path") == 0) {
+        if (copy_str(c->e7_host_key_path, sizeof(c->e7_host_key_path), val) !=
+            0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.ssh_allow_none_auth") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->e7_ssh_allow_none_auth = iv;
+        return 0;
+    }
     if (strcmp(key, "plugins.e7_callhome.lab_insecure_raw") == 0) {
         if (parse_bool(val, &iv) != 0) {
             FAIL("invalid bool");
@@ -625,6 +653,10 @@ static const char *const g_paths[] = {
     "plugins.e7_callhome.listen_port",
     "plugins.e7_callhome.listen.port",
     "plugins.e7_callhome.transport",
+    "plugins.e7_callhome.ssh_password",
+    "plugins.e7_callhome.ssh_username",
+    "plugins.e7_callhome.host_key_path",
+    "plugins.e7_callhome.ssh_allow_none_auth",
     "plugins.e7_callhome.lab_insecure_raw",
     "plugins.e7_callhome.reload_policy",
     "plugins.e7_callhome.auto_subscribe_unknown",

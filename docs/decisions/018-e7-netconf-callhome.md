@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted (PR-1–PR-7 foundation + remaining polish: K15 SIGHUP merge, PR-9
-partial map mirror, PR-8 host scaffold). Production SSH Call Home remains
-gated on libnetconf libassh (`EDGEHOST_E7_SSH_AVAILABLE=0`).
+Accepted (PR-1–PR-8 foundation). SSH Call Home is implemented when edgehost
+is built with sibling libnetconf + libassh (`EDGEHOST_E7_SSH_AVAILABLE=1`).
+Without libassh, `transport: ssh` create/bind still fail cleanly.
 
 ## Date
 
@@ -22,7 +22,7 @@ Constraints:
 - Host owns multi-accept + identity (ADR-002); libnetconf owns NETCONF SM.
 - ADR-007: no put-path malloc; per-ns capacity / enable-time tables (K10).
 - WS hub has tight pending/message limits — ONT storms need coalescing (K16).
-- libassh in libnetconf is incomplete; production SSH cannot gate lab.
+- Lab vertical must work without SSH; production uses SSH after identity.
 
 ## Decision
 
@@ -47,7 +47,7 @@ Constraints:
 | Mode | Use | Port (default) |
 |------|-----|----------------|
 | `transport: raw` | Lab / CI / fixtures — delimiter `]]>]]>` framing | **4334** |
-| `transport: ssh` | Production Call Home after libassh (PR-8) | same path; identity **before** SSH |
+| `transport: ssh` | SSH Call Home (libnetconf libassh; PR-8) | same path; identity **before** SSH |
 
 - `lab_insecure_raw: true` **required** if `transport=raw` and `listen_host`
   is not loopback. Never ship `0.0.0.0` + raw without that flag and a lab
@@ -94,8 +94,11 @@ Constraints:
 - Runtime REST allowlist edits are **non-durable** (lost on restart unless
   YAML updated). SIGHUP with `reload_policy: merge` re-applies YAML MACs and
   retains runtime-only shelves (K15).
-- Production SSH blocked on libnetconf libassh (PR-8 scaffold only); identity
-  preamble remains first after accept.
+- SSH Call Home (PR-8): after identity, NMS runs `NETCONF_SSH_CALLHOME` (SSH
+  server) + `NETCONF_ROLE_CLIENT`; lab password via `ssh_password` /
+  optional `ssh_username` / `host_key_path`. Compile gate:
+  `EDGEHOST_E7_SSH_AVAILABLE` (libassh found). Identity remains first after
+  accept (raw TCP before SSH).
 - When lab.v1 ONT events include lon/lat, apply also mirrors into
   `map.dynamic` `ont/{mac_key}/{ont_key}` (PR-9 partial; home outlines later).
 

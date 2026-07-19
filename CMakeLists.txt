@@ -39,8 +39,11 @@ find_package(Libharness QUIET)
 find_package(Libslack QUIET)
 find_package(Libteams QUIET)
 find_package(Libwebmap QUIET)
-# Optional: E7 Call Home NETCONF SM (PR-2 skeleton; session pump later).
+# Optional: E7 Call Home NETCONF SM (+ libassh when present for SSH Call Home).
 find_package(Libnetconf QUIET)
+if(NOT DEFINED EDGEHOST_E7_SSH_AVAILABLE)
+  set(EDGEHOST_E7_SSH_AVAILABLE 0)
+endif()
 if(EDGEHOST_REQUIRE_LIBSIM)
   find_package(Libsim REQUIRED)
 else()
@@ -67,6 +70,7 @@ if(Libnetconf_FOUND)
 else()
   message(STATUS "  libnetconf FOUND=0 (optional; E7 Call Home session pump needs sibling + build/libnetconf.a)")
 endif()
+message(STATUS "  E7 SSH     EDGEHOST_E7_SSH_AVAILABLE=${EDGEHOST_E7_SSH_AVAILABLE}")
 message(STATUS "  liburing   ${LIBURING_LIBRARY}")
 
 if(EDGEHOST_REQUIRE_SIBLINGS AND Shaggy_FOUND AND NOT SHAGGY_LIBRARY)
@@ -145,8 +149,17 @@ if(Libnetconf_FOUND)
   if(TARGET Libnetconf::headers)
     target_link_libraries(edgehost_e7 PUBLIC Libnetconf::headers)
   endif()
+  if(EDGEHOST_E7_SSH_AVAILABLE)
+    target_compile_definitions(edgehost_e7 PUBLIC
+      EDGEHOST_E7_SSH_AVAILABLE=1
+      HAVE_LIBASSH=1)
+  else()
+    target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_E7_SSH_AVAILABLE=0)
+  endif()
 else()
-  target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_HAVE_LIBNETCONF=0)
+  target_compile_definitions(edgehost_e7 PUBLIC
+    EDGEHOST_HAVE_LIBNETCONF=0
+    EDGEHOST_E7_SSH_AVAILABLE=0)
 endif()
 
 

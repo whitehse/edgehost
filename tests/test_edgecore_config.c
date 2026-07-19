@@ -51,6 +51,10 @@ static void test_defaults_validate(void)
     assert(c.e7_listen_port == 4334);
     assert(strcmp(c.e7_listen_host, "127.0.0.1") == 0);
     assert(strcmp(c.e7_transport, "raw") == 0);
+    assert(c.e7_ssh_password[0] == '\0');
+    assert(c.e7_ssh_username[0] == '\0');
+    assert(c.e7_host_key_path[0] == '\0');
+    assert(c.e7_ssh_allow_none_auth == 0);
     assert(c.e7_lab_insecure_raw == 0);
     assert(strcmp(c.e7_reload_policy, "merge") == 0);
     assert(c.e7_auto_subscribe_unknown == 0);
@@ -235,6 +239,10 @@ static void test_e7_callhome_yaml(void)
         "    dirty_cap: 4096\n"
         "    rss_budget_bytes: 134217728\n"
         "    max_sessions: 32\n"
+        "    ssh_password: lab\n"
+        "    ssh_username: netconf\n"
+        "    host_key_path: /tmp/e7-hostkey\n"
+        "    ssh_allow_none_auth: false\n"
         "    shelves:\n"
         "      - mac: \"00:02:5d:d9:21:47\"\n"
         "        shelf_id: lab-e7-1\n"
@@ -251,6 +259,10 @@ static void test_e7_callhome_yaml(void)
     assert(strcmp(cfg.e7_listen_host, "127.0.0.1") == 0);
     assert(cfg.e7_listen_port == 4334);
     assert(strcmp(cfg.e7_transport, "raw") == 0);
+    assert(strcmp(cfg.e7_ssh_password, "lab") == 0);
+    assert(strcmp(cfg.e7_ssh_username, "netconf") == 0);
+    assert(strcmp(cfg.e7_host_key_path, "/tmp/e7-hostkey") == 0);
+    assert(cfg.e7_ssh_allow_none_auth == 0);
     assert(cfg.e7_lab_insecure_raw == 0);
     assert(strcmp(cfg.e7_reload_policy, "merge") == 0);
     assert(cfg.e7_auto_subscribe_unknown == 0);

@@ -61,8 +61,9 @@ Design: `docs/designs/e7-netconf-callhome.md` · ADR-018 · guide
 
 ### Partial / scaffold / deferred
 
-- [~] **PR-8** SSH Call Home — **host scaffold only** (`EDGEHOST_E7_SSH_AVAILABLE=0`;
-  create/bind fail with clear stderr). Full path gated on libnetconf **libassh**.
+- [x] **PR-8** SSH Call Home — libnetconf libassh + edgehost `transport: ssh`
+  (`EDGEHOST_E7_SSH_AVAILABLE=1` when libassh found; identity pre-SSH; lab
+  `ssh_password` / `ssh_username` / `host_key_path`). Without libassh, create/bind fail cleanly.
 - [~] **PR-9** Map ONT mirror — **partial**: lab.v1 puts `map.dynamic`
   `ont/{mac}/{ont}` when lon/lat present; home outlines still future.
 - [~] **PR-10** Allowlist durability — **file** via `plugins.e7_callhome.allowlist_path`

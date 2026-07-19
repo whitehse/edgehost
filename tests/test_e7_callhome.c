@@ -864,7 +864,7 @@ static void test_apply_config_merge(void)
     assert(n > 0);
     assert(strstr(buf, "\"runtime_shelves\":1") != NULL);
 
-    /* SSH transport create fails while PR-8 gated */
+    /* SSH transport: create (+ bind) when libassh available; else hard fail. */
     {
         edge_config_t ssh_cfg;
         edge_e7_callhome_opts_t sopts;
@@ -875,14 +875,28 @@ static void test_apply_config_merge(void)
         ssh_cfg.e7_rss_budget_bytes = 256u * 1024u * 1024u;
         snprintf(ssh_cfg.e7_listen_host, sizeof(ssh_cfg.e7_listen_host),
                  "127.0.0.1");
-        ssh_cfg.e7_listen_port = 4334;
+        ssh_cfg.e7_listen_port = pick_port();
         snprintf(ssh_cfg.e7_transport, sizeof(ssh_cfg.e7_transport), "ssh");
+        snprintf(ssh_cfg.e7_ssh_password, sizeof(ssh_cfg.e7_ssh_password),
+                 "lab");
+        snprintf(ssh_cfg.e7_ssh_username, sizeof(ssh_cfg.e7_ssh_username),
+                 "netconf");
         memset(&sopts, 0, sizeof(sopts));
         sopts.cfg = &ssh_cfg;
         sopts.state = st;
         ssh_ch = edge_e7_callhome_create(&sopts);
 #if EDGEHOST_E7_SSH_AVAILABLE
-        (void)ssh_ch;
+        assert(ssh_ch != NULL);
+        assert(edge_e7_callhome_bind(ssh_ch) == 0);
+        assert(edge_e7_callhome_listen_fd(ssh_ch) >= 0);
+        /* Profile remains raw-shaped until session_start wires CALLHOME. */
+        {
+            netconf_config_t ncfg;
+            edge_e7_netconf_profile(&ncfg);
+            assert(ncfg.ssh_mode == NETCONF_SSH_OFF || ncfg.ssh_mode == 0);
+            assert(ncfg.event_queue_size == 8);
+        }
+        edge_e7_callhome_destroy(ssh_ch);
 #else
         assert(ssh_ch == NULL);
 #endif
@@ -890,7 +904,7 @@ static void test_apply_config_merge(void)
 
     edge_e7_callhome_destroy(ch);
     edge_state_destroy(st);
-    printf("  PASS: apply_config merge/replace_all + ssh scaffold\n");
+    printf("  PASS: apply_config merge/replace_all + ssh create\n");
 }
 
 static void test_allowlist_file_roundtrip(void)

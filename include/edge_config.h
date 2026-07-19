@@ -26,6 +26,10 @@ extern "C" {
 #define EDGE_CONFIG_E7_SHELF_ID_MAX 64
 /** transport / reload_policy short enums as strings. */
 #define EDGE_CONFIG_E7_ENUM_MAX 16
+/** Lab SSH Call Home password (plugins.e7_callhome.ssh_password). */
+#define EDGE_CONFIG_E7_SSH_PASSWORD_MAX 128
+/** Optional expected SSH username (plugins.e7_callhome.ssh_username). */
+#define EDGE_CONFIG_E7_SSH_USERNAME_MAX 64
 
 /**
  * One YAML allowlist seed entry (MAC primary key — K17).
@@ -144,6 +148,18 @@ typedef struct {
     uint32_t e7_dirty_cap;              /* default 8192 */
     size_t   e7_rss_budget_bytes;       /* default 256 MiB */
     uint32_t e7_max_sessions;           /* default 160 */
+    /**
+     * SSH Call Home lab auth (transport: ssh; requires EDGEHOST_E7_SSH_AVAILABLE).
+     * Identity preamble still runs raw TCP before SSH (Calix order).
+     * ssh_password: lab password for NETCONF_SSH_CALLHOME server auth.
+     * ssh_username: optional expected user (empty = any).
+     * host_key_path: optional host key path (empty = ephemeral ed25519).
+     * ssh_allow_none_auth: lab-only USERAUTH none (default 0).
+     */
+    char     e7_ssh_password[EDGE_CONFIG_E7_SSH_PASSWORD_MAX];
+    char     e7_ssh_username[EDGE_CONFIG_E7_SSH_USERNAME_MAX];
+    char     e7_host_key_path[EDGE_CONFIG_PATH_MAX];
+    int      e7_ssh_allow_none_auth; /* default 0 */
     /**
      * Optional durable runtime allowlist file (PR-10 interim; not Postgres).
      * When non-empty: loaded after YAML seed on create; rewritten on REST

@@ -31,7 +31,7 @@ The design **composes** sibling `libnetconf` for message framing (delimiter-base
 | **State** | `net.core` + `map.dynamic` enabled; `net.pon`, `net.home`, `electric`, `inventory` registered but **disabled** until a producer exists. **Global** `max_keys_per_ns` with **eager** value buffers on every registered namespace (`src/core/state_store.c`). Defaults: 1024 keys × 4096 B × 6 ns ≈ **24 MiB**. |
 | **Browser notify** | `GET /api/v1/stream` WebSocket; `STATE_CHANGED` JSON. Hub: `EDGE_WS_PENDING_MAX=8`, `EDGE_WS_MSG_MAX=4096+512`. REST/NOTIFY broadcast; **plugin `state_put` does not**. |
 | **libnetconf** | Pure SM: `feed_input` / `next_event` / `get_output`. Roles: `NETCONF_ROLE_CLIENT` (NMS/outbound client) and `NETCONF_ROLE_CALLHOME_SERVER` (**library sense: NETCONF-server / accept-SSH-oriented peer** that emits `<session-id>` — dialectic tests use it as server). After session open, RPC **client helpers are role-agnostic**. Framing is **delimiter `]]>]]>`** (not full RFC 6241 §4.2 `#N` chunking). |
-| **libassh in libnetconf** | **Placeholder** (`HAVE_LIBASSH` stubs; TODO Tier 2.1). Raw byte mode works without SSH. |
+| **libassh in libnetconf** | **Implemented** (`HAVE_LIBASSH`; Call Home SSH server + client). Raw byte mode works without SSH. |
 | **Output buffers** | `netconf_create_with_config` sizes output to `max_rpc_size` default **4 MiB** at create — 150 sessions × 4 MiB ≈ **600 MiB** if uncapped. |
 | **Reply correlation** | Send helpers return message-id; `netconf_rpc_reply_t` has **no `message_id` field** — pending table is internal only. |
 | **Calix telemetry domain** | libipfix PEN 6321 IEs for field naming (`ont-id`, shelf/slot/port, PON optical AIDs). Not NETCONF notification schema. |
@@ -921,14 +921,14 @@ Each PR independently reviewable; ctest green; docs/pins as needed.
 | **Depends on** | PR-4b–6 for accuracy; draft earlier OK |
 | **Description** | Runbook, RSS budgets, lab.v1 honesty, security banners. |
 
-### PR-8 — SSH Call Home (gated; production path)
+### PR-8 — SSH Call Home (implemented when libassh present)
 
 | | |
 |--|--|
 | **Title** | Production SSH Call Home (identity → SSH → NETCONF CLIENT) |
-| **Files** | libnetconf SSH implementation + tests; edgehost `transport: ssh`, host key config |
-| **Depends on** | **libnetconf SSH milestone** (TODO §2.1), PR-4a (identity preamble must still run **before** SSH) |
-| **Description** | User-confirmed production transport. Identity preamble remains pre-SSH. Not a single PR if libassh is large — edgehost enablement after library milestone. |
+| **Files** | libnetconf SSH + edgehost `transport: ssh`, `ssh_password` / `host_key_path` |
+| **Depends on** | libnetconf SSH milestone (done), PR-4a (identity **before** SSH) |
+| **Description** | NMS: `NETCONF_ROLE_CLIENT` + `NETCONF_SSH_CALLHOME`. Host gate: `EDGEHOST_E7_SSH_AVAILABLE`. |
 
 ### PR-9 — Map phase 2 ONT points
 

@@ -46,6 +46,8 @@ typedef struct {
     int                  sub_sent;     /* create_subscription issued */
     int                  sub_ok;       /* subscription rpc-ok */
     int                  sub_msg_id;
+    int                  hello_sent;   /* netconf_send_hello issued */
+    int                  use_ssh;      /* transport=ssh for this session */
 
     char                 id_buf[EDGE_E7_IDENTITY_BUF_MAX];
     size_t               id_len;
@@ -856,6 +858,8 @@ static void session_close(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     s->sub_sent = 0;
     s->sub_ok = 0;
     s->sub_msg_id = 0;
+    s->hello_sent = 0;
+    s->use_ssh = 0;
     memset(&s->identity, 0, sizeof(s->identity));
     s->peer[0] = '\0';
 }
@@ -1116,27 +1120,114 @@ static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     }
 }
 
+#if EDGEHOST_E7_SSH_AVAILABLE
+/**
+ * Apply SSH Call Home fields from edge config onto a reduced profile.
+ * NMS after accept: NETCONF_ROLE_CLIENT + NETCONF_SSH_CALLHOME.
+ */
+static void edge_e7_netconf_apply_ssh(netconf_config_t *ncfg,
+                                      const edge_config_t *cfg)
+{
+    if (!ncfg || !cfg) {
+        return;
+    }
+    ncfg->ssh_mode = NETCONF_SSH_CALLHOME;
+    if (cfg->e7_ssh_password[0]) {
+        ncfg->ssh_server_password = cfg->e7_ssh_password;
+    } else {
+        ncfg->ssh_server_password = NULL;
+    }
+    if (cfg->e7_ssh_username[0]) {
+        ncfg->ssh_server_username = cfg->e7_ssh_username;
+    } else {
+        ncfg->ssh_server_username = NULL;
+    }
+    if (cfg->e7_host_key_path[0]) {
+        ncfg->host_key_path = cfg->e7_host_key_path;
+    } else {
+        ncfg->host_key_path = NULL; /* ephemeral ed25519 */
+    }
+    ncfg->ssh_allow_none_auth = cfg->e7_ssh_allow_none_auth ? 1 : 0;
+}
+#endif /* EDGEHOST_E7_SSH_AVAILABLE */
+
+/**
+ * After SSH subsystem is ready (CAPABILITY_EXCHANGE), send client hello.
+ * @return 0 ok / still waiting, -1 fatal.
+ */
+static int session_try_send_hello(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    netconf_state_t st;
+
+    if (!s || !s->nc || s->hello_sent) {
+        return 0;
+    }
+    st = netconf_current_state(s->nc);
+    if (st == NETCONF_STATE_ERROR || st == NETCONF_STATE_CLOSED ||
+        st == NETCONF_STATE_CLOSING) {
+        return -1;
+    }
+    /* Raw: ready immediately after create. SSH: wait for subsystem. */
+    if (s->use_ssh && st != NETCONF_STATE_CAPABILITY_EXCHANGE &&
+        st != NETCONF_STATE_SESSION_OPEN) {
+        return 0; /* still SSH_CONNECTING / SSH_AUTHENTICATING */
+    }
+    if (netconf_send_hello(s->nc, NULL, 0) != 0) {
+        return -1;
+    }
+    s->hello_sent = 1;
+    s->state = EDGE_E7_SESS_HELLO;
+    drain_nc_events(ch, s);
+    if (session_drain_output(s) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int session_start_netconf(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     netconf_config_t ncfg;
+    int use_ssh = 0;
 
-    (void)ch;
+    if (!ch || !ch->cfg || !s) {
+        return -1;
+    }
     edge_e7_netconf_profile(&ncfg);
+    use_ssh = e7_transport_is_ssh(ch->cfg->e7_transport);
+    s->use_ssh = use_ssh ? 1 : 0;
+    s->hello_sent = 0;
+
+    if (use_ssh) {
+#if !EDGEHOST_E7_SSH_AVAILABLE
+        return -1;
+#else
+        edge_e7_netconf_apply_ssh(&ncfg, ch->cfg);
+#endif
+    }
+
     s->nc = netconf_create_with_config(NETCONF_ROLE_CLIENT, &ncfg);
     if (!s->nc) {
         return -1;
     }
-    if (netconf_send_hello(s->nc, NULL, 0) != 0) {
-        session_clear_nc(s);
-        return -1;
-    }
+
+    /* SSH init may already have produced banner/KEX WRITE — drain it. */
     drain_nc_events(ch, s);
     if (session_drain_output(s) != 0) {
         session_clear_nc(s);
         return -1;
     }
-    s->state = EDGE_E7_SESS_HELLO;
+
     s->identity_ms = mono_now_ms();
+    if (use_ssh) {
+        /* Wait for subsystem before netconf_send_hello (raw TCP identity done). */
+        s->state = EDGE_E7_SESS_SSH;
+        return 0;
+    }
+
+    if (session_try_send_hello(ch, s) != 0) {
+        session_clear_nc(s);
+        return -1;
+    }
     return 0;
 }
 
@@ -1152,6 +1243,33 @@ static void session_check_open(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         ch->stats.sessions_open++;
         ch->stats.sessions_opened++;
         put_session_json(ch, s, "open");
+        session_try_subscribe(ch, s);
+    }
+}
+
+/** Post feed/drain: maybe finish SSH → hello, then check OPEN. */
+static void session_after_nc_io(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    if (!s || !s->nc) {
+        return;
+    }
+    if (!s->hello_sent) {
+        if (session_try_send_hello(ch, s) != 0) {
+            ch->stats.rejects_other++;
+            put_session_json(ch, s, "error");
+            session_close(ch, s);
+            return;
+        }
+    }
+    if (s->state == EDGE_E7_SESS_EMPTY) {
+        return;
+    }
+    if (session_drain_output(s) != 0) {
+        session_close(ch, s);
+        return;
+    }
+    session_check_open(ch, s);
+    if (s->state == EDGE_E7_SESS_OPEN && !s->sub_sent) {
         session_try_subscribe(ch, s);
     }
 }
@@ -1209,15 +1327,17 @@ static int session_finish_identity(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         session_close(ch, s);
         return -1;
     }
-    /* Feed any leftover post-identity bytes into NETCONF. */
+    /*
+     * Feed any leftover post-identity bytes into libnetconf.
+     * Raw: start of peer NETCONF hello. SSH: first ciphertext (SSH-2.0-…).
+     */
     if (s->id_len > 0 && s->nc) {
         size_t used =
             netconf_feed_input(s->nc, (const uint8_t *)s->id_buf, s->id_len);
         (void)used;
         s->id_len = 0;
         drain_nc_events(ch, s);
-        (void)session_drain_output(s);
-        session_check_open(ch, s);
+        session_after_nc_io(ch, s);
     }
     return 0;
 #else
@@ -1287,18 +1407,16 @@ static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     }
 
 #if EDGEHOST_HAVE_LIBNETCONF
-    if ((s->state == EDGE_E7_SESS_HELLO || s->state == EDGE_E7_SESS_OPEN) &&
+    /* SSH (post-identity) or NETCONF hello/open: feed into libnetconf SM. */
+    if ((s->state == EDGE_E7_SESS_SSH || s->state == EDGE_E7_SESS_HELLO ||
+         s->state == EDGE_E7_SESS_OPEN) &&
         s->nc) {
         size_t used = netconf_feed_input(s->nc, s->rx, (size_t)n);
         (void)used;
         drain_nc_events(ch, s);
-        if (session_drain_output(s) != 0) {
-            session_close(ch, s);
+        session_after_nc_io(ch, s);
+        if (s->state == EDGE_E7_SESS_EMPTY) {
             return;
-        }
-        session_check_open(ch, s);
-        if (s->state == EDGE_E7_SESS_OPEN && !s->sub_sent) {
-            session_try_subscribe(ch, s);
         }
         if (session_flush_tx(s) != 0) {
             session_close(ch, s);
@@ -1319,11 +1437,13 @@ static void session_on_timeout(edge_e7_callhome_t *ch, edge_e7_session_t *s,
             ch->stats.rejects_bad_identity++;
             session_close(ch, s);
         }
-    } else if (s->state == EDGE_E7_SESS_HELLO) {
+    } else if (s->state == EDGE_E7_SESS_SSH || s->state == EDGE_E7_SESS_HELLO) {
         uint64_t base = s->identity_ms ? s->identity_ms : s->accepted_ms;
         if (mono_ms > base && mono_ms - base > EDGE_E7_HELLO_TIMEOUT_MS) {
             ch->stats.rejects_other++;
-            put_session_json(ch, s, "hello_timeout");
+            put_session_json(ch, s,
+                             s->state == EDGE_E7_SESS_SSH ? "ssh_timeout"
+                                                          : "hello_timeout");
             session_close(ch, s);
         }
     }
@@ -1388,12 +1508,12 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
     if (!opts || !opts->cfg || !opts->cfg->e7_enabled) {
         return NULL;
     }
-    /* PR-8 scaffold: SSH Call Home not implemented until libassh linked. */
     if (e7_transport_is_ssh(opts->cfg->e7_transport)) {
 #if !EDGEHOST_E7_SSH_AVAILABLE
         fprintf(stderr,
-                "edgehost: SSH Call Home requires libnetconf libassh "
-                "(PR-8 pending; EDGEHOST_E7_SSH_AVAILABLE=0)\n");
+                "edgehost: SSH Call Home requires libnetconf built with "
+                "libassh (EDGEHOST_E7_SSH_AVAILABLE=0; install libassh "
+                "under /usr/local and rebuild sibling libnetconf)\n");
         return NULL;
 #endif
     }
@@ -1565,7 +1685,7 @@ int edge_e7_callhome_bind(edge_e7_callhome_t *ch)
 #if !EDGEHOST_E7_SSH_AVAILABLE
         fprintf(stderr,
                 "edgehost: e7_callhome bind: SSH Call Home requires "
-                "libnetconf libassh (PR-8 pending)\n");
+                "libnetconf+libassh (EDGEHOST_E7_SSH_AVAILABLE=0)\n");
         return -1;
 #endif
     }

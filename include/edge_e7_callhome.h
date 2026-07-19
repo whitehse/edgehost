@@ -14,7 +14,8 @@
  * SIGHUP: edge_e7_callhome_apply_config with reload_policy merge|replace_all.
  *
  * Requires EDGEHOST_HAVE_LIBNETCONF (sibling libnetconf). Without it, create
- * returns NULL. transport=ssh requires EDGEHOST_E7_SSH_AVAILABLE (PR-8).
+ * returns NULL. transport=ssh requires EDGEHOST_E7_SSH_AVAILABLE (libassh
+ * linked at configure time; PR-8).
  */
 #ifndef EDGE_E7_CALLHOME_H
 #define EDGE_E7_CALLHOME_H
@@ -37,9 +38,10 @@ extern "C" {
 #endif
 
 /**
- * Production SSH Call Home (RFC 8071 + libassh) — gated until libnetconf
- * HAVE_LIBASSH lands (PR-8). Host scaffolding accepts transport: ssh in YAML
- * but create/bind fail until this is 1.
+ * SSH Call Home (RFC 8071 + libnetconf libassh). Set to 1 by CMake when
+ * libnetconf and libassh are both found. When 0, transport: ssh create/bind
+ * fail with a clear stderr message. Prefer #if EDGEHOST_E7_SSH_AVAILABLE
+ * over hardcoding 0.
  */
 #ifndef EDGEHOST_E7_SSH_AVAILABLE
 #define EDGEHOST_E7_SSH_AVAILABLE 0
@@ -122,7 +124,7 @@ typedef struct {
 /**
  * Create Call Home engine. Fails (NULL) if libnetconf missing, cfg NULL,
  * e7 disabled, max_sessions==0, RSS budget exceeded by estimate, or
- * transport=ssh while EDGEHOST_E7_SSH_AVAILABLE is 0 (PR-8 pending).
+ * transport=ssh while EDGEHOST_E7_SSH_AVAILABLE is 0.
  */
 edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts);
 
@@ -206,6 +208,8 @@ uint32_t edge_e7_callhome_open_count(const edge_e7_callhome_t *ch);
 /**
  * Normative reduced libnetconf profile (K14). Exposed for tests.
  * event_queue_size=8, max_rpc/output 256 KiB, max_notification 64 KiB.
+ * Does not set SSH fields — session_start applies CALLHOME mode from
+ * edge_config when transport=ssh.
  */
 void edge_e7_netconf_profile(void *cfg_out /* netconf_config_t * when linked */);
 
