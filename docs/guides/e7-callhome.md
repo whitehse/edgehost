@@ -145,7 +145,7 @@ mutations (lab password session typically grants admin in lab mode — check
 | `GET` | `/api/v1/e7/status` | Call Home metrics (accepts, sessions, rejects, coalesce, …) |
 | `GET` | `/api/v1/e7/shelves` | Allowlist + live session summary |
 | `GET` | `/api/v1/e7/shelves/{mac}` | Detail (identity + session) |
-| `PUT` | `/api/v1/e7/shelves/{mac}` | Runtime allowlist upsert (**non-durable**) |
+| `PUT` | `/api/v1/e7/shelves/{mac}` | Runtime allowlist upsert (file if `allowlist_path`) |
 | `DELETE` | `/api/v1/e7/shelves/{mac}` | Remove + disconnect |
 | `POST` | `/api/v1/e7/shelves/{mac}/disconnect` | Force close session |
 | `GET` | `/api/v1/e7/shelves/{mac}/onts` | Paginated ONT list (`limit`, `cursor`) |
@@ -174,7 +174,7 @@ State keys (also visible via `/api/v1/state/…`):
 Static under `spa/e7/`. Features:
 
 - Lab login + auth badge
-- **Non-durable allowlist** banner (REST edits lost on restart unless YAML
+- **Allowlist durability** banner (`allowlist_path` file or YAML seed;
   updated)
 - Status metrics table (`GET /api/v1/e7/status`)
 - Shelves table (MAC, label, enabled, session, serial/model)
@@ -214,8 +214,9 @@ With `--config PATH`, **SIGHUP** reloads YAML (same path as startup):
 4. **Listen host/port/enabled** are **not** rebound live — a warning is logged
    if they change; restart required. Allowlist still applies.
 
-REST allowlist edits remain **non-durable** across process restart (unless
-re-seeded from YAML).
+REST allowlist edits are **not written to YAML**. Set
+`plugins.e7_callhome.allowlist_path` (text file: `mac=… enabled=… label=…`) to
+persist them across restarts (PR-10 interim; Postgres optional later).
 
 ---
 
@@ -250,7 +251,7 @@ Fail-soft (exit 0) if ports are busy or libnetconf is not linked.
 | `transport: ssh` | **Scaffold only** — YAML accepts `ssh`; engine create/bind fail until libnetconf **libassh** (`EDGEHOST_E7_SSH_AVAILABLE=0`, PR-8) |
 | Identity before SSH | Still required (K17) |
 | Raw on non-loopback | Forbidden without `lab_insecure_raw` (lab only) |
-| Durable allowlist | Optional Postgres (PR-10); deferred (no edge_pg on foundation branch) |
+| Durable allowlist | **File** via `allowlist_path` (PR-10 interim); Postgres still optional later |
 | Map home outlines | Future; ONT points with coords land in `map.dynamic` now |
 
 Disable: set `plugins.e7_callhome.enabled: false` and restart (or SIGHUP for

@@ -100,7 +100,7 @@ struct edge_e7_callhome {
     uint32_t              dirty_used;
     uint64_t              last_flush_ms;
 
-    /* Runtime allowlist (YAML seed + REST; non-durable) */
+    /* Runtime allowlist (YAML seed + REST; optional e7_allowlist_path file) */
     edge_e7_runtime_shelf_t runtime[EDGE_E7_RUNTIME_SHELVES_MAX];
     uint32_t                runtime_count;
 
@@ -250,7 +250,8 @@ static void put_config_json(edge_e7_callhome_t *ch,
     n = snprintf(
         json, sizeof(json),
         "{\"v\":1,\"mac\":\"%s\",\"label\":\"%s\",\"enabled\":%s,"
-        "\"note\":\"runtime allowlist is non-durable; not written back to YAML\"}",
+        "\"note\":\"not written to YAML; set plugins.e7_callhome.allowlist_path "
+        "for file durability\"}",
         rs->mac, rs->label[0] ? rs->label : "", rs->enabled ? "true" : "false");
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return;
@@ -307,6 +308,136 @@ static void seed_runtime_from_yaml(edge_e7_callhome_t *ch)
         rs->enabled = ch->cfg->e7_shelves[i].enabled ? 1 : 0;
         rs->from_yaml = 1;
         put_config_json(ch, rs);
+    }
+}
+
+/**
+ * Load durable allowlist file (PR-10 interim). Format (one shelf per line):
+ *   mac=<mac> enabled=<0|1> label=<optional text to EOL>
+ * Lines starting with # and blank lines ignored. Merges into runtime
+ * (file wins for listed MACs; does not clear runtime-only entries).
+ */
+static void load_runtime_from_file(edge_e7_callhome_t *ch)
+{
+    FILE *fp;
+    char line[512];
+
+    if (!ch || !ch->cfg || ch->cfg->e7_allowlist_path[0] == '\0') {
+        return;
+    }
+    fp = fopen(ch->cfg->e7_allowlist_path, "r");
+    if (!fp) {
+        return; /* missing file is OK on first run */
+    }
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line;
+        char mac_raw[EDGE_CONFIG_E7_MAC_MAX];
+        char norm[EDGE_E7_MAC_MAX];
+        char label[EDGE_CONFIG_E7_SHELF_ID_MAX];
+        int enabled = 1;
+        edge_e7_runtime_shelf_t *rs;
+        char *tok;
+
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (*p == '\0' || *p == '#' || *p == '\n' || *p == '\r') {
+            continue;
+        }
+        mac_raw[0] = '\0';
+        label[0] = '\0';
+        /* tokenize space-separated key=value; label may contain spaces after = */
+        while (*p) {
+            while (*p == ' ' || *p == '\t') {
+                p++;
+            }
+            if (*p == '\0' || *p == '\n' || *p == '\r') {
+                break;
+            }
+            tok = p;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+                p++;
+            }
+            if (strncmp(tok, "label=", 6) == 0) {
+                /* rest of line after label= */
+                char *src = tok + 6;
+                size_t n = 0;
+                while (src[n] && src[n] != '\n' && src[n] != '\r' &&
+                       n + 1 < sizeof(label)) {
+                    label[n] = src[n];
+                    n++;
+                }
+                label[n] = '\0';
+                break;
+            }
+            if (*p) {
+                *p++ = '\0';
+            }
+            if (strncmp(tok, "mac=", 4) == 0) {
+                snprintf(mac_raw, sizeof(mac_raw), "%s", tok + 4);
+            } else if (strncmp(tok, "enabled=", 8) == 0) {
+                enabled = (tok[8] == '0') ? 0 : 1;
+            }
+        }
+        if (mac_raw[0] == '\0' ||
+            edge_e7_mac_normalize(mac_raw, norm, sizeof(norm)) != 0) {
+            continue;
+        }
+        rs = runtime_find(ch, norm);
+        if (!rs) {
+            rs = runtime_alloc(ch);
+            if (!rs) {
+                break;
+            }
+            memcpy(rs->mac, norm, sizeof(rs->mac));
+            rs->from_yaml = 0;
+        }
+        rs->enabled = enabled ? 1 : 0;
+        if (label[0]) {
+            snprintf(rs->label, sizeof(rs->label), "%s", label);
+        }
+        put_config_json(ch, rs);
+    }
+    fclose(fp);
+}
+
+/** Rewrite durable allowlist file from current runtime table. Best-effort. */
+static void save_runtime_to_file(edge_e7_callhome_t *ch)
+{
+    FILE *fp;
+    uint32_t i;
+    char tmp[EDGE_CONFIG_PATH_MAX + 8];
+    int n;
+
+    if (!ch || !ch->cfg || ch->cfg->e7_allowlist_path[0] == '\0') {
+        return;
+    }
+    n = snprintf(tmp, sizeof(tmp), "%s.tmp", ch->cfg->e7_allowlist_path);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) {
+        return;
+    }
+    fp = fopen(tmp, "w");
+    if (!fp) {
+        return;
+    }
+    fprintf(fp, "# edgehost e7 allowlist v1 (auto-written; PR-10 interim)\n");
+    for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+        const edge_e7_runtime_shelf_t *rs = &ch->runtime[i];
+        if (!rs->used || rs->mac[0] == '\0') {
+            continue;
+        }
+        fprintf(fp, "mac=%s enabled=%d", rs->mac, rs->enabled ? 1 : 0);
+        if (rs->label[0]) {
+            fprintf(fp, " label=%s", rs->label);
+        }
+        fputc('\n', fp);
+    }
+    if (fclose(fp) != 0) {
+        (void)unlink(tmp);
+        return;
+    }
+    if (rename(tmp, ch->cfg->e7_allowlist_path) != 0) {
+        (void)unlink(tmp);
     }
 }
 
@@ -1328,6 +1459,8 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
         (void)edge_state_ns_set_enabled(ch->state, "net.pon", 1);
     }
     seed_runtime_from_yaml(ch);
+    /* File wins for listed MACs over YAML when path configured (restart). */
+    load_runtime_from_file(ch);
     return ch;
 #endif
 }
@@ -1391,6 +1524,9 @@ int edge_e7_callhome_apply_config(edge_e7_callhome_t *ch,
     }
     /* merge and replace_all: reseed/upsert YAML shelves (YAML MAC wins). */
     seed_runtime_from_yaml(ch);
+    /* File path may have changed with new_cfg; re-merge durable shelves. */
+    load_runtime_from_file(ch);
+    save_runtime_to_file(ch);
     return 0;
 }
 
@@ -1742,7 +1878,8 @@ int edge_e7_callhome_shelves_json(const edge_e7_callhome_t *ch, char *buf,
         return -1;
     }
     w = snprintf(buf, buf_sz,
-                 "{\"v\":1,\"note\":\"runtime allowlist is non-durable\","
+                 "{\"v\":1,\"note\":\"allowlist not written to YAML; "
+                 "use allowlist_path for file durability\","
                  "\"shelves\":[");
     if (w < 0 || (size_t)w >= buf_sz) {
         return -1;
@@ -1811,7 +1948,7 @@ int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
         w = snprintf(buf + off, buf_sz - off,
                      "\"configured\":true,\"label\":\"%s\",\"enabled\":%s,"
                      "\"from_yaml\":%s,"
-                     "\"note\":\"runtime allowlist is non-durable\",",
+                     "\"note\":\"allowlist_path for file durability\",",
                      rs->label[0] ? rs->label : "",
                      rs->enabled ? "true" : "false",
                      rs->from_yaml ? "true" : "false");
@@ -1871,6 +2008,7 @@ int edge_e7_callhome_allowlist_upsert(edge_e7_callhome_t *ch, const char *mac,
     }
     rs->enabled = enabled ? 1 : 0;
     put_config_json(ch, rs);
+    save_runtime_to_file(ch);
     return 0;
 }
 
@@ -1913,6 +2051,7 @@ int edge_e7_callhome_allowlist_delete(edge_e7_callhome_t *ch, const char *mac)
     if (s) {
         session_close(ch, s);
     }
+    save_runtime_to_file(ch);
     return 0;
 }
 

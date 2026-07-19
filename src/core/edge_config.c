@@ -79,6 +79,7 @@ void edge_config_defaults(edge_config_t *c)
     c->e7_dirty_cap = 8192;
     c->e7_rss_budget_bytes = 268435456u; /* 256 MiB */
     c->e7_max_sessions = 160;
+    c->e7_allowlist_path[0] = '\0';
     c->e7_shelf_count = 0;
     c->generation = 0;
 }

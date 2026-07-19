@@ -144,6 +144,12 @@ typedef struct {
     uint32_t e7_dirty_cap;              /* default 8192 */
     size_t   e7_rss_budget_bytes;       /* default 256 MiB */
     uint32_t e7_max_sessions;           /* default 160 */
+    /**
+     * Optional durable runtime allowlist file (PR-10 interim; not Postgres).
+     * When non-empty: loaded after YAML seed on create; rewritten on REST
+     * upsert/delete and after SIGHUP apply_config. Empty = memory only.
+     */
+    char     e7_allowlist_path[EDGE_CONFIG_PATH_MAX];
     edge_e7_shelf_config_t e7_shelves[EDGE_CONFIG_E7_SHELVES_MAX];
     uint32_t e7_shelf_count; /* number of populated shelves[] entries */
 

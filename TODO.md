@@ -65,7 +65,8 @@ Design: `docs/designs/e7-netconf-callhome.md` · ADR-018 · guide
   create/bind fail with clear stderr). Full path gated on libnetconf **libassh**.
 - [~] **PR-9** Map ONT mirror — **partial**: lab.v1 puts `map.dynamic`
   `ont/{mac}/{ont}` when lon/lat present; home outlines still future.
-- [ ] **PR-10** Optional Postgres durable allowlist (no `edge_pg` on this branch)
+- [~] **PR-10** Allowlist durability — **file** via `plugins.e7_callhome.allowlist_path`
+  (interim); Postgres still optional later (no `edge_pg` on this branch)
 - [ ] Real Calix notification samples → `calix.e7.*` extractors
 - [x] **K15 SIGHUP** allowlist merge (`reload_policy: merge` / `replace_all`) +
   iouring HUP path (`config_path` / edgecore apply)

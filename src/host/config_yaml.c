@@ -525,6 +525,13 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->e7_rss_budget_bytes = sz;
         return 0;
     }
+    if (strcmp(key, "plugins.e7_callhome.allowlist_path") == 0) {
+        if (copy_str(c->e7_allowlist_path, sizeof(c->e7_allowlist_path), val) !=
+            0) {
+            return -1;
+        }
+        return 1;
+    }
     if (strcmp(key, "plugins.e7_callhome.max_sessions") == 0) {
         if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
             FAIL("invalid");
@@ -624,6 +631,7 @@ static const char *const g_paths[] = {
     "plugins.e7_callhome.dirty_cap",
     "plugins.e7_callhome.rss_budget_bytes",
     "plugins.e7_callhome.max_sessions",
+    "plugins.e7_callhome.allowlist_path",
     NULL
 };
 

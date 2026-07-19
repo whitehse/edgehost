@@ -77,6 +77,8 @@ plugins:
     dirty_cap: 8192
     rss_budget_bytes: 268435456
     max_sessions: 160
+    # Optional file durability for REST allowlist (PR-10 interim; not Postgres):
+    # allowlist_path: ./var/e7_allowlist.txt
     shelves:
       - mac: "00:02:5d:d9:21:47"
         shelf_id: "lab-e7-1"

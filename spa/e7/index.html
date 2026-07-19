@@ -13,11 +13,12 @@
   </header>
 
   <section class="card banner-warn">
-    <h2>Non-durable allowlist</h2>
+    <h2>Allowlist durability</h2>
     <p class="hint" style="margin:0">
-      REST allowlist edits (PUT/DELETE shelves) update <strong>runtime state only</strong>
-      (YAML seed + in-memory table). Changes are <strong>lost on restart</strong> unless the
-      YAML <code>plugins.e7_callhome.shelves</code> list is updated. Config JSON carries the same note.
+      REST allowlist edits update runtime state and are <strong>not written back
+      to YAML</strong>. Set <code>plugins.e7_callhome.allowlist_path</code> for
+      file durability across restarts (PR-10 interim). Without that path, only
+      YAML <code>shelves</code> + in-memory table apply after restart.
     </p>
   </section>
 

@@ -742,7 +742,7 @@ static void test_status_json_and_allowlist(void)
     n = edge_e7_callhome_shelves_json(ch, buf, sizeof(buf));
     assert(n > 0);
     assert(strstr(buf, "00:02:5d:d9:21:47") != NULL);
-    assert(strstr(buf, "non-durable") != NULL);
+    assert(strstr(buf, "allowlist") != NULL || strstr(buf, "YAML") != NULL);
 
     /* REST upsert another MAC (runtime-only) */
     assert(edge_e7_callhome_allowlist_upsert(ch, "11-22-33-44-55-66", "lab-2",
@@ -754,7 +754,8 @@ static void test_status_json_and_allowlist(void)
 
     assert(edge_state_get(st, "inventory", "e7/11-22-33-44-55-66/config", val,
                           sizeof(val), &vlen) == EDGE_STATE_OK);
-    assert(strstr(val, "non-durable") != NULL);
+    assert(strstr(val, "allowlist_path") != NULL ||
+           strstr(val, "YAML") != NULL);
 
     assert(edge_e7_callhome_allowlist_delete(ch, "11:22:33:44:55:66") == 0);
     assert(edge_e7_callhome_shelf_json(ch, "11:22:33:44:55:66", buf,
@@ -892,6 +893,57 @@ static void test_apply_config_merge(void)
     printf("  PASS: apply_config merge/replace_all + ssh scaffold\n");
 }
 
+static void test_allowlist_file_roundtrip(void)
+{
+    edge_state_store_t *st;
+    edge_config_t cfg;
+    edge_e7_callhome_opts_t opts;
+    edge_e7_callhome_t *ch;
+    edge_e7_callhome_t *ch2;
+    char path[] = "/tmp/edgehost-e7-allowlist-test.XXXXXX";
+    char buf[2048];
+    int fd;
+    int n;
+
+    fd = mkstemp(path);
+    assert(fd >= 0);
+    close(fd);
+    (void)unlink(path); /* create writes file; start empty */
+
+    st = edge_state_create();
+    assert(st);
+    (void)edge_state_ns_set_enabled(st, "inventory", 1);
+    (void)edge_state_ns_set_enabled(st, "net.pon", 1);
+
+    edge_config_defaults(&cfg);
+    cfg.e7_enabled = 1;
+    cfg.e7_max_sessions = 4;
+    cfg.e7_rss_budget_bytes = 256u * 1024u * 1024u;
+    snprintf(cfg.e7_listen_host, sizeof(cfg.e7_listen_host), "127.0.0.1");
+    cfg.e7_listen_port = 4334;
+    snprintf(cfg.e7_allowlist_path, sizeof(cfg.e7_allowlist_path), "%s", path);
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cfg = &cfg;
+    opts.state = st;
+    ch = edge_e7_callhome_create(&opts);
+    assert(ch);
+    assert(edge_e7_callhome_allowlist_upsert(ch, "00:02:5d:aa:bb:cc", "file-lab",
+                                             1) == 0);
+    edge_e7_callhome_destroy(ch);
+
+    /* New instance should load durable shelf without YAML entry */
+    ch2 = edge_e7_callhome_create(&opts);
+    assert(ch2);
+    n = edge_e7_callhome_shelf_json(ch2, "00:02:5d:aa:bb:cc", buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "file-lab") != NULL);
+    edge_e7_callhome_destroy(ch2);
+    edge_state_destroy(st);
+    (void)unlink(path);
+    printf("  PASS: allowlist file durability roundtrip\n");
+}
+
 #endif /* EDGEHOST_HAVE_LIBNETCONF */
 
 int main(void)
@@ -907,6 +959,7 @@ int main(void)
     test_reject_unknown_mac();
     test_status_json_and_allowlist();
     test_apply_config_merge();
+    test_allowlist_file_roundtrip();
     printf("All e7_callhome tests passed.\n");
     return 0;
 #endif
