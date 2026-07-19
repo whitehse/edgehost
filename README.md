@@ -15,7 +15,14 @@ cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on
 # open lab (default auth.mode: open):
 ./build/edgehost --host 127.0.0.1 --port 8080 --config config/edgehost.example.yaml
 
-# lab_password: EDGEHOST_LAB_PASSWORD + EDGEHOST_SESSION_HMAC
+# full lab E2E (auth + SPA console + packages + state + mobile sync):
+./scripts/lab-e2e.sh
+# docs: docs/guides/lab-e2e.md
+# browser console: KEEP_RUNNING=1 ./scripts/lab-e2e.sh → http://127.0.0.1:18080/
+
+# lab_password manual:
+#   EDGEHOST_LAB_PASSWORD + EDGEHOST_SESSION_HMAC
+#   ./build/edgehost --config config/edgehost.lab.yaml
 #   POST /auth/lab-login → Cookie edge_session
 # proxy_headers: EDGEHOST_PROXY_HMAC
 #   reverse-proxy injects X-User, X-Auth-Timestamp, X-Auth-Signature

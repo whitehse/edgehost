@@ -1,0 +1,18 @@
+{
+  "packages": [
+    {
+      "id": "fixture_basemap",
+      "kind": "basemap",
+      "path": "fixture_basemap/",
+      "manifest": "fixture_basemap/manifest.json",
+      "tiles": 3,
+      "unsigned_lab_ok": true
+    },
+    {
+      "id": "demo.wmap",
+      "kind": "file",
+      "path": "demo.wmap",
+      "note": "single-file smoke asset from P1.6"
+    }
+  ]
+}

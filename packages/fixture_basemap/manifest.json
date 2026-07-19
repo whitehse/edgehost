@@ -1,0 +1,21 @@
+{
+  "kind": "basemap",
+  "format_version": 1,
+  "name": "fixture_basemap",
+  "source": {
+    "adapter": "lab_fixture",
+    "label": "ecoec-mobile phase-1 fixture"
+  },
+  "crs_display": "EPSG:3857",
+  "bbox": [-96.1, 36.0, -95.9, 36.3],
+  "center": [-95.99, 36.15],
+  "zoom": 10,
+  "zmin": 12,
+  "zmax": 12,
+  "created_at": "2026-07-18T00:00:00Z",
+  "tiles": [
+    { "z": 12, "x": 0, "y": 0 },
+    { "z": 12, "x": 0, "y": 1 },
+    { "z": 12, "x": 1, "y": 0 }
+  ]
+}

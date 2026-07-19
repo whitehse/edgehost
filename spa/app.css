@@ -1,2 +1,88 @@
-body { font-family: system-ui, sans-serif; margin: 2rem; }
-h1 { color: #1a5f7a; }
+:root {
+  --bg: #0e1218;
+  --card: #171e2a;
+  --text: #e8eef7;
+  --muted: #8b9bb4;
+  --accent: #4c8dff;
+  --ok: #3ecf8e;
+  --bad: #f07178;
+  --border: #2a3548;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 1rem 1.25rem 3rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+  max-width: 52rem;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+h1 { margin: 0; font-size: 1.35rem; }
+h2 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.85rem;
+}
+.card.muted { color: var(--muted); font-size: 0.92rem; }
+.hint { color: var(--muted); font-size: 0.88rem; margin: 0 0 0.75rem; }
+label {
+  display: block;
+  margin: 0.4rem 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+input, textarea, select {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #0c1017;
+  color: var(--text);
+  font: inherit;
+}
+textarea { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+.row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.6rem; }
+button, .row a {
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.45rem 0.75rem;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+button:hover, .row a:hover { filter: brightness(1.08); }
+pre {
+  background: #0c1017;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  overflow: auto;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+pre.log { min-height: 5rem; max-height: 14rem; }
+.badge {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--border);
+}
+.badge.ok { background: color-mix(in srgb, var(--ok) 35%, #000); color: var(--ok); }
+.badge.muted { color: var(--muted); }
+.badge.bad { background: color-mix(in srgb, var(--bad) 30%, #000); color: var(--bad); }
+code { font-family: ui-monospace, monospace; font-size: 0.88em; }

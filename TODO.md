@@ -30,6 +30,13 @@
 
 - [x] Track 1 complete through P1.15 (see program design for Track 2+)
 
+## Lab E2E (post–Track 1)
+
+- [x] `config/edgehost.lab.yaml` — lab_password + SPA + packages
+- [x] Lab SPA console (login, state, WS, packages)
+- [x] `packages/fixture_basemap/` + `packages/index.json`
+- [x] `scripts/lab-e2e.sh` + `docs/guides/lab-e2e.md` (includes mobile sync)
+
 ## Soft deps
 
 - [x] libsim P0.1–P0.4 (separate repo; pin in deps/pins.txt)

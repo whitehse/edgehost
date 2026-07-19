@@ -1,0 +1,70 @@
+# Lab end-to-end config (auth + SPA + packages + state/WS).
+# Plain TCP on loopback — no TLS required for lab smoke.
+#
+#   export EDGEHOST_LAB_PASSWORD=lab
+#   export EDGEHOST_SESSION_HMAC='dev-hmac-key-32-bytes-minimum!!'
+#   ./build/edgehost --config config/edgehost.lab.yaml --host 127.0.0.1 --port 18080
+#
+# Optional OpenAI (set OPENAI_API_KEY and flip plugins.openai_proxy.enabled):
+#   export OPENAI_API_KEY=sk-...
+#   # also EDGEHOST_OPENAI_SERVICE_KEY if using service role
+
+listen:
+  host: 127.0.0.1
+  port: 18080
+
+spa:
+  root: ./spa
+  max_file_bytes: 262144
+
+packages:
+  root: ./packages
+  # Lab: clients may treat packages as unsigned (mobile require_signature: false).
+  # Signature enforcement is client-side until field inventory.
+
+http:
+  max_body_bytes: 1048576
+  max_pending_outbound: 256
+  max_upstream_body_bytes: 4194304
+
+state:
+  namespaces:
+    net_core:
+      enabled: true
+    map_dynamic:
+      enabled: true
+    net_pon:
+      enabled: false
+    net_home:
+      enabled: false
+    electric:
+      enabled: false
+    inventory:
+      enabled: false
+
+auth:
+  mode: lab_password
+  lab_password_env: EDGEHOST_LAB_PASSWORD
+  session_hmac_key_env: EDGEHOST_SESSION_HMAC
+  session_ttl_s: 28800
+
+dns:
+  allow_blocking: true   # lab only (openai without upstream_addr)
+
+plugins:
+  openai_proxy:
+    enabled: false
+    upstream: "https://api.openai.com"
+    api_key_env: OPENAI_API_KEY
+    service_api_key_env: EDGEHOST_OPENAI_SERVICE_KEY
+    timeout_ms: 60000
+    rate_limit_rpm: 60
+    max_concurrent_per_principal: 4
+  slack:
+    enabled: false
+  teams:
+    enabled: false
+  pqproxy:
+    enabled: false
+    metrics_url: "http://127.0.0.1:9108/metrics"
+    scrape_interval_ms: 5000
