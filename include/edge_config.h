@@ -79,6 +79,15 @@ typedef struct {
     char tls_key[EDGE_CONFIG_PATH_MAX];
     char tls_client_ca[EDGE_CONFIG_PATH_MAX]; /* optional mTLS */
 
+    /** pqproxy side-car metrics scrape (P1.11). */
+    int      pqproxy_enabled;
+    char     pqproxy_metrics_url[256];
+    uint32_t pqproxy_scrape_interval_ms;
+
+    /** Postgres NOTIFY apply (P1.12). Channels listed for future LISTEN. */
+    int  postgres_notify_enabled;
+    char postgres_listen_channel[64]; /* default map_overlay */
+
     /**
      * Set by edgecore_apply_config on success (not loaded from YAML).
      * Monotonic generation for tests and observability.

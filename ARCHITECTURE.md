@@ -2,7 +2,7 @@
 
 ## Status
 
-**P1.13**: openai_proxy + **TLS server** + slack/teams stubs.
+**P1.13b**: Track 1 nearly complete — pqproxy scrape, NOTIFY, TLS client.
 
 ## Layers
 
@@ -44,6 +44,13 @@
 | Config | `tls.cert` + `tls.key` (omit for plain lab TCP) |
 | CPE | mbedTLS in agent tree only |
 
+## Side-car + NOTIFY
+
+| Item | Detail |
+|------|--------|
+| pqproxy | scrape `/metrics` → `net.core/pqproxy/health` |
+| NOTIFY | JSON schema apply → state + WS `STATE_CHANGED` |
+
 ## Next
 
-P1.11–P1.12 pqproxy; P1.13b non-blocking outbound TLS.
+P1.14–P1.15 deploy notes / extra ns hooks.

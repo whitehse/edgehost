@@ -331,6 +331,46 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         }
         return 0;
     }
+    if (strcmp(key, "plugins.pqproxy.enabled") == 0 ||
+        strcmp(key, "pqproxy.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->pqproxy_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.pqproxy.metrics_url") == 0 ||
+        strcmp(key, "pqproxy.metrics_url") == 0) {
+        if (copy_str(c->pqproxy_metrics_url, sizeof(c->pqproxy_metrics_url),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.pqproxy.scrape_interval_ms") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->pqproxy_scrape_interval_ms = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "postgres.notify_enabled") == 0 ||
+        strcmp(key, "postgres.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->postgres_notify_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "postgres.listen_channels") == 0 ||
+        strcmp(key, "postgres.listen_channel") == 0) {
+        /* single channel string or first list item as scalar */
+        if (copy_str(c->postgres_listen_channel,
+                     sizeof(c->postgres_listen_channel), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
 #undef FAIL
     return 0; /* unknown keys ignored */
 }
@@ -384,6 +424,15 @@ static const char *const g_paths[] = {
     "tls.key_file",
     "tls.client_ca",
     "tls.client_ca_file",
+    "plugins.pqproxy.enabled",
+    "pqproxy.enabled",
+    "plugins.pqproxy.metrics_url",
+    "pqproxy.metrics_url",
+    "plugins.pqproxy.scrape_interval_ms",
+    "postgres.notify_enabled",
+    "postgres.enabled",
+    "postgres.listen_channels",
+    "postgres.listen_channel",
     NULL
 };
 

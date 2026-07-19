@@ -7,7 +7,7 @@ malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
 does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.13** — TLS server + slack/teams stubs.
+**Current milestone**: **P1.11–P1.13b** — pqproxy scrape, NOTIFY apply, TLS client.
 
 ## Key commands
 
@@ -105,5 +105,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.9–P1.10 + P1.13 complete**: slack/teams stubs; OpenSSL NB TLS server.  
-**Next**: **P1.11** pqproxy metrics or **P1.13b** non-blocking TLS client.
+**P1.11–P1.13b complete**: pqproxy scrape, NOTIFY→state/WS, NB TLS client.  
+**Next**: **P1.14–P1.15** extra ns hooks + deploy notes.

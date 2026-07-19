@@ -49,6 +49,13 @@ void edge_config_defaults(edge_config_t *c)
     c->tls_cert[0] = '\0';
     c->tls_key[0] = '\0';
     c->tls_client_ca[0] = '\0';
+    c->pqproxy_enabled = 0;
+    snprintf(c->pqproxy_metrics_url, sizeof(c->pqproxy_metrics_url),
+             "http://127.0.0.1:9108/metrics");
+    c->pqproxy_scrape_interval_ms = 5000;
+    c->postgres_notify_enabled = 0;
+    snprintf(c->postgres_listen_channel, sizeof(c->postgres_listen_channel),
+             "map_overlay");
     c->generation = 0;
 }
 

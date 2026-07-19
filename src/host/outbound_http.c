@@ -1,14 +1,20 @@
 /**
  * @file outbound_http.c
- * @brief Blocking outbound HTTP/1.1 (+ OpenSSL HTTPS) for PENDING (P1.8b).
+ * @brief Outbound HTTP/1.1 + non-blocking OpenSSL HTTPS (P1.8b / P1.13b).
+ *
+ * HTTPS uses SSL_set_fd + poll want-read/write (edge_tls_*_poll). Prefer
+ * upstream_addr to skip DNS.
  */
 
 #define _GNU_SOURCE
 
 #include "edge_outbound.h"
 
+#include "edge_tls.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -17,7 +23,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <openssl/err.h>
 #include <openssl/ssl.h>
 
 void edge_outbound_opts_defaults(edge_outbound_opts_t *o)
@@ -289,32 +294,13 @@ static int io_read_all_fd(int fd, uint8_t *buf, size_t cap, size_t *out_len)
     return 0;
 }
 
-static int io_write_all_ssl(SSL *ssl, const void *buf, size_t len)
+static int set_nonblock(int fd)
 {
-    const uint8_t *p = (const uint8_t *)buf;
-    while (len > 0) {
-        int n = SSL_write(ssl, p, (int)len);
-        if (n <= 0) {
-            return -1;
-        }
-        p += (size_t)n;
-        len -= (size_t)n;
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) {
+        return -1;
     }
-    return 0;
-}
-
-static int io_read_all_ssl(SSL *ssl, uint8_t *buf, size_t cap, size_t *out_len)
-{
-    size_t off = 0;
-    while (off < cap) {
-        int n = SSL_read(ssl, buf + off, (int)(cap - off));
-        if (n <= 0) {
-            break;
-        }
-        off += (size_t)n;
-    }
-    *out_len = off;
-    return 0;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
 int edge_outbound_http_execute(const edge_http_client_req_t *req,
@@ -339,6 +325,7 @@ int edge_outbound_http_execute(const edge_http_client_req_t *req,
     SSL_CTX *ssl_ctx = NULL;
     SSL *ssl = NULL;
     int rc = -1;
+    int timeout_ms;
 
     if (!req || !out || !body_buf || !body_len) {
         return -1;
@@ -353,6 +340,11 @@ int edge_outbound_http_execute(const edge_http_client_req_t *req,
     allow_dns = opts->allow_blocking_dns;
     max_body = opts->max_response_body ? opts->max_response_body
                                        : (4u * 1024u * 1024u);
+    timeout_ms = (int)(opts->default_timeout_ms ? opts->default_timeout_ms
+                                                : 60000);
+    if (req->timeout_ms > 0) {
+        timeout_ms = (int)req->timeout_ms;
+    }
     if (body_cap < 64) {
         out->transport_err = ENOMEM;
         return 0;
@@ -398,32 +390,28 @@ int edge_outbound_http_execute(const edge_http_client_req_t *req,
     }
 
     if (u.https) {
-        const SSL_METHOD *method;
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-        method = TLS_client_method();
-#else
-        method = SSLv23_client_method();
-#endif
-        ssl_ctx = SSL_CTX_new(method);
+        /* P1.13b: non-blocking SSL client (poll WANT_READ/WRITE). */
+        if (set_nonblock(fd) != 0) {
+            out->transport_err = EIO;
+            goto done;
+        }
+        ssl_ctx = edge_tls_client_ctx_create(NULL);
         if (!ssl_ctx) {
             out->transport_err = EIO;
             goto done;
         }
-        SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, NULL); /* lab; pin later */
-        ssl = SSL_new(ssl_ctx);
-        if (!ssl || SSL_set_fd(ssl, fd) != 1) {
+        ssl = edge_tls_client_conn_new_fd(ssl_ctx, fd, host_hdr);
+        if (!ssl) {
             out->transport_err = EIO;
             goto done;
         }
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-        (void)SSL_set_tlsext_host_name(ssl, host_hdr);
-#endif
-        if (SSL_connect(ssl) != 1) {
+        if (edge_tls_handshake_poll(ssl, fd, timeout_ms) != 0) {
             out->transport_err = ECONNREFUSED;
             goto done;
         }
-        if (io_write_all_ssl(ssl, reqbuf, req_len) != 0 ||
-            io_read_all_ssl(ssl, raw, raw_cap, &raw_len) != 0) {
+        if (edge_tls_write_all_poll(ssl, fd, reqbuf, req_len, timeout_ms) != 0 ||
+            edge_tls_read_all_poll(ssl, fd, raw, raw_cap, &raw_len,
+                                   timeout_ms) != 0) {
             out->transport_err = EIO;
             goto done;
         }
@@ -461,7 +449,7 @@ done:
         SSL_free(ssl);
     }
     if (ssl_ctx) {
-        SSL_CTX_free(ssl_ctx);
+        edge_tls_client_ctx_free(ssl_ctx);
     }
     if (fd >= 0) {
         close(fd);

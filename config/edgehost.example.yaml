@@ -65,4 +65,14 @@ plugins:
     enabled: false              # P1.9 stub only
   teams:
     enabled: false              # P1.10 stub only
+  pqproxy:
+    enabled: false              # P1.11 scrape side-car /metrics
+    metrics_url: "http://127.0.0.1:9108/metrics"
+    scrape_interval_ms: 5000
+
+# Postgres NOTIFY → state (P1.12). Payload schema enforced in edge_notify_apply.
+# Full LISTEN connection is host-driven; apply API is available for inject.
+postgres:
+  notify_enabled: false
+  listen_channel: map_overlay
 

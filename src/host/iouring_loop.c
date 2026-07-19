@@ -9,6 +9,7 @@
 
 #include "edge_auth.h"
 #include "edge_http1_serve.h"
+#include "edge_pq_sidecar.h"
 #include "edge_state.h"
 #include "edge_tls.h"
 #include "edge_ws.h"
@@ -86,6 +87,8 @@ typedef struct {
     edge_plugin_host_t        *plugins;
     const char                *service_api_key;
     SSL_CTX                   *tls_ctx; /* NULL => plain TCP */
+    edge_pq_sidecar_config_t   pq_cfg;
+    uint64_t                   last_scrape_ms;
 } server_t;
 
 static int promote_to_ws(server_t *srv, conn_t *c);
@@ -785,6 +788,16 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             return 1;
         }
     }
+    edge_pq_sidecar_config_defaults(&srv.pq_cfg);
+    srv.pq_cfg.enabled = cfg->pqproxy_enabled;
+    if (cfg->pqproxy_metrics_url[0]) {
+        snprintf(srv.pq_cfg.metrics_url, sizeof(srv.pq_cfg.metrics_url), "%s",
+                 cfg->pqproxy_metrics_url);
+    }
+    srv.pq_cfg.scrape_interval_ms =
+        cfg->pqproxy_scrape_interval_ms ? cfg->pqproxy_scrape_interval_ms
+                                        : 5000;
+    srv.last_scrape_ms = 0;
     srv.hub = edge_ws_hub_create((size_t)srv.max_conns);
     if (!srv.hub) {
         edge_tls_ctx_free(srv.tls_ctx);
@@ -873,6 +886,18 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             }
             /* opportunistic fan-out flush */
             ws_flush_all_pending(&srv);
+            /* P1.11: periodic pqproxy metrics scrape */
+            if (srv.pq_cfg.enabled && srv.store) {
+                static uint64_t tick;
+                tick += 200; /* approx wait timeout ms */
+                if (tick - srv.last_scrape_ms >=
+                    (uint64_t)srv.pq_cfg.scrape_interval_ms) {
+                    srv.last_scrape_ms = tick;
+                    (void)edge_pq_sidecar_scrape_once(&srv.pq_cfg, srv.store,
+                                                      srv.hub);
+                    ws_flush_all_pending(&srv);
+                }
+            }
             io_uring_submit(&srv.ring);
             continue;
         }

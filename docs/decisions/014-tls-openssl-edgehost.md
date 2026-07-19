@@ -30,8 +30,9 @@ non-blocking mode** (io_uring-friendly, aligned with pqproxy), while the
   `SSL_read` / `SSL_write` with want-read/write polling.
 - Config: `tls.cert` + `tls.key` (empty ⇒ plain TCP lab mode remains).
 - Optional `tls.client_ca` for mTLS (verify peer).
-- Outbound client HTTPS remains blocking OpenSSL from P1.8b; true non-blocking
-  client polish is **P1.13b**.
+- Outbound HTTPS client (**P1.13b**): `SSL_set_fd` + `poll` WANT_READ/WRITE
+  via `edge_tls_*_poll` (runs to completion on the calling thread; not a
+  second async model).
 
 - Do **not** pull mbedTLS into the edgehost binary for production TLS.
 - Do **not** pull OpenSSL into the CPE agent package for production TLS.

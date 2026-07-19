@@ -1,11 +1,10 @@
 /**
  * @file edge_outbound.h
- * @brief Host outbound HTTP(S) client for plugin PENDING (P1.8b).
+ * @brief Host outbound HTTP(S) client for plugin PENDING (P1.8b / P1.13b).
  *
- * Phase-1: blocking connect/read on the calling thread (uring or test).
- * Prefer upstream_addr to skip DNS; blocking getaddrinfo only when
- * dns.allow_blocking is true. HTTPS via OpenSSL. True non-blocking TLS
- * client on the ring is refined in P1.13b.
+ * Runs to completion on the calling thread. Prefer upstream_addr to skip DNS;
+ * blocking getaddrinfo only when dns.allow_blocking is true. HTTPS uses
+ * OpenSSL SSL_set_fd + poll want-read/write (P1.13b), not blocking SSL_connect.
  */
 #ifndef EDGE_OUTBOUND_H
 #define EDGE_OUTBOUND_H

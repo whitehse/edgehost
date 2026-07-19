@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.9–P1.10 stubs + P1.13 OpenSSL non-blocking TLS server.
+# P1.11–P1.12 pqproxy/NOTIFY + P1.13b non-blocking TLS client.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.9.0)
+project(edgehost LANGUAGES C VERSION 0.9.1)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -86,7 +86,15 @@ target_include_directories(edgecore PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# --- Host: plugin registry + host API v0 + outbound HTTP(S) ---
+# --- Host: OpenSSL TLS helpers (server + client) ---
+add_library(edgehost_tls STATIC src/host/tls_server.c)
+target_include_directories(edgehost_tls PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(edgehost_tls PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+
+# --- Host: plugin registry + outbound ---
 add_library(edgehost_plugins STATIC
   src/host/plugin_host.c
   src/host/outbound_http.c
@@ -98,7 +106,7 @@ target_include_directories(edgehost_plugins PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(edgehost_plugins PUBLIC edgecore OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(edgehost_plugins PUBLIC edgecore edgehost_tls)
 
 # --- Host: alloc ---
 add_library(edgehost_alloc STATIC src/host/host_alloc.c)
@@ -127,12 +135,14 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-# --- Host: HTTP/1 serve + metrics + static + WS stream hub ---
+# --- Host: HTTP/1 serve + metrics + static + WS + sidecar/notify ---
 add_library(edgehost_http STATIC
   src/host/edge_metrics.c
   src/host/edge_http1_serve.c
   src/host/static_files.c
   src/host/ws_stream.c
+  src/host/pq_sidecar.c
+  src/host/notify_apply.c
 )
 target_include_directories(edgehost_http PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -152,17 +162,14 @@ if(Shaggy_FOUND AND TARGET Shaggy::headers)
 endif()
 
 # --- Host: real io_uring loop + OpenSSL TLS server ---
-add_library(edgehost_iouring STATIC
-  src/host/iouring_loop.c
-  src/host/tls_server.c
-)
+add_library(edgehost_iouring STATIC src/host/iouring_loop.c)
 target_include_directories(edgehost_iouring PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
 target_link_libraries(edgehost_iouring PUBLIC
-  edgecore edgehost_http ${LIBURING_LIBRARY} OpenSSL::SSL OpenSSL::Crypto)
+  edgecore edgehost_http edgehost_tls ${LIBURING_LIBRARY})
 
 # --- Host: class-A sim_main ---
 if(Libsim_FOUND AND LIBSIM_LIBRARY)
@@ -251,7 +258,11 @@ add_executable(edgehost_stubs_test tests/test_plugin_stubs.c)
 target_link_libraries(edgehost_stubs_test PRIVATE edgecore edgehost_plugins edgehost_config)
 
 add_executable(edgehost_tls_test tests/test_tls_server.c)
-target_link_libraries(edgehost_tls_test PRIVATE edgehost_iouring OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(edgehost_tls_test PRIVATE edgehost_iouring)
+
+add_executable(edgehost_sidecar_test tests/test_sidecar_notify.c)
+target_link_libraries(edgehost_sidecar_test PRIVATE
+  edgecore edgehost_plugins edgehost_http pthread)
 
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
@@ -269,6 +280,7 @@ add_test(NAME edgehost_pending_plugin COMMAND edgehost_pending_test)
 add_test(NAME edgehost_openai_proxy COMMAND edgehost_openai_test)
 add_test(NAME edgehost_plugin_stubs COMMAND edgehost_stubs_test)
 add_test(NAME edgehost_tls_server COMMAND edgehost_tls_test)
+add_test(NAME edgehost_sidecar_notify COMMAND edgehost_sidecar_test)
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)
@@ -296,8 +308,8 @@ if(EDGEHOST_BASH)
 endif()
 
 include(GNUInstallDirs)
-set(_install_libs edgecore edgehost_alloc edgehost_config edgehost_http
-  edgehost_plugins edgehost_iouring)
+set(_install_libs edgecore edgehost_alloc edgehost_config edgehost_tls
+  edgehost_http edgehost_plugins edgehost_iouring)
 if(EDGEHOST_HAVE_SIM)
   list(APPEND _install_libs edgehost_sim)
 endif()

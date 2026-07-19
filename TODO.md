@@ -20,11 +20,12 @@
 - [x] **P1.9** slack SESSION stub (`enabled: false` by default)
 - [x] **P1.10** teams SESSION stub (`enabled: false` by default)
 - [x] **P1.13** OpenSSL non-blocking TLS server (`SSL_set_fd` + io_uring POLL)
+- [x] **P1.11** pqproxy side-car metrics scrape → `net.core/pqproxy/health`
+- [x] **P1.12** NOTIFY payload schema → state put/delete + WS fan-out
+- [x] **P1.13b** OpenSSL non-blocking outbound TLS client (poll WANT_*)
 
 ## Next (program Track 1)
 
-- [ ] **P1.11–P1.12** pqproxy metrics + PG NOTIFY
-- [ ] **P1.13b** OpenSSL non-blocking outbound TLS client polish
 - [ ] **P1.14–P1.15** extra ns hooks + deploy notes
 
 ## Soft deps
