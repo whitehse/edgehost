@@ -1,0 +1,32 @@
+# Parse deps/pins.txt into EDGEHOST_PIN_<repo> variables (P1.0).
+# Does not fetch remotes; verify_pins.sh compares local checkouts.
+
+set(EDGEHOST_PINS_FILE "${EDGEHOST_REPO_ROOT}/deps/pins.txt")
+if(NOT EXISTS "${EDGEHOST_PINS_FILE}")
+  message(WARNING "pins file missing: ${EDGEHOST_PINS_FILE}")
+  return()
+endif()
+
+file(STRINGS "${EDGEHOST_PINS_FILE}" _pin_lines)
+foreach(_line IN LISTS _pin_lines)
+  string(STRIP "${_line}" _line)
+  if(_line STREQUAL "" OR _line MATCHES "^#")
+    continue()
+  endif()
+  # name  sha  [# comment]
+  string(REGEX REPLACE "[ \t]+" ";" _parts "${_line}")
+  list(LENGTH _parts _n)
+  if(_n LESS 2)
+    continue()
+  endif()
+  list(GET _parts 0 _name)
+  list(GET _parts 1 _sha)
+  if(_sha MATCHES "^<" OR _sha STREQUAL "pending")
+    continue()
+  endif()
+  string(TOUPPER "${_name}" _uname)
+  string(REPLACE "-" "_" _uname "${_uname}")
+  set(EDGEHOST_PIN_${_uname} "${_sha}" CACHE INTERNAL "Pinned SHA for ${_name}")
+  list(APPEND EDGEHOST_PINNED_REPOS "${_name}")
+endforeach()
+list(REMOVE_DUPLICATES EDGEHOST_PINNED_REPOS)
