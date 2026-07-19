@@ -28,6 +28,7 @@ Split the tree in-process:
 API spine (grows by PR):
 
 - P1.1: `edgecore_create` / `edgecore_destroy` / `edgecore_next_event`
+- P1.2: `request_alloc` / `request_realloc` / `provide_buffer` + `host_alloc`
 - Later: `feed_net`, `apply_config`, state, auth, plugin pending HTTP
 
 Event kinds are defined in `edgecore.h` (program design). Host consumes

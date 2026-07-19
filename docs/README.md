@@ -6,15 +6,16 @@
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | Module boundaries |
 | [DOMAIN.md](DOMAIN.md) | Glossary |
 | [../TODO.md](../TODO.md) | Track 1 PR checklist |
-| [decisions/](decisions/) | ADRs (001–002, 011–012 as of P1.1) |
+| [decisions/](decisions/) | ADRs (write when work lands) |
 | [guides/](guides/) | How-tos |
 
-## Decisions (P1.1)
+## Decisions
 
 | ADR | Title |
 |-----|-------|
 | [001](decisions/001-pure-c-choice.md) | Pure C11 |
 | [002](decisions/002-core-host-split.md) | Core vs host split |
+| [003](decisions/003-event-gated-memory.md) | Event-gated memory (X1) |
 | [011](decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](decisions/012-agent-ready-documentation.md) | Agent-ready docs |
 

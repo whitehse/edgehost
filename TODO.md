@@ -4,10 +4,10 @@
 
 - [x] **P1.0** deps/pins.txt + CMake Find modules + AGENTS pin policy + deps smoke
 - [x] **P1.1** scaffold + edgecore skeleton + ADRs 001–002, 011–012 (`create`/`next_event` smoke)
+- [x] **P1.2** host_alloc + NEED_ALLOC/NEED_REALLOC + ADR-003
 
 ## Next (program Track 1)
 
-- [ ] **P1.2** host_alloc + NEED_ALLOC path + ADR-003
 - [ ] **P1.3** YAML load + SIGHUP apply + ADR-005
 - [ ] **P1.4a** io_uring accept + fixed static response
 - [ ] **P1.4b** shaggy HTTP/1 parse bridge

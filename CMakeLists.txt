@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.1: libedgecore skeleton (create/next_event) + ADRs 001–002, 011–012.
+# P1.2: host_alloc + NEED_ALLOC/NEED_REALLOC + ADR-003.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.1.0)
+project(edgehost LANGUAGES C VERSION 0.2.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -57,11 +57,20 @@ message(STATUS "  libteams   FOUND=${Libteams_FOUND} ROOT=${LIBTEAMS_ROOT}")
 message(STATUS "  libwebmap  FOUND=${Libwebmap_FOUND} ROOT=${LIBWEBMAP_ROOT}")
 message(STATUS "  libsim     FOUND=${Libsim_FOUND} ROOT=${LIBSIM_ROOT}")
 
-# --- libedgecore (syscall-free; P1.1 skeleton) ---
+# --- libedgecore (syscall-free; no post-create malloc for data buffers) ---
 add_library(edgecore STATIC
   src/core/edgecore.c
 )
 target_include_directories(edgecore PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+# --- Host alloc gate (process malloc for edgecore-owned data) ---
+add_library(edgehost_alloc STATIC
+  src/host/host_alloc.c
+)
+target_include_directories(edgehost_alloc PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
@@ -95,9 +104,14 @@ endif()
 add_executable(edgecore_smoke tests/test_edgecore_smoke.c)
 target_link_libraries(edgecore_smoke PRIVATE edgecore)
 
+# NEED_ALLOC / host_alloc path (P1.2)
+add_executable(edgecore_alloc_test tests/test_edgecore_alloc.c)
+target_link_libraries(edgecore_alloc_test PRIVATE edgecore edgehost_alloc)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
+add_test(NAME edgecore_alloc COMMAND edgecore_alloc_test)
 
 # Pin verification (local checkouts vs deps/pins.txt)
 find_program(EDGEHOST_BASH bash)
@@ -109,9 +123,9 @@ if(EDGEHOST_BASH)
   )
 endif()
 
-# Install edgecore + Find modules for out-of-tree consumers later
+# Install
 include(GNUInstallDirs)
-install(TARGETS edgecore ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS edgecore edgehost_alloc ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY cmake/

@@ -10,7 +10,11 @@
 | **SIGHUP apply** | Reload YAML via shadow config + atomic swap (new vs pqproxy) |
 | **Class A host** | Full io_uring sim path (edgehost + libsim) |
 | **Pull event** | Host drains core via `edgecore_next_event` (no callbacks) |
-| **NEED_ALLOC** | Core event requesting host-owned buffer growth (P1.2; X1) |
+| **NEED_ALLOC** | Core event requesting a new host-owned buffer (ADR-003 / X1) |
+| **NEED_REALLOC** | Core event requesting grow of an existing host buffer |
+| **host_alloc** | Sole process malloc gate for edgecore data (`include/host_alloc.h`) |
+| **provide_buffer** | Host hands a fulfilled allocation back to core |
 
-Public API (P1.1): `include/edgecore.h` — `edgecore_create`, `edgecore_next_event`,
-`edgecore_destroy`. See program design for full sketches (`edge_plugin.h`, …).
+Public API: `include/edgecore.h` (create, next_event, request_alloc,
+provide_buffer, …) and `include/host_alloc.h`. See program design for full
+sketches (`edge_plugin.h`, …).

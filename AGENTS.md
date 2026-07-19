@@ -6,7 +6,7 @@ sockets, files, signals, TLS (**mbedTLS**), and process malloc. Composes sibling
 protocol libraries (shaggy, libyaml, librest, …) — does not reimplement them.
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.1** — edgecore skeleton + ADRs 001–002, 011–012.
+**Current milestone**: **P1.2** — host_alloc + NEED_ALLOC path + ADR-003.
 
 ## Key commands
 
@@ -40,12 +40,13 @@ cmake -B build -S . \
 | `deps/pins.txt` | Known-good sibling SHAs |
 | Program design | `~/edge-platform-program-design.md` |
 
-## ADRs (P1.1)
+## ADRs
 
 | ADR | Title |
 |-----|-------|
 | [001](docs/decisions/001-pure-c-choice.md) | Pure C11 |
 | [002](docs/decisions/002-core-host-split.md) | libedgecore vs host |
+| [003](docs/decisions/003-event-gated-memory.md) | Event-gated memory (scoped X1) |
 | [011](docs/decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](docs/decisions/012-agent-ready-documentation.md) | Doc layout + no stub ADRs |
 
@@ -64,8 +65,9 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Operating rules
 
-- **edgecore** (`src/core/*`): no syscalls; no silent `malloc` after create
-  (emit `NEED_ALLOC` / host_alloc — ADR-003 / X1 in P1.2).
+- **edgecore** (`src/core/*`): no syscalls; no silent `malloc` after create for
+  data buffers — emit `NEED_ALLOC` / `NEED_REALLOC`; host uses `host_alloc`
+  then `edgecore_provide_buffer` (ADR-003).
 - **Host** (`src/host/*`): sole place for io_uring, sockets, files, process malloc, signals.
 - Compose shaggy/librest/libyaml/pique/libslack/libteams/libharness — do not reimplement wire protocols.
 - C11, CMake ≥ 3.20, `-Wall -Wextra -Wpedantic -Werror`.
@@ -80,5 +82,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.1 complete**: `libedgecore` create/next_event smoke, ADRs 001–002, 011–012.  
-**Next**: **P1.2** — host_alloc + NEED_ALLOC path + ADR-003.
+**P1.2 complete**: `host_alloc` + NEED_ALLOC/NEED_REALLOC provide path + ADR-003.  
+**Next**: **P1.3** — YAML load + SIGHUP apply + ADR-005.
