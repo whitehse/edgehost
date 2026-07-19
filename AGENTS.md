@@ -105,5 +105,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.7a complete**: state store + REST under `/api/v1/state/…` (open lab auth).  
-**Next**: **P1.7b** — WS `/api/v1/stream` fan-out STATE_CHANGED.
+**P1.7b complete**: state REST + WS `/api/v1/stream` fan-out `STATE_CHANGED`.  
+**Next**: **P1.7c** — auth_rbac + lab password session.

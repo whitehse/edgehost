@@ -1,6 +1,6 @@
 /**
  * @file iouring_loop.c
- * @brief io_uring accept + shared edge_http1_serve (P1.4c / P1.5).
+ * @brief io_uring accept + HTTP/1 + WebSocket stream fan-out (P1.7b).
  */
 
 #define _GNU_SOURCE
@@ -9,6 +9,7 @@
 
 #include "edge_http1_serve.h"
 #include "edge_state.h"
+#include "edge_ws.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -20,9 +21,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* malloc used for per-conn send buffers (host-owned, large SPA assets). */
-
 #include <liburing.h>
+
+#include "websocket.h"
+#include "protocol_events.h"
 
 enum {
     OP_ACCEPT = 1,
@@ -32,8 +34,10 @@ enum {
 
 typedef enum {
     CS_FREE = 0,
-    CS_RECV,
-    CS_SEND
+    CS_RECV,     /* HTTP request */
+    CS_SEND,     /* HTTP response (close after unless ws_upgrade pending) */
+    CS_WS_RECV,  /* WebSocket open, waiting for frames or fan-out */
+    CS_WS_SEND   /* WebSocket sending frames */
 } conn_state_t;
 
 typedef struct {
@@ -43,11 +47,13 @@ typedef struct {
     int                  recv_pending;
     int                  send_pending;
     uint8_t              recv_buf[4096];
-    char                *send_buf; /* heap: large enough for SPA assets */
+    char                *send_buf; /* heap: large enough for SPA assets / WS */
     size_t               send_cap;
     size_t               send_len;
     size_t               send_off;
     edge_http1_serve_t  *http;
+    websocket_ctx_t     *ws;       /* non-NULL after successful upgrade */
+    int                  keep_ws;  /* after CS_SEND of 101, enter WS mode */
 } conn_t;
 
 typedef struct {
@@ -67,6 +73,7 @@ typedef struct {
     size_t                     send_cap;
     edge_state_store_t        *store;
     int                        store_owned;
+    edge_ws_hub_t             *hub;
 } server_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
@@ -156,6 +163,13 @@ static void close_conn(server_t *srv, conn_t *c)
     if (!c || c->state == CS_FREE) {
         return;
     }
+    if (srv && srv->hub) {
+        edge_ws_hub_unsubscribe(srv->hub, c->slot);
+    }
+    if (c->ws) {
+        websocket_destroy(c->ws);
+        c->ws = NULL;
+    }
     if (c->http) {
         edge_http1_serve_destroy(c->http);
         c->http = NULL;
@@ -173,6 +187,7 @@ static void close_conn(server_t *srv, conn_t *c)
     c->state = CS_FREE;
     c->recv_pending = c->send_pending = 0;
     c->send_len = c->send_off = 0;
+    c->keep_ws = 0;
 }
 
 static conn_t *alloc_conn(server_t *srv)
@@ -198,6 +213,7 @@ static conn_t *alloc_conn(server_t *srv)
             }
             edge_http1_serve_set_docroots(c->http, &srv->docroots);
             edge_http1_serve_set_state(c->http, srv->store);
+            edge_http1_serve_set_ws_hub(c->http, srv->hub);
             return c;
         }
     }
@@ -232,7 +248,8 @@ static int submit_recv(server_t *srv, conn_t *c)
 {
     struct io_uring_sqe *sqe;
 
-    if (c->recv_pending || c->state != CS_RECV) {
+    if (c->recv_pending ||
+        (c->state != CS_RECV && c->state != CS_WS_RECV)) {
         return 0;
     }
     sqe = io_uring_get_sqe(&srv->ring);
@@ -265,11 +282,11 @@ static int submit_send(server_t *srv, conn_t *c)
     return 0;
 }
 
-static int begin_send_buf(server_t *srv, conn_t *c, size_t len)
+static int begin_send_buf(server_t *srv, conn_t *c, size_t len, conn_state_t st)
 {
     c->send_len = len;
     c->send_off = 0;
-    c->state = CS_SEND;
+    c->state = st;
     return submit_send(srv, c);
 }
 
@@ -290,7 +307,74 @@ static int begin_bad_request_plain(server_t *srv, conn_t *c)
         srv->metrics->requests++;
         srv->metrics->responses_4xx++;
     }
-    return begin_send_buf(srv, c, sizeof(resp) - 1);
+    return begin_send_buf(srv, c, sizeof(resp) - 1, CS_SEND);
+}
+
+/** Start send of any bytes already queued in websocket out_buf. */
+static int ws_flush_output(server_t *srv, conn_t *c)
+{
+    size_t flen;
+
+    if (!c->ws || c->send_pending || c->state == CS_WS_SEND) {
+        return 0;
+    }
+    flen = websocket_get_output(c->ws, (uint8_t *)c->send_buf, c->send_cap);
+    if (flen == 0) {
+        return 0;
+    }
+    if (flen >= c->send_cap) {
+        return -1;
+    }
+    return begin_send_buf(srv, c, flen, CS_WS_SEND) == 0 ? 1 : -1;
+}
+
+/**
+ * Drain one pending STATE_CHANGED text message into a WS frame on send_buf.
+ * @return 1 started send, 0 nothing pending, -1 error.
+ */
+static int ws_try_send_pending(server_t *srv, conn_t *c)
+{
+    char text[EDGE_WS_MSG_MAX];
+    size_t tlen = 0;
+    size_t flen;
+    int rc;
+
+    if (!c->ws || !srv->hub) {
+        return 0;
+    }
+    if (c->state == CS_WS_SEND || c->send_pending) {
+        return 0;
+    }
+    /* Prefer draining control frames already queued (e.g. pong). */
+    rc = ws_flush_output(srv, c);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = edge_ws_hub_take_pending(srv->hub, c->slot, text, sizeof(text), &tlen);
+    if (rc != 1) {
+        return rc < 0 ? -1 : 0;
+    }
+    if (websocket_send_text(c->ws, text) != 0) {
+        return -1;
+    }
+    flen = websocket_get_output(c->ws, (uint8_t *)c->send_buf, c->send_cap);
+    if (flen == 0 || flen >= c->send_cap) {
+        return -1;
+    }
+    return begin_send_buf(srv, c, flen, CS_WS_SEND) == 0 ? 1 : -1;
+}
+
+/** Fan-out: try to start sends on all WS subscribers with pending data. */
+static void ws_flush_all_pending(server_t *srv)
+{
+    int i;
+    for (i = 0; i < srv->max_conns; i++) {
+        conn_t *c = &srv->conns[i];
+        if (c->state == CS_WS_RECV && c->ws &&
+            edge_ws_hub_is_subscribed(srv->hub, c->slot)) {
+            (void)ws_try_send_pending(srv, c);
+        }
+    }
 }
 
 static int accept_one(server_t *srv, int client_fd)
@@ -346,6 +430,66 @@ static int should_stop(const server_t *srv)
     return 0;
 }
 
+static int handle_ws_recv(server_t *srv, conn_t *c, size_t n)
+{
+    protocol_event_t ev;
+
+    if (!c->ws) {
+        return -1;
+    }
+    (void)websocket_feed_input(c->ws, c->recv_buf, n);
+    if (srv->metrics) {
+        srv->metrics->bytes_in += (uint64_t)n;
+    }
+
+    while (websocket_next_event(c->ws, &ev)) {
+        if (ev.type == WS_EVENT_CLOSE || ev.type == WS_EVENT_ERROR ||
+            ev.type == PROTOCOL_EVENT_ERROR) {
+            return -1;
+        }
+        if (ev.type == WS_EVENT_PING) {
+            const uint8_t *pdata = ev.u.ws_message.data;
+            size_t plen = ev.u.ws_message.len;
+            if (websocket_send_pong(c->ws, pdata, plen) != 0) {
+                return -1;
+            }
+        }
+        /* TEXT/BINARY/PONG from client ignored in v1 (server push only) */
+    }
+    /* Flush pong / any queued frames */
+    if (c->state == CS_WS_RECV && !c->send_pending) {
+        if (ws_flush_output(srv, c) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int promote_to_ws(server_t *srv, conn_t *c)
+{
+    c->ws = websocket_create(WS_ROLE_SERVER);
+    if (!c->ws) {
+        return -1;
+    }
+    if (edge_ws_hub_subscribe(srv->hub, c->slot) != 0) {
+        websocket_destroy(c->ws);
+        c->ws = NULL;
+        return -1;
+    }
+    c->keep_ws = 0;
+    c->state = CS_WS_RECV;
+    /* destroy HTTP parser; no longer needed */
+    if (c->http) {
+        edge_http1_serve_destroy(c->http);
+        c->http = NULL;
+    }
+    if (submit_recv(srv, c) != 0) {
+        return -1;
+    }
+    (void)ws_try_send_pending(srv, c);
+    return 0;
+}
+
 int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
 {
     edge_iouring_opts_t local;
@@ -375,6 +519,9 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         if (srv.send_cap < 4096u) {
             srv.send_cap = 4096u;
         }
+        if (srv.send_cap < EDGE_WS_MSG_MAX + 32u) {
+            srv.send_cap = EDGE_WS_MSG_MAX + 32u;
+        }
     }
     srv.docroots.spa_root = cfg->spa_root[0] ? cfg->spa_root : NULL;
     srv.docroots.packages_root =
@@ -385,7 +532,6 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         srv.store_owned = 0;
     } else {
         edge_state_config_t sc = edge_state_default_config();
-        /* Respect config namespace enable flags for v1 ns */
         srv.store = edge_state_create_with_config(&sc);
         srv.store_owned = 1;
         if (srv.store) {
@@ -405,8 +551,20 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         srv.metrics = &srv.metrics_local;
     }
 
+    srv.hub = edge_ws_hub_create((size_t)srv.max_conns);
+    if (!srv.hub) {
+        if (srv.store_owned && srv.store) {
+            edge_state_destroy(srv.store);
+        }
+        return 1;
+    }
+
     srv.conns = (conn_t *)calloc((size_t)srv.max_conns, sizeof(conn_t));
     if (!srv.conns) {
+        edge_ws_hub_destroy(srv.hub);
+        if (srv.store_owned && srv.store) {
+            edge_state_destroy(srv.store);
+        }
         return 1;
     }
     for (i = 0; i < srv.max_conns; i++) {
@@ -418,6 +576,10 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     srv.listen_fd = create_listen_socket(cfg, opts->backlog);
     if (srv.listen_fd < 0) {
         free(srv.conns);
+        edge_ws_hub_destroy(srv.hub);
+        if (srv.store_owned && srv.store) {
+            edge_state_destroy(srv.store);
+        }
         return 1;
     }
 
@@ -429,6 +591,10 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
                     strerror(-rc));
             close(srv.listen_fd);
             free(srv.conns);
+            edge_ws_hub_destroy(srv.hub);
+            if (srv.store_owned && srv.store) {
+                edge_state_destroy(srv.store);
+            }
             return 1;
         }
     }
@@ -437,12 +603,16 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         io_uring_queue_exit(&srv.ring);
         close(srv.listen_fd);
         free(srv.conns);
+        edge_ws_hub_destroy(srv.hub);
+        if (srv.store_owned && srv.store) {
+            edge_state_destroy(srv.store);
+        }
         return 1;
     }
     io_uring_submit(&srv.ring);
 
     fprintf(stderr,
-            "edgehost: listening on %s:%u (SPA=%s packages=%s)\n",
+            "edgehost: listening on %s:%u (SPA=%s packages=%s stream=WS)\n",
             cfg->listen_host[0] ? cfg->listen_host : "0.0.0.0",
             (unsigned)cfg->listen_port,
             cfg->spa_root[0] ? cfg->spa_root : "(none)",
@@ -461,6 +631,9 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             if (should_stop(&srv)) {
                 break;
             }
+            /* opportunistic fan-out flush */
+            ws_flush_all_pending(&srv);
+            io_uring_submit(&srv.ring);
             continue;
         }
         if (rc < 0) {
@@ -489,7 +662,20 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             conn_t *c = (slot >= 0 && slot < srv.max_conns)
                             ? &srv.conns[slot]
                             : NULL;
-            if (c && c->state == CS_RECV) {
+            if (!c || c->state == CS_FREE) {
+                /* late cqe */
+            } else if (c->state == CS_WS_RECV) {
+                c->recv_pending = 0;
+                if (res <= 0) {
+                    close_conn(&srv, c);
+                } else if (handle_ws_recv(&srv, c, (size_t)res) != 0) {
+                    close_conn(&srv, c);
+                } else if (c->state == CS_WS_RECV && !c->recv_pending) {
+                    if (submit_recv(&srv, c) != 0) {
+                        close_conn(&srv, c);
+                    }
+                }
+            } else if (c->state == CS_RECV) {
                 size_t rlen = 0;
                 int pr;
                 c->recv_pending = 0;
@@ -510,8 +696,12 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
                             close_conn(&srv, c);
                         }
                     } else {
-                        if (begin_send_buf(&srv, c, rlen) != 0) {
+                        c->keep_ws = edge_http1_serve_took_ws_upgrade(c->http);
+                        if (begin_send_buf(&srv, c, rlen, CS_SEND) != 0) {
                             close_conn(&srv, c);
+                        } else if (!c->keep_ws) {
+                            /* After successful state mutation, flush WS fans */
+                            ws_flush_all_pending(&srv);
                         }
                     }
                 }
@@ -530,7 +720,22 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
                     }
                     c->send_off += (size_t)res;
                     if (c->send_off >= c->send_len) {
-                        close_conn(&srv, c);
+                        if (c->state == CS_SEND && c->keep_ws) {
+                            if (promote_to_ws(&srv, c) != 0) {
+                                close_conn(&srv, c);
+                            }
+                        } else if (c->state == CS_WS_SEND) {
+                            c->state = CS_WS_RECV;
+                            /* more fan-out or continue recv */
+                            if (ws_try_send_pending(&srv, c) == 0) {
+                                if (!c->recv_pending &&
+                                    submit_recv(&srv, c) != 0) {
+                                    close_conn(&srv, c);
+                                }
+                            }
+                        } else {
+                            close_conn(&srv, c);
+                        }
                     } else if (submit_send(&srv, c) != 0) {
                         close_conn(&srv, c);
                     }
@@ -547,6 +752,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     io_uring_queue_exit(&srv.ring);
     close(srv.listen_fd);
     free(srv.conns);
+    edge_ws_hub_destroy(srv.hub);
     if (srv.store_owned && srv.store) {
         edge_state_destroy(srv.store);
     }

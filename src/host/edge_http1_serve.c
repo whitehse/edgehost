@@ -1,6 +1,6 @@
 /**
  * @file edge_http1_serve.c
- * @brief HTTP/1 parse + routing: health, SPA, packages, state REST (P1.7a).
+ * @brief HTTP/1 parse + routing: health, SPA, packages, state REST, WS stream.
  */
 
 #include "edge_http1_serve.h"
@@ -24,6 +24,7 @@ struct edge_http1_serve {
     int                  done;
     edge_http1_docroot_t roots;
     edge_state_store_t  *store; /* not owned */
+    edge_ws_hub_t       *hub;   /* not owned */
 
     /* Accumulated request for body (PUT) — host buffer */
     uint8_t              acc[EDGE_HTTP_ACC_MAX];
@@ -31,6 +32,11 @@ struct edge_http1_serve {
     long                 content_length; /* -1 unknown */
     size_t               body_off;       /* offset of body in acc after headers */
     int                  have_body_off;
+
+    /* WebSocket upgrade (P1.7b) */
+    int                  ws_upgrade; /* took /api/v1/stream upgrade */
+    char                 ws_key[EDGE_WS_KEY_MAX];
+    char                 request_id[EDGE_WS_REQUEST_ID];
 };
 
 static int path_is_health(const char *path)
@@ -285,6 +291,58 @@ static int try_static(const char *root, const char *url_path, size_t max_file,
     return 0;
 }
 
+static void notify_state_changed(edge_http1_serve_t *s, const char *ns,
+                                 const char *key, const char *op,
+                                 const char *value, size_t value_len)
+{
+    if (!s || !s->hub || !ns || !key || !op) {
+        return;
+    }
+    (void)edge_ws_hub_broadcast_state_changed(s->hub, ns, key, op, value,
+                                              value_len, s->request_id);
+}
+
+static int dispatch_stream(edge_http1_serve_t *s, edge_metrics_t *metrics,
+                           char *out, size_t out_cap, size_t *out_len)
+{
+    if (!edge_ws_path_is_stream(s->path)) {
+        return 0;
+    }
+    if (strcmp(s->method, "GET") != 0) {
+        if (build_response(out, out_cap, 405, "Method Not Allowed",
+                           "application/json", "{\"error\":\"METHOD\"}", 18,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 405);
+        return 1;
+    }
+    if (!http1_is_websocket_upgrade(s->h1) || !s->ws_key[0]) {
+        if (build_response(out, out_cap, 400, "Bad Request", "application/json",
+                           "{\"error\":\"WS_UPGRADE_REQUIRED\"}", 32,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 400);
+        return 1;
+    }
+    if (edge_ws_build_101(s->ws_key, out, out_cap, out_len) != 0) {
+        if (build_response(out, out_cap, 500, "Internal Server Error",
+                           "application/json", "{\"error\":\"WS_ACCEPT\"}", 20,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 500);
+        return 1;
+    }
+    s->ws_upgrade = 1;
+    if (metrics) {
+        metrics->requests++;
+        metrics->responses_2xx++;
+    }
+    return 1;
+}
+
 static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
                           char *out, size_t out_cap, size_t *out_len)
 {
@@ -402,6 +460,7 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
         er = edge_state_put(s->store, ns, key, body, blen);
         err_to_http(er, &status, &reason, errbody, sizeof(errbody));
         if (er == EDGE_STATE_OK) {
+            notify_state_changed(s, ns, key, "put", body, blen);
             status = 204;
             reason = "No Content";
             if (build_response(out, out_cap, status, reason, "application/json",
@@ -430,6 +489,7 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
         }
         er = edge_state_delete(s->store, ns, key);
         if (er == EDGE_STATE_OK) {
+            notify_state_changed(s, ns, key, "delete", NULL, 0);
             if (build_response(out, out_cap, 204, "No Content",
                                "application/json", "", 0, out_len) != 0) {
                 return -1;
@@ -469,6 +529,14 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
 
     max_file = s->roots.max_file_bytes ? s->roots.max_file_bytes
                                        : EDGE_STATIC_MAX_FILE;
+
+    /* WebSocket stream upgrade (P1.7b) */
+    if (edge_ws_path_is_stream(s->path)) {
+        st = dispatch_stream(s, metrics, out, out_cap, out_len);
+        if (st != 0) {
+            return st;
+        }
+    }
 
     /* State API first (supports GET/PUT/DELETE) */
     if (strncmp(s->path, "/api/v1/state/", 14) == 0) {
@@ -598,6 +666,9 @@ void edge_http1_serve_reset(edge_http1_serve_t *s)
     s->content_length = -1;
     s->body_off = 0;
     s->have_body_off = 0;
+    s->ws_upgrade = 0;
+    s->ws_key[0] = '\0';
+    s->request_id[0] = '\0';
 }
 
 void edge_http1_serve_set_docroots(edge_http1_serve_t *s,
@@ -618,6 +689,18 @@ void edge_http1_serve_set_state(edge_http1_serve_t *s, edge_state_store_t *st)
     if (s) {
         s->store = st;
     }
+}
+
+void edge_http1_serve_set_ws_hub(edge_http1_serve_t *s, edge_ws_hub_t *hub)
+{
+    if (s) {
+        s->hub = hub;
+    }
+}
+
+int edge_http1_serve_took_ws_upgrade(const edge_http1_serve_t *s)
+{
+    return s && s->ws_upgrade;
 }
 
 static void mark_body_off(edge_http1_serve_t *s)
@@ -685,6 +768,7 @@ int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len
             snprintf(s->path, sizeof(s->path), "%s",
                      ev.u.http1_request.path);
         } else if (ev.type == HTTP1_EVENT_HEADERS_COMPLETE) {
+            char rid[EDGE_WS_REQUEST_ID];
             s->headers_done = 1;
             headers_just_done = 1;
             mark_body_off(s);
@@ -693,6 +777,19 @@ int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len
                 s->content_length = atol(clbuf);
             } else {
                 s->content_length = 0;
+            }
+            if (http1_get_header(s->h1, "Sec-WebSocket-Key", s->ws_key,
+                                 sizeof(s->ws_key)) != 0) {
+                s->ws_key[0] = '\0';
+            }
+            if (http1_get_header(s->h1, "X-Request-Id", rid, sizeof(rid)) == 0 &&
+                rid[0]) {
+                snprintf(s->request_id, sizeof(s->request_id), "%s", rid);
+            } else if (s->hub) {
+                edge_ws_hub_mint_request_id(s->hub, NULL, s->request_id,
+                                            sizeof(s->request_id));
+            } else {
+                snprintf(s->request_id, sizeof(s->request_id), "eh0");
             }
         } else if (ev.type == HTTP1_EVENT_BODY_CHUNK) {
             /* body also in acc; length tracked via content_length */

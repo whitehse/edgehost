@@ -12,10 +12,10 @@
 - [x] **P1.5** sim_main class-A fuzz path (libsim + edge_http1_serve)
 - [x] **P1.6** static SPA root + package path (`/packages/`)
 - [x] **P1.7a** state store (`net.core`, `map.dynamic`) + REST GET/PUT/DELETE
+- [x] **P1.7b** WS `/api/v1/stream` fan-out STATE_CHANGED
 
 ## Next (program Track 1)
 
-- [ ] **P1.7b** WS `/api/v1/stream` fan-out STATE_CHANGED
 - [ ] **P1.7c–d** auth_rbac + lab session / proxy HMAC
 - [ ] **P1.8a–b** plugin ABI + openai_proxy E2E
 - [ ] **P1.9–P1.10** slack/teams stubs

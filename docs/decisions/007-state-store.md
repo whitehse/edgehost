@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (P1.7a)
+Accepted (P1.7a); WS fan-out added in P1.7b.
 
 ## Date
 
@@ -30,13 +30,18 @@ P1.7b.
    - `GET /api/v1/state/{ns}?prefix=`
 6. **Shaggy**: server request-line accepts all RFC methods (not only GET) so
    PUT/DELETE parse correctly.
-7. **Conflict / etag / TTL sweeper**: deferred (optional later).
+7. **WebSocket stream** (P1.7b, host hub):
+   - `GET /api/v1/stream?topics=state` + Upgrade → `101` + shaggy framing
+   - Successful PUT/DELETE → hub broadcasts `STATE_CHANGED` JSON text frames
+   - Payload: `{type, ns, key, op, value, request_id}` (`value` null on delete)
+   - `X-Request-Id` preserved when present; else host mints `eh…`
+8. **Conflict / etag / TTL sweeper**: deferred (optional later).
 
 ## Consequences
 
 - SPA and ingest tools can exercise state without plugins.
-- P1.7b can emit `STATE_CHANGED` / WS from the same store mutations.
-- P1.7c layers RBAC without changing key/value layout.
+- Live SPA can subscribe to `STATE_CHANGED` without polling.
+- P1.7c layers RBAC without changing key/value layout or WS payload shape.
 
 ## Alternatives considered
 

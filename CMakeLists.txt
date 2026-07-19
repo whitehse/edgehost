@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.7a: state store (net.core, map.dynamic) + REST GET/PUT/DELETE.
+# P1.7b: WS /api/v1/stream fan-out STATE_CHANGED.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.7.0)
+project(edgehost LANGUAGES C VERSION 0.7.1)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -107,11 +107,12 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-# --- Host: HTTP/1 serve + metrics + static files (shared by uring + sim) ---
+# --- Host: HTTP/1 serve + metrics + static + WS stream hub ---
 add_library(edgehost_http STATIC
   src/host/edge_metrics.c
   src/host/edge_http1_serve.c
   src/host/static_files.c
+  src/host/ws_stream.c
 )
 target_include_directories(edgehost_http PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -122,6 +123,9 @@ if(TARGET Shaggy::shaggy)
   target_link_libraries(edgehost_http PUBLIC Shaggy::shaggy)
 elseif(SHAGGY_LIBRARY)
   target_link_libraries(edgehost_http PUBLIC ${SHAGGY_LIBRARY})
+  if(SHAGGY_WEBSOCKET_LIBRARY)
+    target_link_libraries(edgehost_http PUBLIC ${SHAGGY_WEBSOCKET_LIBRARY})
+  endif()
 endif()
 if(Shaggy_FOUND AND TARGET Shaggy::headers)
   target_link_libraries(edgehost_http PUBLIC Shaggy::headers)
@@ -205,6 +209,9 @@ target_link_libraries(edgehost_static_test PRIVATE edgehost_http edgehost_config
 add_executable(edgehost_state_test tests/test_state_store.c)
 target_link_libraries(edgehost_state_test PRIVATE edgecore edgehost_http)
 
+add_executable(edgehost_ws_test tests/test_ws_stream.c)
+target_link_libraries(edgehost_ws_test PRIVATE edgecore edgehost_http)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -215,6 +222,7 @@ add_test(NAME edgehost_iouring_static COMMAND edgehost_iouring_test)
 add_test(NAME edgehost_static_files COMMAND edgehost_static_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME edgehost_state_store COMMAND edgehost_state_test)
+add_test(NAME edgehost_ws_stream COMMAND edgehost_ws_test)
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)

@@ -4,8 +4,9 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.7a — HTTP/1 + SPA + packages + **state store REST**
-(`/api/v1/state/{ns}/{key}`). Auth open in lab until P1.7c.
+**Status:** P1.7b — HTTP/1 + SPA + packages + **state store REST** +
+**WebSocket** `GET /api/v1/stream` fan-out of `STATE_CHANGED`. Auth open in
+lab until P1.7c.
 
 ## Build
 
@@ -18,6 +19,7 @@ curl -s http://127.0.0.1:8080/health
 curl -s -X PUT http://127.0.0.1:8080/api/v1/state/net.core/router/r1 \
   -H 'Content-Type: application/json' -d '{"id":"r1","status":"ok"}'
 curl -s http://127.0.0.1:8080/api/v1/state/net.core/router/r1
+# WS clients: GET /api/v1/stream?topics=state with Upgrade: websocket
 ```
 
 ## Dependency pins
