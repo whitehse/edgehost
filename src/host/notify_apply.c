@@ -4,6 +4,7 @@
  */
 
 #include "edge_notify.h"
+#include "edge_state_notify.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -207,13 +208,9 @@ edge_notify_err_t edge_notify_apply(edge_state_store_t *st, edge_ws_hub_t *hub,
     }
 
     if (strcmp(op, "delete") == 0) {
-        er = edge_state_delete(st, ns, key);
+        er = edge_state_delete_and_notify(st, hub, ns, key, rid, 0);
         if (er != EDGE_STATE_OK && er != EDGE_STATE_NOT_FOUND) {
             return EDGE_NOTIFY_STATE_ERR;
-        }
-        if (hub && er == EDGE_STATE_OK) {
-            (void)edge_ws_hub_broadcast_state_changed(hub, ns, key, "delete",
-                                                      NULL, 0, rid);
         }
         return EDGE_NOTIFY_OK;
     }
@@ -226,13 +223,9 @@ edge_notify_err_t edge_notify_apply(edge_state_store_t *st, edge_ws_hub_t *hub,
     if (strcmp(value, "null") == 0) {
         return EDGE_NOTIFY_BAD_SCHEMA;
     }
-    er = edge_state_put(st, ns, key, value, vlen);
+    er = edge_state_put_and_notify(st, hub, ns, key, value, vlen, rid, 0);
     if (er != EDGE_STATE_OK) {
         return EDGE_NOTIFY_STATE_ERR;
-    }
-    if (hub) {
-        (void)edge_ws_hub_broadcast_state_changed(hub, ns, key, "put", value,
-                                                  vlen, rid);
     }
     return EDGE_NOTIFY_OK;
 }

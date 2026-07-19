@@ -94,10 +94,12 @@ target_include_directories(edgehost_tls PUBLIC
 )
 target_link_libraries(edgehost_tls PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
-# --- Host: plugin registry + outbound ---
+# --- Host: plugin registry + outbound + WS hub + state notify choke point ---
 add_library(edgehost_plugins STATIC
   src/host/plugin_host.c
   src/host/outbound_http.c
+  src/host/ws_stream.c
+  src/host/state_notify.c
   src/plugins/openai_proxy.c
   src/plugins/slack_plugin.c
   src/plugins/teams_plugin.c
@@ -135,12 +137,12 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-# --- Host: HTTP/1 serve + metrics + static + WS + sidecar/notify ---
+# --- Host: HTTP/1 serve + metrics + static + sidecar/notify ---
+# (WS hub + state_notify live in edgehost_plugins so plugin state_put can fan-out)
 add_library(edgehost_http STATIC
   src/host/edge_metrics.c
   src/host/edge_http1_serve.c
   src/host/static_files.c
-  src/host/ws_stream.c
   src/host/pq_sidecar.c
   src/host/notify_apply.c
 )

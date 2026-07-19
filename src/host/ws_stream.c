@@ -300,6 +300,8 @@ struct edge_ws_hub {
     edge_ws_sub_t *subs;
     size_t         max_subs;
     uint64_t       next_rid;
+    uint64_t       format_fail;
+    uint64_t       drop_oldest;
 };
 
 edge_ws_hub_t *edge_ws_hub_create(size_t max_subs)
@@ -396,7 +398,8 @@ void edge_ws_hub_mint_request_id(edge_ws_hub_t *h, const char *prefer,
     }
 }
 
-static int sub_push(edge_ws_sub_t *s, const char *msg, size_t len)
+static int sub_push(edge_ws_sub_t *s, const char *msg, size_t len,
+                    edge_ws_hub_t *h)
 {
     char *copy;
 
@@ -410,6 +413,9 @@ static int sub_push(edge_ws_sub_t *s, const char *msg, size_t len)
         s->qlen[s->head] = 0;
         s->head = (s->head + 1) % EDGE_WS_PENDING_MAX;
         s->n--;
+        if (h) {
+            h->drop_oldest++;
+        }
     }
     copy = (char *)malloc(len + 1);
     if (!copy) {
@@ -433,6 +439,7 @@ int edge_ws_hub_broadcast_state_changed(edge_ws_hub_t *h, const char *ns,
     int mlen;
     size_t i;
     int n = 0;
+    static const char trunc_json[] = "{\"truncated\":true}";
 
     if (!h || !ns || !key || !op) {
         return 0;
@@ -440,11 +447,22 @@ int edge_ws_hub_broadcast_state_changed(edge_ws_hub_t *h, const char *ns,
     mlen = edge_ws_format_state_changed(msg, sizeof(msg), ns, key, op, value,
                                         value_len, request_id);
     if (mlen < 0) {
-        return 0;
+        h->format_fail++;
+        /* Compact fallback so SPA can refetch full value. */
+        mlen = edge_ws_format_state_changed(msg, sizeof(msg), ns, key, op,
+                                            trunc_json, sizeof(trunc_json) - 1,
+                                            request_id);
+        if (mlen < 0) {
+            mlen = edge_ws_format_state_changed(msg, sizeof(msg), ns, key, op,
+                                                NULL, 0, request_id);
+            if (mlen < 0) {
+                return 0;
+            }
+        }
     }
     for (i = 0; i < h->max_subs; i++) {
         if (h->subs[i].active) {
-            if (sub_push(&h->subs[i], msg, (size_t)mlen) == 0) {
+            if (sub_push(&h->subs[i], msg, (size_t)mlen, h) == 0) {
                 n++;
             }
         }
@@ -478,6 +496,16 @@ int edge_ws_hub_take_pending(edge_ws_hub_t *h, int conn_slot, char *out,
     s->head = (s->head + 1) % EDGE_WS_PENDING_MAX;
     s->n--;
     return 1;
+}
+
+uint64_t edge_ws_hub_format_fail_count(const edge_ws_hub_t *h)
+{
+    return h ? h->format_fail : 0;
+}
+
+uint64_t edge_ws_hub_drop_oldest_count(const edge_ws_hub_t *h)
+{
+    return h ? h->drop_oldest : 0;
 }
 
 size_t edge_ws_hub_subscriber_count(const edge_ws_hub_t *h)

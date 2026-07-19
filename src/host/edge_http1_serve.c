@@ -5,6 +5,7 @@
 
 #include "edge_http1_serve.h"
 
+#include "edge_state_notify.h"
 #include "edge_static.h"
 
 #include <stdio.h>
@@ -408,16 +409,7 @@ static int try_static(const char *root, const char *url_path, size_t max_file,
     return 0;
 }
 
-static void notify_state_changed(edge_http1_serve_t *s, const char *ns,
-                                 const char *key, const char *op,
-                                 const char *value, size_t value_len)
-{
-    if (!s || !s->hub || !ns || !key || !op) {
-        return;
-    }
-    (void)edge_ws_hub_broadcast_state_changed(s->hub, ns, key, op, value,
-                                              value_len, s->request_id);
-}
+/* STATE_CHANGED fan-out goes through edge_state_*_and_notify (no double fire). */
 
 static int dispatch_lab_login(edge_http1_serve_t *s, edge_metrics_t *metrics,
                               char *out, size_t out_cap, size_t *out_len)
@@ -717,10 +709,10 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
         if (s->content_length >= 0 && blen > (size_t)s->content_length) {
             blen = (size_t)s->content_length;
         }
-        er = edge_state_put(s->store, ns, key, body, blen);
+        er = edge_state_put_and_notify(s->store, s->hub, ns, key, body, blen,
+                                       s->request_id, 0);
         err_to_http(er, &status, &reason, errbody, sizeof(errbody));
         if (er == EDGE_STATE_OK) {
-            notify_state_changed(s, ns, key, "put", body, blen);
             status = 204;
             reason = "No Content";
             if (build_response(out, out_cap, status, reason, "application/json",
@@ -747,9 +739,9 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
             note_response(metrics, 400);
             return 1;
         }
-        er = edge_state_delete(s->store, ns, key);
+        er = edge_state_delete_and_notify(s->store, s->hub, ns, key,
+                                          s->request_id, 0);
         if (er == EDGE_STATE_OK) {
-            notify_state_changed(s, ns, key, "delete", NULL, 0);
             if (build_response(out, out_cap, 204, "No Content",
                                "application/json", "", 0, out_len) != 0) {
                 return -1;

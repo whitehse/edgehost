@@ -7,6 +7,7 @@
 
 #include "edge_outbound.h"
 #include "edge_plugin.h"
+#include "edge_state_notify.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -129,7 +130,6 @@ int edge_pq_sidecar_scrape_once(const edge_pq_sidecar_config_t *cfg,
     size_t cap = 256 * 1024;
     char health[512];
     edge_state_err_t er;
-    char rid[EDGE_WS_REQUEST_ID];
 
     if (!cfg || !cfg->enabled || !st || !cfg->metrics_url[0]) {
         return -1;
@@ -153,14 +153,8 @@ int edge_pq_sidecar_scrape_once(const edge_pq_sidecar_config_t *cfg,
         snprintf(health, sizeof(health),
                  "{\"up\":false,\"pool_busy\":0,\"scraped_at\":%lld}",
                  (long long)time(NULL));
-        (void)edge_state_put(st, "net.core", "pqproxy/health", health,
-                             strlen(health));
-        if (hub) {
-            edge_ws_hub_mint_request_id(hub, NULL, rid, sizeof(rid));
-            (void)edge_ws_hub_broadcast_state_changed(
-                hub, "net.core", "pqproxy/health", "put", health,
-                strlen(health), rid);
-        }
+        (void)edge_state_put_and_notify(st, hub, "net.core", "pqproxy/health",
+                                        health, strlen(health), NULL, 0);
         return -1;
     }
 
@@ -174,15 +168,10 @@ int edge_pq_sidecar_scrape_once(const edge_pq_sidecar_config_t *cfg,
     }
     free(body);
 
-    er = edge_state_put(st, "net.core", "pqproxy/health", health, strlen(health));
+    er = edge_state_put_and_notify(st, hub, "net.core", "pqproxy/health",
+                                   health, strlen(health), NULL, 0);
     if (er != EDGE_STATE_OK) {
         return -1;
-    }
-    if (hub) {
-        edge_ws_hub_mint_request_id(hub, NULL, rid, sizeof(rid));
-        (void)edge_ws_hub_broadcast_state_changed(hub, "net.core",
-                                                    "pqproxy/health", "put",
-                                                    health, strlen(health), rid);
     }
     return 0;
 }

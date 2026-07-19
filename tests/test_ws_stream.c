@@ -1,9 +1,12 @@
 /**
- * P1.7b: WS accept key, STATE_CHANGED format, hub fan-out, HTTP upgrade.
+ * P1.7b / PR-1: WS accept key, STATE_CHANGED format, hub fan-out, HTTP upgrade,
+ * put_and_notify choke point.
  */
 #include "edge_http1_serve.h"
 #include "edge_metrics.h"
+#include "edge_plugin_host.h"
 #include "edge_state.h"
+#include "edge_state_notify.h"
 #include "edge_ws.h"
 
 #include "websocket.h"
@@ -214,6 +217,121 @@ static void test_path_is_stream(void)
     printf("  PASS: stream path match\n");
 }
 
+static void test_put_and_notify(void)
+{
+    edge_state_store_t *st = edge_state_create();
+    edge_ws_hub_t *hub = edge_ws_hub_create(4);
+    char msg[EDGE_WS_MSG_MAX];
+    char buf[64];
+    size_t mlen = 0, n = 0;
+    edge_state_err_t er;
+
+    assert(st && hub);
+    assert(edge_ws_hub_subscribe(hub, 0) == 0);
+
+    er = edge_state_put_and_notify(st, hub, "net.core", "router/r2",
+                                   "{\"x\":2}", 7, "rid-put", 0);
+    assert(er == EDGE_STATE_OK);
+    assert(edge_state_get(st, "net.core", "router/r2", buf, sizeof(buf), &n) ==
+           EDGE_STATE_OK);
+    assert(n == 7);
+    assert(edge_ws_hub_take_pending(hub, 0, msg, sizeof(msg), &mlen) == 1);
+    assert(strstr(msg, "STATE_CHANGED") != NULL);
+    assert(strstr(msg, "router/r2") != NULL);
+    assert(strstr(msg, "\"op\":\"put\"") != NULL);
+    assert(strstr(msg, "rid-put") != NULL);
+    assert(strstr(msg, "\"x\":2") != NULL);
+
+    /* hub NULL: put succeeds, no pending */
+    er = edge_state_put_and_notify(st, NULL, "net.core", "router/r3",
+                                   "{\"y\":3}", 7, NULL, 0);
+    assert(er == EDGE_STATE_OK);
+    assert(edge_ws_hub_take_pending(hub, 0, msg, sizeof(msg), &mlen) == 0);
+
+    er = edge_state_delete_and_notify(st, hub, "net.core", "router/r2",
+                                      "rid-del", 0);
+    assert(er == EDGE_STATE_OK);
+    assert(edge_ws_hub_take_pending(hub, 0, msg, sizeof(msg), &mlen) == 1);
+    assert(strstr(msg, "\"op\":\"delete\"") != NULL);
+    assert(strstr(msg, "rid-del") != NULL);
+
+    /* failed put does not notify */
+    er = edge_state_put_and_notify(st, hub, "net.core", "Bad Key!", "{}", 2,
+                                   NULL, 0);
+    assert(er != EDGE_STATE_OK);
+    assert(edge_ws_hub_take_pending(hub, 0, msg, sizeof(msg), &mlen) == 0);
+
+    edge_ws_hub_destroy(hub);
+    edge_state_destroy(st);
+    printf("  PASS: put_and_notify / delete_and_notify\n");
+}
+
+static void test_plugin_state_put_notifies(void)
+{
+    edge_state_store_t *st = edge_state_create();
+    edge_ws_hub_t *hub = edge_ws_hub_create(4);
+    edge_plugin_host_config_t cfg;
+    edge_plugin_host_t *ph;
+    const edge_host_api_t *api;
+    char msg[EDGE_WS_MSG_MAX];
+    size_t mlen = 0;
+
+    assert(st && hub);
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.state = st;
+    ph = edge_plugin_host_create(&cfg);
+    assert(ph);
+    edge_plugin_host_set_ws_hub(ph, hub);
+    assert(edge_plugin_host_ws_hub(ph) == hub);
+    assert(edge_ws_hub_subscribe(hub, 1) == 0);
+
+    api = edge_plugin_host_api(ph);
+    assert(api && api->state_put);
+    assert(api->state_put(api->ctx, "net.core", "from/plugin",
+                          "{\"via\":\"plugin\"}", 16) == 0);
+    assert(edge_ws_hub_take_pending(hub, 1, msg, sizeof(msg), &mlen) == 1);
+    assert(strstr(msg, "STATE_CHANGED") != NULL);
+    assert(strstr(msg, "from/plugin") != NULL);
+    assert(strstr(msg, "plugin") != NULL);
+
+    /* without hub: put ok, no message */
+    edge_plugin_host_set_ws_hub(ph, NULL);
+    assert(api->state_put(api->ctx, "net.core", "from/plugin2", "{}", 2) == 0);
+    assert(edge_ws_hub_take_pending(hub, 1, msg, sizeof(msg), &mlen) == 0);
+
+    edge_plugin_host_destroy(ph);
+    edge_ws_hub_destroy(hub);
+    edge_state_destroy(st);
+    printf("  PASS: plugin host state_put → STATE_CHANGED\n");
+}
+
+static void test_format_fail_compact(void)
+{
+    edge_ws_hub_t *h = edge_ws_hub_create(2);
+    char huge[EDGE_WS_MSG_MAX];
+    char msg[EDGE_WS_MSG_MAX];
+    size_t mlen = 0;
+    size_t i;
+
+    assert(h);
+    assert(edge_ws_hub_subscribe(h, 0) == 0);
+    /* value alone ≈ MSG_MAX so envelope cannot fit → format fail + compact */
+    huge[0] = '{';
+    for (i = 1; i < sizeof(huge) - 2; i++) {
+        huge[i] = 'a';
+    }
+    huge[sizeof(huge) - 2] = '}';
+    huge[sizeof(huge) - 1] = '\0';
+    assert(edge_ws_hub_broadcast_state_changed(h, "net.core", "big/key", "put",
+                                               huge, strlen(huge), "r") == 1);
+    assert(edge_ws_hub_format_fail_count(h) >= 1);
+    assert(edge_ws_hub_take_pending(h, 0, msg, sizeof(msg), &mlen) == 1);
+    assert(strstr(msg, "truncated") != NULL || strstr(msg, "\"value\":null") != NULL);
+
+    edge_ws_hub_destroy(h);
+    printf("  PASS: format-fail compact fallback\n");
+}
+
 int main(void)
 {
     printf("edgehost_ws_test:\n");
@@ -224,6 +342,9 @@ int main(void)
     test_http_upgrade_101();
     test_put_notifies_hub();
     test_ws_frame_roundtrip();
+    test_put_and_notify();
+    test_plugin_state_put_notifies();
+    test_format_fail_compact();
     printf("All WS stream tests PASSED\n");
     return 0;
 }

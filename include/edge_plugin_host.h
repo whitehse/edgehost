@@ -8,6 +8,7 @@
 #include "edge_pending.h"
 #include "edge_plugin.h"
 #include "edge_state.h"
+#include "edge_ws.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -31,6 +32,13 @@ void                edge_plugin_host_destroy(edge_plugin_host_t *h);
 
 const edge_host_api_t *edge_plugin_host_api(edge_plugin_host_t *h);
 edge_pending_table_t  *edge_plugin_host_pending(edge_plugin_host_t *h);
+
+/**
+ * Attach WS hub so host API state_put fans out STATE_CHANGED (PR-1 / K6).
+ * Hub is not owned. Pass NULL to clear.
+ */
+void edge_plugin_host_set_ws_hub(edge_plugin_host_t *h, edge_ws_hub_t *hub);
+edge_ws_hub_t *edge_plugin_host_ws_hub(const edge_plugin_host_t *h);
 
 /**
  * Register plugin and call vtbl->init. Plugin must outlive host (static).

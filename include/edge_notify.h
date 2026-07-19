@@ -6,6 +6,9 @@
  *   {"ns":"...","key":"...","op":"put"|"delete","value":...}
  * value required for put; ignored/null for delete.
  * Optional request_id string.
+ *
+ * Apply uses edge_state_put_and_notify / delete_and_notify (see
+ * edge_state_notify.h) so fan-out matches REST and plugin host.
  */
 #ifndef EDGE_NOTIFY_H
 #define EDGE_NOTIFY_H

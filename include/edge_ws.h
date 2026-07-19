@@ -19,7 +19,8 @@ extern "C" {
 #define EDGE_WS_ACCEPT_MAX   64
 #define EDGE_WS_REQUEST_ID   48
 #define EDGE_WS_MSG_MAX      (4096 + 512)
-#define EDGE_WS_PENDING_MAX  8
+/* Per-subscriber pending STATE_CHANGED queue (bounded; drop oldest). */
+#define EDGE_WS_PENDING_MAX  32
 
 /**
  * Compute Sec-WebSocket-Accept from Sec-WebSocket-Key (RFC 6455).
@@ -69,6 +70,9 @@ void edge_ws_hub_mint_request_id(edge_ws_hub_t *h, const char *prefer,
 /**
  * Format STATE_CHANGED and enqueue on every active subscriber.
  * Drops oldest pending on a full sub queue.
+ * If full-value format fails (too large for EDGE_WS_MSG_MAX), retries with a
+ * compact {"truncated":true} value so clients can refetch; increments format-fail
+ * counter.
  * @return number of subscribers that received a copy.
  */
 int edge_ws_hub_broadcast_state_changed(edge_ws_hub_t *h, const char *ns,
@@ -84,6 +88,12 @@ int edge_ws_hub_take_pending(edge_ws_hub_t *h, int conn_slot, char *out,
                              size_t out_cap, size_t *out_len);
 
 size_t edge_ws_hub_subscriber_count(const edge_ws_hub_t *h);
+
+/** Times full-value format failed and compact fallback was used (or both failed). */
+uint64_t edge_ws_hub_format_fail_count(const edge_ws_hub_t *h);
+
+/** Times oldest pending was dropped due to EDGE_WS_PENDING_MAX. */
+uint64_t edge_ws_hub_drop_oldest_count(const edge_ws_hub_t *h);
 
 #ifdef __cplusplus
 }

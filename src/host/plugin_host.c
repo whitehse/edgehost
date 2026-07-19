@@ -6,6 +6,7 @@
 #include "edge_plugin_host.h"
 
 #include "edge_outbound.h"
+#include "edge_state_notify.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -15,6 +16,7 @@
 
 struct edge_plugin_host {
     edge_state_store_t   *state; /* not owned */
+    edge_ws_hub_t        *hub;   /* not owned; optional STATE_CHANGED fan-out */
     edge_pending_table_t *pending;
     edge_host_api_t       api;
 
@@ -82,7 +84,9 @@ static int api_state_put(void *ctx, const char *ns, const char *key,
     if (!h || !h->state) {
         return -1;
     }
-    return edge_state_put(h->state, ns, key, (const char *)val, len) ==
+    /* Unified put + STATE_CHANGED when hub is wired (iouring_loop). */
+    return edge_state_put_and_notify(h->state, h->hub, ns, key,
+                                     (const char *)val, len, NULL, 0) ==
                    EDGE_STATE_OK
                ? 0
                : -1;
@@ -95,7 +99,8 @@ static int api_emit_ws(void *ctx, const char *topic, const void *json,
     (void)topic;
     (void)json;
     (void)len;
-    /* WS hub wiring is host-loop concern; v0 no-op success */
+    /* Raw topic broadcast still a no-op; plugins should use state_put for
+     * STATE_CHANGED (hub is wired via edge_plugin_host_set_ws_hub). */
     return 0;
 }
 
@@ -303,6 +308,18 @@ const edge_host_api_t *edge_plugin_host_api(edge_plugin_host_t *h)
 edge_pending_table_t *edge_plugin_host_pending(edge_plugin_host_t *h)
 {
     return h ? h->pending : NULL;
+}
+
+void edge_plugin_host_set_ws_hub(edge_plugin_host_t *h, edge_ws_hub_t *hub)
+{
+    if (h) {
+        h->hub = hub;
+    }
+}
+
+edge_ws_hub_t *edge_plugin_host_ws_hub(const edge_plugin_host_t *h)
+{
+    return h ? h->hub : NULL;
 }
 
 int edge_plugin_host_register(edge_plugin_host_t *h, edge_plugin_t *plugin,
