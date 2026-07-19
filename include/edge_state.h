@@ -1,15 +1,19 @@
 /**
  * @file edge_state.h
- * @brief In-memory multi-namespace state store (P1.7a / ADR-007).
+ * @brief In-memory multi-namespace state store (P1.7a / P1.14 / ADR-007).
  *
- * Syscall-free after create. v1: net.core + map.dynamic fully enabled.
- * Values are UTF-8 JSON strings (opaque to the store beyond size/JSON brace check).
+ * Syscall-free after create. Default: net.core + map.dynamic enabled;
+ * net.pon, net.home, electric, inventory registered disabled. Config may
+ * enable hooks when producers exist (P1.14). Values are UTF-8 JSON strings
+ * (opaque to the store beyond size/JSON brace check).
  */
 #ifndef EDGE_STATE_H
 #define EDGE_STATE_H
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "edge_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +55,13 @@ void                edge_state_destroy(edge_state_store_t *st);
 /** Enable/disable namespace (unknown ns names still registered as disabled). */
 int edge_state_ns_set_enabled(edge_state_store_t *st, const char *ns, int enabled);
 int edge_state_ns_enabled(const edge_state_store_t *st, const char *ns);
+
+/**
+ * Apply namespace enable flags from @p cfg onto @p st (P1.14).
+ * Safe to call for owned or external stores; no-op if either arg is NULL.
+ * Also usable for `ext.*` namespaces via edge_state_ns_set_enabled directly.
+ */
+void edge_state_apply_config(edge_state_store_t *st, const edge_config_t *cfg);
 
 edge_state_err_t edge_state_put(edge_state_store_t *st, const char *ns,
                                 const char *key, const char *value,

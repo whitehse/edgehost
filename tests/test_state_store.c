@@ -150,12 +150,60 @@ static void test_rest_disabled_ns(void)
     printf("  PASS: disabled ns\n");
 }
 
+static void test_apply_config_enable_hooks(void)
+{
+    edge_state_store_t *st = edge_state_create();
+    edge_config_t cfg;
+    edge_state_err_t e;
+
+    assert(st);
+    edge_config_defaults(&cfg);
+    assert(!edge_state_ns_enabled(st, "net.pon"));
+    assert(!edge_state_ns_enabled(st, "net.home"));
+    assert(!edge_state_ns_enabled(st, "electric"));
+    assert(!edge_state_ns_enabled(st, "inventory"));
+
+    cfg.state_net_pon_enabled = 1;
+    cfg.state_net_home_enabled = 1;
+    cfg.state_electric_enabled = 1;
+    cfg.state_inventory_enabled = 1;
+    edge_state_apply_config(st, &cfg);
+
+    assert(edge_state_ns_enabled(st, "net.pon"));
+    assert(edge_state_ns_enabled(st, "net.home"));
+    assert(edge_state_ns_enabled(st, "electric"));
+    assert(edge_state_ns_enabled(st, "inventory"));
+
+    e = edge_state_put(st, "net.pon", "olt/olt-1",
+                       "{\"id\":\"olt-1\",\"status\":\"ok\"}", 30);
+    assert(e == EDGE_STATE_OK);
+    e = edge_state_put(st, "inventory", "asset/a-1", "{\"id\":\"a-1\"}", 12);
+    assert(e == EDGE_STATE_OK);
+
+    /* ext.* via dynamic register */
+    assert(edge_state_ns_set_enabled(st, "ext.vendor", 1) == 0);
+    assert(edge_state_ns_enabled(st, "ext.vendor"));
+    e = edge_state_put(st, "ext.vendor", "probe/1", "{}", 2);
+    assert(e == EDGE_STATE_OK);
+
+    /* disable again */
+    cfg.state_net_pon_enabled = 0;
+    edge_state_apply_config(st, &cfg);
+    assert(!edge_state_ns_enabled(st, "net.pon"));
+    e = edge_state_put(st, "net.pon", "x", "{}", 2);
+    assert(e == EDGE_STATE_NS_DISABLED);
+
+    edge_state_destroy(st);
+    printf("  PASS: apply_config enable hooks + ext.*\n");
+}
+
 int main(void)
 {
     printf("state_store:\n");
     test_store_basic();
     test_rest_put_get_delete();
     test_rest_disabled_ns();
+    test_apply_config_enable_hooks();
     printf("all passed\n");
     return 0;
 }

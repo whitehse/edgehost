@@ -753,12 +753,10 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         edge_state_config_t sc = edge_state_default_config();
         srv.store = edge_state_create_with_config(&sc);
         srv.store_owned = 1;
-        if (srv.store) {
-            (void)edge_state_ns_set_enabled(srv.store, "net.core",
-                                            cfg->state_net_core_enabled);
-            (void)edge_state_ns_set_enabled(srv.store, "map.dynamic",
-                                            cfg->state_map_dynamic_enabled);
-        }
+    }
+    /* Always apply ns flags from config (owned or external store; P1.14). */
+    if (srv.store) {
+        edge_state_apply_config(srv.store, cfg);
     }
     if (opts->metrics) {
         srv.metrics = opts->metrics;

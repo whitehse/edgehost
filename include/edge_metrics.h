@@ -2,7 +2,8 @@
  * @file edge_metrics.h
  * @brief Basic host process counters (P1.4c).
  *
- * Exposed via GET /health JSON. Not Prometheus yet (P1.15 notes).
+ * Exposed via GET /health JSON. Native Prometheus text is deferred; see
+ * docs/guides/prometheus.md (P1.15).
  */
 #ifndef EDGE_METRICS_H
 #define EDGE_METRICS_H

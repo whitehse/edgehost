@@ -23,10 +23,12 @@
 - [x] **P1.11** pqproxy side-car metrics scrape → `net.core/pqproxy/health`
 - [x] **P1.12** NOTIFY payload schema → state put/delete + WS fan-out
 - [x] **P1.13b** OpenSSL non-blocking outbound TLS client (poll WANT_*)
+- [x] **P1.14** extra ns config enable + ingest hooks docs (`edge_state_apply_config`)
+- [x] **P1.15** deploy unit + Prometheus notes (`deploy/`, `docs/guides/`)
 
 ## Next (program Track 1)
 
-- [ ] **P1.14–P1.15** extra ns hooks + deploy notes
+- [x] Track 1 complete through P1.15 (see program design for Track 2+)
 
 ## Soft deps
 

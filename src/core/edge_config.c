@@ -24,6 +24,10 @@ void edge_config_defaults(edge_config_t *c)
     c->http_max_upstream_body_bytes = 4u * 1024u * 1024u;
     c->state_net_core_enabled = 1;
     c->state_map_dynamic_enabled = 1;
+    c->state_net_pon_enabled = 0;
+    c->state_net_home_enabled = 0;
+    c->state_electric_enabled = 0;
+    c->state_inventory_enabled = 0;
     snprintf(c->auth_mode, sizeof(c->auth_mode), "open");
     snprintf(c->auth_lab_password_env, sizeof(c->auth_lab_password_env),
              "EDGEHOST_LAB_PASSWORD");

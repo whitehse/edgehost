@@ -37,6 +37,11 @@ static void test_defaults_validate(void)
     assert(edge_config_validate(&c, err, sizeof(err)) == 0);
     assert(c.listen_port == 8080);
     assert(c.state_net_core_enabled == 1);
+    assert(c.state_map_dynamic_enabled == 1);
+    assert(c.state_net_pon_enabled == 0);
+    assert(c.state_net_home_enabled == 0);
+    assert(c.state_electric_enabled == 0);
+    assert(c.state_inventory_enabled == 0);
 
     c.listen_port = 0;
     assert(edge_config_validate(&c, err, sizeof(err)) == -1);
@@ -60,7 +65,15 @@ static void test_load_buf_and_apply(void)
         "    net_core:\n"
         "      enabled: true\n"
         "    map_dynamic:\n"
-        "      enabled: false\n";
+        "      enabled: false\n"
+        "    net_pon:\n"
+        "      enabled: true\n"
+        "    net_home:\n"
+        "      enabled: false\n"
+        "    electric:\n"
+        "      enabled: true\n"
+        "    inventory:\n"
+        "      enabled: true\n";
     edge_config_t cfg;
     edgecore_t *core;
     edge_event_t ev;
@@ -76,6 +89,10 @@ static void test_load_buf_and_apply(void)
     assert(cfg.http_max_upstream_body_bytes == 4096);
     assert(cfg.state_net_core_enabled == 1);
     assert(cfg.state_map_dynamic_enabled == 0);
+    assert(cfg.state_net_pon_enabled == 1);
+    assert(cfg.state_net_home_enabled == 0);
+    assert(cfg.state_electric_enabled == 1);
+    assert(cfg.state_inventory_enabled == 1);
 
     core = edgecore_create();
     assert(core);
@@ -85,6 +102,7 @@ static void test_load_buf_and_apply(void)
     assert(edgecore_config(core)->generation == 1);
     assert(edgecore_config(core)->listen_port == 9090);
     assert(edgecore_config(core)->state_map_dynamic_enabled == 0);
+    assert(edgecore_config(core)->state_net_pon_enabled == 1);
 
     edgecore_destroy(core);
     printf("  PASS: load buf + apply CONFIG_APPLIED\n");
@@ -132,6 +150,10 @@ static void test_load_example_path(void)
     assert(cfg.listen_port == 8080);
     assert(cfg.state_net_core_enabled == 1);
     assert(cfg.state_map_dynamic_enabled == 1);
+    assert(cfg.state_net_pon_enabled == 0);
+    assert(cfg.state_net_home_enabled == 0);
+    assert(cfg.state_electric_enabled == 0);
+    assert(cfg.state_inventory_enabled == 0);
     printf("  PASS: load example path (%s)\n", path);
 }
 

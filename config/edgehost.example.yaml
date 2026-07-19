@@ -20,14 +20,23 @@ http:
   max_pending_outbound: 256
   max_upstream_body_bytes: 4194304
 
-# v1 namespaces (underscore keys — libyaml knowledge paths split on '.')
-# Maps to ns names net.core / map.dynamic inside edgecore.
+# Namespaces (underscore keys — libyaml knowledge paths split on '.').
+# Maps to dotted ns names inside edgecore (net.core, map.dynamic, …).
+# Extra ns stay disabled until a producer is ready (P1.14).
 state:
   namespaces:
     net_core:
       enabled: true
     map_dynamic:
       enabled: true
+    net_pon:
+      enabled: false
+    net_home:
+      enabled: false
+    electric:
+      enabled: false
+    inventory:
+      enabled: false
 
 # Auth (P1.7c–d / ADR-013). Default open for local tests without secrets.
 # lab_password: export EDGEHOST_LAB_PASSWORD + EDGEHOST_SESSION_HMAC

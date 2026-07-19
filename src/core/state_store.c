@@ -241,6 +241,21 @@ int edge_state_ns_enabled(const edge_state_store_t *st, const char *ns)
     return n && n->enabled;
 }
 
+void edge_state_apply_config(edge_state_store_t *st, const edge_config_t *cfg)
+{
+    if (!st || !cfg) {
+        return;
+    }
+    (void)edge_state_ns_set_enabled(st, "net.core", cfg->state_net_core_enabled);
+    (void)edge_state_ns_set_enabled(st, "map.dynamic",
+                                    cfg->state_map_dynamic_enabled);
+    (void)edge_state_ns_set_enabled(st, "net.pon", cfg->state_net_pon_enabled);
+    (void)edge_state_ns_set_enabled(st, "net.home", cfg->state_net_home_enabled);
+    (void)edge_state_ns_set_enabled(st, "electric", cfg->state_electric_enabled);
+    (void)edge_state_ns_set_enabled(st, "inventory",
+                                    cfg->state_inventory_enabled);
+}
+
 static edge_state_entry_t *find_entry(edge_state_ns_t *n, const char *key)
 {
     size_t i;

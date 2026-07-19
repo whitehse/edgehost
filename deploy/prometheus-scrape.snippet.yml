@@ -1,0 +1,37 @@
+# Prometheus scrape sketch for edgehost (P1.15).
+#
+# edgehost exposes process counters as JSON at GET /health, not Prometheus
+# exposition format. Prefer one of:
+#   1) prometheus-json-exporter / similar in front of /health
+#   2) blackbox_exporter HTTP probe for liveness only
+# Native text /metrics is a future enhancement (see docs/guides/prometheus.md).
+
+# --- Option A: blackbox liveness (up / down only) ---
+# scrape_configs:
+#   - job_name: edgehost-blackbox
+#     metrics_path: /probe
+#     params:
+#       module: [http_2xx]
+#     static_configs:
+#       - targets:
+#           - http://127.0.0.1:8080/health
+#     relabel_configs:
+#       - source_labels: [__address__]
+#         target_label: __param_target
+#       - source_labels: [__param_target]
+#         target_label: instance
+#       - target_label: __address__
+#         replacement: 127.0.0.1:9115   # blackbox_exporter
+
+# --- Option B: json_exporter mapping (example) ---
+# Point json_exporter at http://127.0.0.1:8080/health and map fields:
+#   uptime_s, accepts, requests, responses_2xx, responses_4xx,
+#   bytes_in, bytes_out, active_conns, rejects
+# Then scrape json_exporter as usual.
+
+# --- Option C: pqproxy side-car (native Prometheus text) ---
+scrape_configs:
+  - job_name: pqproxy
+    static_configs:
+      - targets: ["127.0.0.1:9108"]
+    metrics_path: /metrics

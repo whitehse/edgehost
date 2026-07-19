@@ -8,6 +8,14 @@
 | [../TODO.md](../TODO.md) | Track 1 PR checklist |
 | [decisions/](decisions/) | ADRs (write when work lands) |
 | [guides/](guides/) | How-tos |
+| [../deploy/](../deploy/) | systemd unit + install sketch |
+
+## Guides
+
+| Guide | Title |
+|-------|-------|
+| [state-namespaces.md](guides/state-namespaces.md) | Extra ns config + ingest hooks (P1.14) |
+| [prometheus.md](guides/prometheus.md) | `/health` JSON + scrape notes (P1.15) |
 
 ## Decisions
 
@@ -21,5 +29,7 @@
 | [011](decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
 | [012](decisions/012-agent-ready-documentation.md) | Agent-ready docs |
 | [014](decisions/014-tls-openssl-edgehost.md) | edgehost OpenSSL NB; CPE mbedTLS |
+| [015](decisions/015-pqproxy-notify.md) | pqproxy scrape + NOTIFY apply |
+| [016](decisions/016-extra-ns-deploy.md) | Extra ns config + deploy/Prometheus (P1.14–15) |
 
 Program-wide design: `~/edge-platform-program-design.md`.

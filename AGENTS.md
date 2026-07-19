@@ -105,5 +105,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.11–P1.13b complete**: pqproxy scrape, NOTIFY→state/WS, NB TLS client.  
-**Next**: **P1.14–P1.15** extra ns hooks + deploy notes.
+**Track 1 complete through P1.15**: extra ns config, deploy unit, Prometheus
+notes. See `docs/guides/state-namespaces.md` and `deploy/README.md`.

@@ -36,9 +36,18 @@ typedef struct {
     size_t http_max_pending_outbound;
     size_t http_max_upstream_body_bytes;
 
-    /** v1 namespaces (1 = enabled). */
+    /**
+     * State namespaces (1 = enabled). Underscore YAML keys map to dotted ns
+     * names (libyaml knowledge paths split on '.'). Defaults: net.core +
+     * map.dynamic on; net.pon / net.home / electric / inventory off until a
+     * producer enables them (P1.14 / ADR-007).
+     */
     int state_net_core_enabled;
     int state_map_dynamic_enabled;
+    int state_net_pon_enabled;
+    int state_net_home_enabled;
+    int state_electric_enabled;
+    int state_inventory_enabled;
 
     /**
      * Auth (P1.7c / ADR-013). mode: open | lab_password | proxy_headers.

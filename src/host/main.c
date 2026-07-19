@@ -168,6 +168,9 @@ int main(int argc, char **argv)
         if (need_ph) {
             edge_plugin_host_config_t phc;
             store = edge_state_create();
+            if (store) {
+                edge_state_apply_config(store, ac);
+            }
             memset(&phc, 0, sizeof(phc));
             phc.max_pending = ac->http_max_pending_outbound;
             phc.state = store;

@@ -182,6 +182,38 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->state_map_dynamic_enabled = iv;
         return 0;
     }
+    if (strcmp(key, "state.namespaces.net_pon.enabled") == 0 ||
+        strcmp(key, "state.net_pon.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->state_net_pon_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.net_home.enabled") == 0 ||
+        strcmp(key, "state.net_home.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->state_net_home_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.electric.enabled") == 0 ||
+        strcmp(key, "state.electric.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->state_electric_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "state.namespaces.inventory.enabled") == 0 ||
+        strcmp(key, "state.inventory.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->state_inventory_enabled = iv;
+        return 0;
+    }
     if (strcmp(key, "auth.mode") == 0) {
         if (copy_str(c->auth_mode, sizeof(c->auth_mode), val) != 0) {
             FAIL("too long");
@@ -390,8 +422,16 @@ static const char *const g_paths[] = {
     "http.max_upstream_body_bytes",
     "state.namespaces.net_core.enabled",
     "state.namespaces.map_dynamic.enabled",
+    "state.namespaces.net_pon.enabled",
+    "state.namespaces.net_home.enabled",
+    "state.namespaces.electric.enabled",
+    "state.namespaces.inventory.enabled",
     "state.net_core.enabled",
     "state.map_dynamic.enabled",
+    "state.net_pon.enabled",
+    "state.net_home.enabled",
+    "state.electric.enabled",
+    "state.inventory.enabled",
     "state.enable_net_core",
     "state.enable_map_dynamic",
     "auth.mode",

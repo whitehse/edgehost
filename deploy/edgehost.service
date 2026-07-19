@@ -1,0 +1,48 @@
+[Unit]
+Description=edgehost multi-plugin io_uring webserver
+Documentation=file:///usr/local/share/doc/edgehost/ARCHITECTURE.md
+After=network-online.target
+Wants=network-online.target
+# Optional co-located side-cars:
+# After=pqproxy.service
+# Wants=pqproxy.service
+
+[Service]
+Type=simple
+User=edgehost
+Group=edgehost
+ExecStart=/usr/local/bin/edgehost --config /etc/edgehost/edgehost.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+LimitNOFILE=65536
+
+# Process environment (optional secrets via EnvironmentFile)
+# EnvironmentFile=-/etc/edgehost/edgehost.env
+# Example env keys (see config/edgehost.example.yaml):
+#   EDGEHOST_LAB_PASSWORD, EDGEHOST_SESSION_HMAC, EDGEHOST_PROXY_HMAC
+#   OPENAI_API_KEY, EDGEHOST_OPENAI_SERVICE_KEY
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/edgehost
+ReadOnlyPaths=/etc/edgehost
+# Capability for binding low ports if listen_port < 1024:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

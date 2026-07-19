@@ -2,7 +2,7 @@
 
 ## Status
 
-**P1.13b**: Track 1 nearly complete — pqproxy scrape, NOTIFY, TLS client.
+**P1.15**: Track 1 complete — extra ns config, deploy unit, Prometheus notes.
 
 ## Layers
 
@@ -51,6 +51,20 @@
 | pqproxy | scrape `/metrics` → `net.core/pqproxy/health` |
 | NOTIFY | JSON schema apply → state + WS `STATE_CHANGED` |
 
-## Next
+## State namespaces (P1.14)
 
-P1.14–P1.15 deploy notes / extra ns hooks.
+| ns | Default |
+|----|---------|
+| `net.core`, `map.dynamic` | enabled |
+| `net.pon`, `net.home`, `electric`, `inventory` | disabled until config |
+| `ext.*` | dynamic via `edge_state_ns_set_enabled` |
+
+`edge_state_apply_config` applies YAML flags on store attach.
+
+## Deploy (P1.15)
+
+| Item | Path |
+|------|------|
+| systemd unit | `deploy/edgehost.service` |
+| install notes | `deploy/README.md` |
+| Prometheus | `docs/guides/prometheus.md` (JSON `/health`; text `/metrics` deferred) |

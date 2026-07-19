@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.11–P1.12 pqproxy/NOTIFY + P1.13b non-blocking TLS client.
+# Track 1 complete through P1.15 (extra ns + deploy / Prometheus notes).
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.9.1)
+project(edgehost LANGUAGES C VERSION 0.10.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

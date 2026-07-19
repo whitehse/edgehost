@@ -17,12 +17,13 @@
 | **Shadow config** | Newly loaded YAML not yet applied; discarded on validate failure |
 | **CONFIG_APPLIED** | Event after successful `edgecore_apply_config` |
 | **CONFIG_REJECTED** | Event when load/validate fails; previous config kept |
-| **/health** | `GET` JSON liveness + basic counters (`edge_metrics`) |
+| **/health** | `GET` JSON liveness + process counters (`edge_metrics`; Prometheus text deferred — guides/prometheus.md) |
 | **Metrics** | Host process counters (accepts, requests, 2xx/4xx, bytes, …) |
 | **SPA root** | Filesystem dir for company UI (`spa.root`, default `./spa`) |
 | **packages root** | Map/package files (`packages.root`); URL prefix `/packages/` |
-| **State ns** | `net.core`, `map.dynamic` (v1 enabled); others disabled until producers |
+| **State ns** | `net.core`, `map.dynamic` (v1 enabled); `net.pon` / `net.home` / `electric` / `inventory` hooks (config enable, P1.14) |
 | **State key** | `[a-z0-9_./:-]{1,128}` under a namespace |
+| **Ingest writer** | Role `ingest` or REST/NOTIFY/plugin put into an enabled ns |
 
 Public API: `edgecore.h`, `edge_config.h`, `edge_config_hup.h`, `edge_iouring.h`,
 `edge_metrics.h`, `host_alloc.h`. Example: `config/edgehost.example.yaml`.

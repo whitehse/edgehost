@@ -4,8 +4,8 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** Track 1 core complete through **P1.13b** — state, WS, auth,
-openai_proxy, TLS server/client, pqproxy scrape, NOTIFY apply, stubs.
+**Status:** Track 1 complete through **P1.15** — state (extra ns config), WS,
+auth, openai_proxy, TLS, pqproxy scrape, NOTIFY, deploy unit, Prometheus notes.
 
 ## Build
 
@@ -29,6 +29,12 @@ See [`deps/pins.txt`](deps/pins.txt) and [`AGENTS.md`](AGENTS.md).
 deps/verify_pins.sh
 deps/update_pins.sh   # refresh SHAs from local checkouts
 ```
+
+## Deploy
+
+See [`deploy/README.md`](deploy/README.md) (systemd unit + install sketch).
+Metrics: [`docs/guides/prometheus.md`](docs/guides/prometheus.md).
+Namespaces: [`docs/guides/state-namespaces.md`](docs/guides/state-namespaces.md).
 
 ## Docs
 

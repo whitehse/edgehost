@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted (P1.7a); WS fan-out added in P1.7b.
+Accepted (P1.7a); WS fan-out in P1.7b; config enable for extra ns in P1.14
+(see ADR-016).
 
 ## Date
 
@@ -20,7 +21,7 @@ P1.7b.
    create-time allocation of fixed key slots; no post-create silent malloc.
 2. **Namespaces**: `net.core` and `map.dynamic` enabled by default; `net.pon`,
    `net.home`, `electric`, `inventory` registered **disabled** (`NS_DISABLED`
-   on put/get).
+   on put/get) until enabled via YAML / `edge_state_apply_config` (P1.14).
 3. **Keys**: `[a-z0-9_./:-]{1,128}`; values UTF-8 JSON (lightweight validation).
 4. **Limits**: default 1024 keys/ns, 4096 bytes/value (config later).
 5. **REST** (lab open; auth later):
