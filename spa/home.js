@@ -63,6 +63,10 @@
         location.href = "/lab/";
         return;
       }
+      if (next === "e7") {
+        location.href = "/e7/";
+        return;
+      }
       await me();
     } else {
       setBadge(false, "login failed");

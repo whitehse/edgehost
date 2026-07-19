@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>edgehost · E7 Call Home</title>
+  <link rel="stylesheet" href="/app.css"/>
+</head>
+<body class="e7">
+  <header>
+    <h1><a href="/" class="home-link">edgehost</a> · E7 Call Home</h1>
+    <span id="authBadge" class="badge muted">not logged in</span>
+  </header>
+
+  <section class="card banner-warn">
+    <h2>Non-durable allowlist</h2>
+    <p class="hint" style="margin:0">
+      REST allowlist edits (PUT/DELETE shelves) update <strong>runtime state only</strong>
+      (YAML seed + in-memory table). Changes are <strong>lost on restart</strong> unless the
+      YAML <code>plugins.e7_callhome.shelves</code> list is updated. Config JSON carries the same note.
+    </p>
+  </section>
+
+  <section class="card" id="loginCard">
+    <h2>Lab login</h2>
+    <p class="hint">POST /auth/lab-login → <code>edge_session</code> cookie (ADR-013). E7 admin routes need employee / employee_admin.</p>
+    <label>Password <input id="labPw" type="password" value="lab" autocomplete="current-password"/></label>
+    <div class="row">
+      <button type="button" id="btnLogin">Login</button>
+      <button type="button" id="btnMe">GET /auth/me</button>
+      <a class="btn secondary" href="/lab/">Lab console</a>
+      <a class="btn secondary" href="/">Home</a>
+    </div>
+    <pre id="authOut" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <p class="hint">GET <code>/api/v1/e7/status</code> — Call Home metrics.</p>
+    <div class="row">
+      <button type="button" id="btnStatus">Refresh status</button>
+    </div>
+    <div id="statusTableWrap" class="table-wrap">
+      <table class="data" id="statusTable">
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody id="statusBody"><tr><td colspan="2" class="muted-cell">…</td></tr></tbody>
+      </table>
+    </div>
+    <pre id="statusOut" class="compact hidden"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Shelves</h2>
+    <p class="hint">GET <code>/api/v1/e7/shelves</code> — MAC, label, enabled, session, serial/model.</p>
+    <div class="row">
+      <button type="button" id="btnShelves">Refresh shelves</button>
+    </div>
+    <div class="table-wrap">
+      <table class="data" id="shelvesTable">
+        <thead>
+          <tr>
+            <th></th>
+            <th>MAC</th>
+            <th>Label</th>
+            <th>Enabled</th>
+            <th>Session</th>
+            <th>Serial</th>
+            <th>Model</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="shelvesBody">
+          <tr><td colspan="8" class="muted-cell">…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre id="shelvesOut" class="compact hidden"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Add / edit shelf</h2>
+    <p class="hint">PUT <code>/api/v1/e7/shelves/{mac}</code> — MAC required; label + enabled optional. Non-durable (see banner).</p>
+    <label>MAC (required) <input id="shelfMac" type="text" placeholder="00:02:5d:d9:21:47" autocomplete="off"/></label>
+    <label>Label <input id="shelfLabel" type="text" placeholder="west hut" autocomplete="off"/></label>
+    <label class="check-label">
+      <input id="shelfEnabled" type="checkbox" checked/> Enabled
+    </label>
+    <div class="row">
+      <button type="button" id="btnShelfPut">Save (PUT)</button>
+      <button type="button" id="btnShelfLoad" class="ghost">Load selected into form</button>
+    </div>
+    <pre id="shelfFormOut" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Shelf detail / ONTs</h2>
+    <p class="hint">
+      Select a shelf above, or enter MAC.
+      ONTs: GET <code>/api/v1/e7/shelves/{mac}/onts?limit=&amp;cursor=</code>.
+      Live updates via WS <code>/api/v1/stream</code> for <code>net.pon</code> keys under the shelf.
+    </p>
+    <label>Selected MAC <input id="detailMac" type="text" placeholder="00:02:5d:d9:21:47" autocomplete="off"/></label>
+    <div class="row">
+      <button type="button" id="btnDetail">Load detail</button>
+      <button type="button" id="btnOnts">Load ONTs</button>
+      <button type="button" id="btnOntsMore" class="ghost">Load more ONTs</button>
+      <button type="button" id="btnWsConnect">WS connect</button>
+      <button type="button" id="btnWsClose" class="ghost">WS close</button>
+      <span id="wsBadge" class="badge muted">ws off</span>
+    </div>
+    <pre id="detailOut" class="compact"></pre>
+    <p id="ontsPageHint" class="hint"></p>
+    <div class="table-wrap">
+      <table class="data" id="ontsTable">
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>ONT</th>
+            <th>PON</th>
+            <th>oper_state</th>
+            <th>event_time</th>
+          </tr>
+        </thead>
+        <tbody id="ontsBody">
+          <tr><td colspan="5" class="muted-cell">Select a shelf</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre id="wsOut" class="log"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Command (placeholder)</h2>
+    <p class="hint">
+      POST <code>/api/v1/e7/shelves/{mac}/commands</code> with
+      <code>{"op":"get-config"}</code> or <code>{"rpc_xml":"…"}</code>
+      (employee_admin; open session required). Poll GET …/commands/{cmd_id}.
+    </p>
+    <label>MAC <input id="cmdMac" type="text" placeholder="(uses selected if empty)" autocomplete="off"/></label>
+    <label>Body JSON
+      <textarea id="cmdBody" rows="3">{"op":"get-config"}</textarea>
+    </label>
+    <div class="row">
+      <button type="button" id="btnCmdSubmit">Submit command</button>
+      <button type="button" id="btnCmdPoll" class="ghost">Poll last cmd_id</button>
+    </div>
+    <label>cmd_id <input id="cmdId" type="text" placeholder="c00000001" autocomplete="off"/></label>
+    <pre id="cmdOut" class="compact"></pre>
+  </section>
+
+  <script src="/app.js"></script>
+  <script src="/e7/e7.js"></script>
+</body>
+</html>

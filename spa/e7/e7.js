@@ -1,0 +1,682 @@
+/* E7 Call Home admin UI. Depends on /app.js (edgehostFetch). Vanilla JS. */
+(function () {
+  function $(id) { return document.getElementById(id); }
+
+  function setText(id, text) {
+    var el = $(id);
+    if (el) el.textContent = text;
+  }
+
+  function appendLog(id, line) {
+    var el = $(id);
+    if (!el) return;
+    var t = new Date().toISOString().slice(11, 19);
+    el.textContent += "[" + t + "] " + line + "\n";
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function setBadge(ok, label) {
+    var b = $("authBadge");
+    if (!b) return;
+    b.textContent = label;
+    b.className = "badge " + (ok ? "ok" : "muted");
+  }
+
+  function setWsBadge(on) {
+    var b = $("wsBadge");
+    if (!b) return;
+    b.textContent = on ? "ws on" : "ws off";
+    b.className = "badge " + (on ? "ok" : "muted");
+  }
+
+  async function fetchText(url, opts) {
+    if (typeof window.edgehostFetch === "function") {
+      return window.edgehostFetch(url, opts);
+    }
+    var r = await fetch(url, Object.assign({ credentials: "same-origin" }, opts || {}));
+    var body = await r.text();
+    return { status: r.status, body: body, headers: r.headers, ok: r.ok };
+  }
+
+  function esc(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  /** Path segment for MAC — hyphens avoid colon issues; normalize accepts both. */
+  function macPath(mac) {
+    return String(mac || "").trim().toLowerCase().replace(/:/g, "-");
+  }
+
+  /** State key segment: colon → hyphen (matches edge_e7_mac_to_key_seg). */
+  function macKeySeg(mac) {
+    return macPath(mac);
+  }
+
+  function selectedMac() {
+    var d = $("detailMac");
+    var c = $("cmdMac");
+    var s = $("shelfMac");
+    if (d && d.value.trim()) return d.value.trim();
+    if (c && c.value.trim()) return c.value.trim();
+    if (s && s.value.trim()) return s.value.trim();
+    return "";
+  }
+
+  function setSelectedMac(mac) {
+    if (!mac) return;
+    if ($("detailMac")) $("detailMac").value = mac;
+    if ($("cmdMac") && !$("cmdMac").value.trim()) $("cmdMac").value = mac;
+    if ($("shelfMac") && !$("shelfMac").value.trim()) $("shelfMac").value = mac;
+  }
+
+  /* --- auth --- */
+
+  async function me() {
+    var r = await fetchText("/auth/me");
+    setText("authOut", "HTTP " + r.status + "\n" + r.body);
+    if (r.ok) setBadge(true, "authenticated");
+    else setBadge(false, "not logged in");
+    return r.ok;
+  }
+
+  async function login() {
+    var pw = $("labPw") ? $("labPw").value : "lab";
+    var r = await fetchText("/auth/lab-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pw })
+    });
+    setText("authOut", "HTTP " + r.status + "\n" + r.body);
+    if (r.ok) {
+      setBadge(true, "session cookie set");
+      await me();
+      refreshStatus().catch(function () { /* ignore */ });
+      refreshShelves().catch(function () { /* ignore */ });
+    } else {
+      setBadge(false, "login failed");
+    }
+  }
+
+  /* --- status --- */
+
+  var STATUS_KEYS = [
+    "enabled",
+    "e7_accepts",
+    "e7_sessions_open",
+    "e7_sessions_error",
+    "e7_notifications",
+    "e7_state_puts",
+    "e7_ws_fanouts",
+    "e7_ws_coalesce_flush",
+    "e7_ws_drop_oldest",
+    "e7_ws_format_fail",
+    "e7_coalesce_overflow",
+    "e7_commands_ok",
+    "e7_commands_err",
+    "e7_rejects",
+    "e7_unconfigured",
+    "e7_rss_estimate",
+    "e7_subscriptions_ok",
+    "max_sessions",
+    "runtime_shelves"
+  ];
+
+  async function refreshStatus() {
+    var r = await fetchText("/api/v1/e7/status");
+    var tbody = $("statusBody");
+    if (!r.ok) {
+      if (tbody) {
+        tbody.innerHTML =
+          "<tr><td colspan=\"2\" class=\"muted-cell\">HTTP " +
+          r.status +
+          "</td></tr>";
+      }
+      setText("statusOut", "HTTP " + r.status + "\n" + r.body);
+      return;
+    }
+    var j;
+    try {
+      j = JSON.parse(r.body);
+    } catch (e) {
+      if (tbody) {
+        tbody.innerHTML =
+          "<tr><td colspan=\"2\" class=\"muted-cell\">parse error</td></tr>";
+      }
+      setText("statusOut", r.body);
+      return;
+    }
+    if (tbody) {
+      var html = "";
+      var i;
+      for (i = 0; i < STATUS_KEYS.length; i++) {
+        var k = STATUS_KEYS[i];
+        if (Object.prototype.hasOwnProperty.call(j, k)) {
+          html +=
+            "<tr><td><code>" +
+            esc(k) +
+            "</code></td><td>" +
+            esc(j[k]) +
+            "</td></tr>";
+        }
+      }
+      tbody.innerHTML = html || "<tr><td colspan=\"2\" class=\"muted-cell\">(empty)</td></tr>";
+    }
+  }
+
+  /* --- shelves --- */
+
+  function shelfRowHtml(s) {
+    var mac = s.mac || "";
+    return (
+      "<tr data-mac=\"" +
+      esc(mac) +
+      "\">" +
+      "<td><button type=\"button\" class=\"ghost btn-select-shelf\" data-mac=\"" +
+      esc(mac) +
+      "\">Select</button></td>" +
+      "<td><code>" +
+      esc(mac) +
+      "</code></td>" +
+      "<td>" +
+      esc(s.label || "") +
+      "</td>" +
+      "<td>" +
+      (s.enabled ? "<span class=\"badge ok\">yes</span>" : "<span class=\"badge muted\">no</span>") +
+      "</td>" +
+      "<td>" +
+      esc(s.session_state || "") +
+      "</td>" +
+      "<td>" +
+      esc(s.serial || "") +
+      "</td>" +
+      "<td>" +
+      esc(s.model || "") +
+      "</td>" +
+      "<td class=\"row-actions\">" +
+      "<button type=\"button\" class=\"ghost btn-disconnect\" data-mac=\"" +
+      esc(mac) +
+      "\">Disconnect</button> " +
+      "<button type=\"button\" class=\"ghost btn-delete\" data-mac=\"" +
+      esc(mac) +
+      "\">Delete</button>" +
+      "</td>" +
+      "</tr>"
+    );
+  }
+
+  async function refreshShelves() {
+    var r = await fetchText("/api/v1/e7/shelves");
+    var tbody = $("shelvesBody");
+    if (!r.ok) {
+      if (tbody) {
+        tbody.innerHTML =
+          "<tr><td colspan=\"8\" class=\"muted-cell\">HTTP " +
+          r.status +
+          " " +
+          esc(r.body.slice(0, 120)) +
+          "</td></tr>";
+      }
+      return;
+    }
+    var j;
+    try {
+      j = JSON.parse(r.body);
+    } catch (e) {
+      if (tbody) {
+        tbody.innerHTML =
+          "<tr><td colspan=\"8\" class=\"muted-cell\">parse error</td></tr>";
+      }
+      return;
+    }
+    var list = j.shelves || [];
+    if (!list.length) {
+      if (tbody) {
+        tbody.innerHTML =
+          "<tr><td colspan=\"8\" class=\"muted-cell\">No shelves (YAML seed empty / none added)</td></tr>";
+      }
+      return;
+    }
+    if (tbody) {
+      tbody.innerHTML = list.map(shelfRowHtml).join("");
+    }
+  }
+
+  async function putShelf() {
+    var mac = $("shelfMac") ? $("shelfMac").value.trim() : "";
+    if (!mac) {
+      setText("shelfFormOut", "MAC required");
+      return;
+    }
+    var label = $("shelfLabel") ? $("shelfLabel").value.trim() : "";
+    var enabled = $("shelfEnabled") ? !!$("shelfEnabled").checked : true;
+    var body = { enabled: enabled };
+    if (label) body.label = label;
+    var r = await fetchText("/api/v1/e7/shelves/" + macPath(mac), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    setText("shelfFormOut", "PUT HTTP " + r.status + "\n" + r.body);
+    if (r.ok) {
+      setSelectedMac(mac);
+      await refreshShelves();
+    }
+  }
+
+  async function disconnectShelf(mac) {
+    if (!mac) return;
+    var r = await fetchText(
+      "/api/v1/e7/shelves/" + macPath(mac) + "/disconnect",
+      { method: "POST" }
+    );
+    setText("shelfFormOut", "DISCONNECT HTTP " + r.status + "\n" + r.body);
+    await refreshShelves();
+  }
+
+  async function deleteShelf(mac) {
+    if (!mac) return;
+    if (!window.confirm("Delete shelf " + mac + " from runtime allowlist and disconnect?")) {
+      return;
+    }
+    var r = await fetchText("/api/v1/e7/shelves/" + macPath(mac), {
+      method: "DELETE"
+    });
+    setText(
+      "shelfFormOut",
+      "DELETE HTTP " + r.status + (r.body ? "\n" + r.body : " (no content)")
+    );
+    if (r.ok || r.status === 204) {
+      await refreshShelves();
+      if ($("detailMac") && $("detailMac").value.trim() === mac) {
+        setText("detailOut", "");
+        clearOntsTable("Shelf deleted");
+      }
+    }
+  }
+
+  function loadFormFromSelected() {
+    var mac = selectedMac();
+    if (!mac) {
+      setText("shelfFormOut", "No selected MAC");
+      return;
+    }
+    if ($("shelfMac")) $("shelfMac").value = mac;
+    /* optional: fetch detail for label/enabled */
+    fetchText("/api/v1/e7/shelves/" + macPath(mac)).then(function (r) {
+      if (!r.ok) {
+        setText("shelfFormOut", "Load HTTP " + r.status + "\n" + r.body);
+        return;
+      }
+      try {
+        var j = JSON.parse(r.body);
+        if ($("shelfLabel")) $("shelfLabel").value = j.label || "";
+        if ($("shelfEnabled")) $("shelfEnabled").checked = !!j.enabled;
+        setText("shelfFormOut", "Loaded " + (j.mac || mac));
+      } catch (e) {
+        setText("shelfFormOut", r.body);
+      }
+    });
+  }
+
+  /* --- detail / ONTs --- */
+
+  var ontCursor = "";
+  var ontLastKey = "";
+  var ontPageLimit = 64;
+  var ontRows = {}; /* key -> row data for live update */
+  var ontCount = 0;
+
+  function clearOntsTable(msg) {
+    ontCursor = "";
+    ontLastKey = "";
+    ontRows = {};
+    ontCount = 0;
+    var tbody = $("ontsBody");
+    if (tbody) {
+      tbody.innerHTML =
+        "<tr><td colspan=\"5\" class=\"muted-cell\">" +
+        esc(msg || "Select a shelf") +
+        "</td></tr>";
+    }
+    setText("ontsPageHint", "");
+  }
+
+  function parseOntValue(val) {
+    if (val == null) return {};
+    if (typeof val === "object") return val;
+    try {
+      return JSON.parse(val);
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function ontRowHtml(key, val) {
+    var v = parseOntValue(val);
+    var st = v.oper_state || "";
+    var badge =
+      st === "up" || st === "enabled"
+        ? "ok"
+        : st === "down" || st === "disabled"
+          ? "bad"
+          : "muted";
+    return (
+      "<tr data-ont-key=\"" +
+      esc(key) +
+      "\">" +
+      "<td><code class=\"key-cell\">" +
+      esc(key) +
+      "</code></td>" +
+      "<td>" +
+      esc(v.ont_id || "") +
+      "</td>" +
+      "<td>" +
+      esc(v.pon_id || "") +
+      "</td>" +
+      "<td><span class=\"badge " +
+      badge +
+      "\">" +
+      esc(st || "—") +
+      "</span></td>" +
+      "<td>" +
+      esc(v.event_time || "") +
+      "</td>" +
+      "</tr>"
+    );
+  }
+
+  function renderOntsFromMap() {
+    var tbody = $("ontsBody");
+    if (!tbody) return;
+    var keys = Object.keys(ontRows).sort();
+    if (!keys.length) {
+      tbody.innerHTML =
+        "<tr><td colspan=\"5\" class=\"muted-cell\">No ONTs</td></tr>";
+      return;
+    }
+    tbody.innerHTML = keys
+      .map(function (k) {
+        return ontRowHtml(k, ontRows[k]);
+      })
+      .join("");
+  }
+
+  function upsertOntRow(key, val) {
+    ontRows[key] = val;
+    var tbody = $("ontsBody");
+    if (!tbody) return;
+    var existing = tbody.querySelector('tr[data-ont-key="' + key.replace(/"/g, "") + '"]');
+    /* Prefer full re-render for simplicity when small; patch when present */
+    if (existing) {
+      var tmp = document.createElement("tbody");
+      tmp.innerHTML = ontRowHtml(key, val);
+      existing.replaceWith(tmp.firstChild);
+    } else {
+      /* if placeholder row, clear */
+      if (tbody.querySelector(".muted-cell")) {
+        tbody.innerHTML = "";
+      }
+      tbody.insertAdjacentHTML("beforeend", ontRowHtml(key, val));
+      ontCount++;
+    }
+  }
+
+  async function loadDetail() {
+    var mac = selectedMac();
+    if (!mac) {
+      setText("detailOut", "MAC required");
+      return;
+    }
+    setSelectedMac(mac);
+    var r = await fetchText("/api/v1/e7/shelves/" + macPath(mac));
+    setText("detailOut", "GET shelf HTTP " + r.status + "\n" + r.body);
+  }
+
+  async function loadOnts(append) {
+    var mac = selectedMac();
+    if (!mac) {
+      setText("detailOut", "MAC required for ONTs");
+      return;
+    }
+    setSelectedMac(mac);
+    if (!append) {
+      ontCursor = "";
+      ontLastKey = "";
+      ontRows = {};
+      ontCount = 0;
+    }
+    var url =
+      "/api/v1/e7/shelves/" +
+      macPath(mac) +
+      "/onts?limit=" +
+      ontPageLimit;
+    if (append && ontCursor) {
+      url += "&cursor=" + ontCursor;
+    }
+    var r = await fetchText(url);
+    if (!r.ok) {
+      setText("detailOut", "GET onts HTTP " + r.status + "\n" + r.body);
+      if (!append) clearOntsTable("HTTP " + r.status);
+      return;
+    }
+    var j;
+    try {
+      j = JSON.parse(r.body);
+    } catch (e) {
+      setText("detailOut", "onts parse error\n" + r.body);
+      return;
+    }
+    var list = j.onts || [];
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var item = list[i];
+      var key = item.key || "";
+      if (!key) continue;
+      ontRows[key] = item.value != null ? item.value : item;
+      ontLastKey = key;
+    }
+    ontCount = Object.keys(ontRows).length;
+    renderOntsFromMap();
+
+    var fullPage = list.length >= ontPageLimit;
+    if (fullPage && ontLastKey) {
+      ontCursor = ontLastKey;
+      setText(
+        "ontsPageHint",
+        "Showing " +
+          ontCount +
+          " ONT(s) (page size " +
+          ontPageLimit +
+          "). Full page — more may exist; use “Load more ONTs” (cursor=" +
+          ontLastKey +
+          ")."
+      );
+    } else {
+      ontCursor = ontLastKey || "";
+      setText(
+        "ontsPageHint",
+        "Showing " + ontCount + " ONT(s)" + (append ? " (with more pages)" : "") + "."
+      );
+    }
+  }
+
+  async function loadOntsMore() {
+    if (!ontLastKey) {
+      await loadOnts(false);
+      return;
+    }
+    ontCursor = ontLastKey;
+    await loadOnts(true);
+  }
+
+  /* --- WebSocket live ONT updates --- */
+
+  var ws = null;
+
+  function ontPrefixForMac(mac) {
+    return "e7/" + macKeySeg(mac) + "/ont/";
+  }
+
+  function wsConnect() {
+    if (ws) {
+      try {
+        ws.close();
+      } catch (e) {
+        /* ignore */
+      }
+      ws = null;
+    }
+    if ($("wsOut")) $("wsOut").textContent = "";
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var url = proto + "//" + location.host + "/api/v1/stream?topics=state";
+    appendLog("wsOut", "connecting " + url);
+    ws = new WebSocket(url);
+    ws.onopen = function () {
+      appendLog("wsOut", "open");
+      setWsBadge(true);
+    };
+    ws.onclose = function (ev) {
+      appendLog("wsOut", "close code=" + ev.code);
+      setWsBadge(false);
+      ws = null;
+    };
+    ws.onerror = function () {
+      appendLog("wsOut", "error");
+    };
+    ws.onmessage = function (ev) {
+      var raw = ev.data;
+      var msg;
+      try {
+        msg = JSON.parse(raw);
+      } catch (e) {
+        appendLog("wsOut", "msg " + String(raw).slice(0, 160));
+        return;
+      }
+      if (!msg || msg.type !== "STATE_CHANGED") {
+        return;
+      }
+      if (msg.ns !== "net.pon") {
+        return;
+      }
+      var mac = selectedMac();
+      if (!mac) return;
+      var prefix = ontPrefixForMac(mac);
+      var key = msg.key || "";
+      if (key.indexOf(prefix) !== 0) {
+        return;
+      }
+      appendLog(
+        "wsOut",
+        "ont " + msg.op + " " + key + " oper=" + (msg.value && msg.value.oper_state
+          ? msg.value.oper_state
+          : "?")
+      );
+      if (msg.op === "delete" || msg.value == null) {
+        delete ontRows[key];
+        renderOntsFromMap();
+        return;
+      }
+      upsertOntRow(key, msg.value);
+    };
+  }
+
+  function wsClose() {
+    if (ws) ws.close();
+  }
+
+  /* --- commands --- */
+
+  async function submitCommand() {
+    var mac = ($("cmdMac") && $("cmdMac").value.trim()) || selectedMac();
+    if (!mac) {
+      setText("cmdOut", "MAC required");
+      return;
+    }
+    var bodyText = $("cmdBody") ? $("cmdBody").value : "{\"op\":\"get-config\"}";
+    var r = await fetchText("/api/v1/e7/shelves/" + macPath(mac) + "/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: bodyText
+    });
+    setText("cmdOut", "POST HTTP " + r.status + "\n" + r.body);
+    if (r.ok || r.status === 202) {
+      try {
+        var j = JSON.parse(r.body);
+        if (j.cmd_id && $("cmdId")) $("cmdId").value = j.cmd_id;
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  async function pollCommand() {
+    var mac = ($("cmdMac") && $("cmdMac").value.trim()) || selectedMac();
+    var cmdId = $("cmdId") ? $("cmdId").value.trim() : "";
+    if (!mac || !cmdId) {
+      setText("cmdOut", "MAC and cmd_id required");
+      return;
+    }
+    var r = await fetchText(
+      "/api/v1/e7/shelves/" + macPath(mac) + "/commands/" + encodeURIComponent(cmdId)
+    );
+    setText("cmdOut", "GET cmd HTTP " + r.status + "\n" + r.body);
+  }
+
+  /* --- events --- */
+
+  function onShelvesClick(ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    var mac = t.getAttribute("data-mac");
+    if (!mac) return;
+    if (t.classList.contains("btn-select-shelf")) {
+      setSelectedMac(mac);
+      if ($("shelfMac")) $("shelfMac").value = mac;
+      loadDetail();
+      loadOnts(false);
+      return;
+    }
+    if (t.classList.contains("btn-disconnect")) {
+      disconnectShelf(mac);
+      return;
+    }
+    if (t.classList.contains("btn-delete")) {
+      deleteShelf(mac);
+    }
+  }
+
+  if ($("btnLogin")) $("btnLogin").addEventListener("click", login);
+  if ($("btnMe")) $("btnMe").addEventListener("click", me);
+  if ($("labPw")) {
+    $("labPw").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") login();
+    });
+  }
+  if ($("btnStatus")) $("btnStatus").addEventListener("click", refreshStatus);
+  if ($("btnShelves")) $("btnShelves").addEventListener("click", refreshShelves);
+  if ($("btnShelfPut")) $("btnShelfPut").addEventListener("click", putShelf);
+  if ($("btnShelfLoad")) $("btnShelfLoad").addEventListener("click", loadFormFromSelected);
+  if ($("btnDetail")) $("btnDetail").addEventListener("click", loadDetail);
+  if ($("btnOnts")) $("btnOnts").addEventListener("click", function () { loadOnts(false); });
+  if ($("btnOntsMore")) $("btnOntsMore").addEventListener("click", loadOntsMore);
+  if ($("btnWsConnect")) $("btnWsConnect").addEventListener("click", wsConnect);
+  if ($("btnWsClose")) $("btnWsClose").addEventListener("click", wsClose);
+  if ($("btnCmdSubmit")) $("btnCmdSubmit").addEventListener("click", submitCommand);
+  if ($("btnCmdPoll")) $("btnCmdPoll").addEventListener("click", pollCommand);
+  if ($("shelvesBody")) $("shelvesBody").addEventListener("click", onShelvesClick);
+
+  me()
+    .then(function (ok) {
+      if (ok) {
+        return Promise.all([refreshStatus(), refreshShelves()]);
+      }
+    })
+    .catch(function () {
+      /* ignore */
+    });
+})();
