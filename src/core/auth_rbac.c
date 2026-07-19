@@ -1,6 +1,6 @@
 /**
  * @file auth_rbac.c
- * @brief Pure RBAC + HMAC-SHA256 lab sessions (P1.7c). No syscalls.
+ * @brief Pure RBAC + lab sessions (P1.7c) + proxy header HMAC (P1.7d).
  */
 
 #include "edge_auth.h"
@@ -342,6 +342,7 @@ void edge_auth_ctx_init(edge_auth_ctx_t *ctx)
     memset(ctx, 0, sizeof(*ctx));
     ctx->mode = EDGE_AUTH_MODE_OPEN;
     ctx->session_ttl_s = 28800;
+    ctx->proxy_max_skew_s = 300;
 }
 
 void edge_principal_clear(edge_principal_t *p)
@@ -829,4 +830,168 @@ edge_auth_resource_t edge_auth_classify(const char *method, const char *path,
         }
     }
     return EDGE_RES_NONE;
+}
+
+int edge_auth_mode_enforced(edge_auth_mode_t mode)
+{
+    return mode == EDGE_AUTH_MODE_LAB_PASSWORD ||
+           mode == EDGE_AUTH_MODE_PROXY_HEADERS;
+}
+
+uint32_t edge_auth_roles_from_csv(const char *csv)
+{
+    uint32_t roles = 0;
+    const char *p;
+    char tok[64];
+    size_t ti;
+
+    if (!csv || !csv[0]) {
+        return EDGE_ROLE_EMPLOYEE;
+    }
+    p = csv;
+    while (*p) {
+        while (*p == ',' || *p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        ti = 0;
+        while (*p && *p != ',' && *p != ' ' && *p != '\t' &&
+               ti + 1 < sizeof(tok)) {
+            tok[ti++] = *p++;
+        }
+        tok[ti] = '\0';
+        if (ti > 0) {
+            uint32_t bit = edge_auth_role_parse(tok);
+            if (bit) {
+                roles |= bit;
+            }
+        }
+        while (*p && *p != ',') {
+            p++;
+        }
+    }
+    return roles ? roles : EDGE_ROLE_EMPLOYEE;
+}
+
+int edge_auth_proxy_canonical(const char *user, const char *roles_csv,
+                              const char *ts, char *out, size_t out_sz)
+{
+    int n;
+
+    if (!user || !user[0] || !ts || !ts[0] || !out || out_sz < 8) {
+        return -1;
+    }
+    if (!roles_csv || !roles_csv[0]) {
+        roles_csv = "employee";
+    }
+    n = snprintf(out, out_sz, "v1\n%s\n%s\n%s", ts, user, roles_csv);
+    if (n < 0 || (size_t)n >= out_sz) {
+        return -1;
+    }
+    return n;
+}
+
+int edge_auth_proxy_sign(const edge_auth_ctx_t *ctx, const char *user,
+                         const char *roles_csv, int64_t ts, char *sig_out,
+                         size_t sig_out_sz)
+{
+    char canon[256];
+    char tsbuf[32];
+    uint8_t mac[32];
+    int n;
+
+    if (!ctx || ctx->proxy_hmac_key_len == 0 || !sig_out) {
+        return -1;
+    }
+    snprintf(tsbuf, sizeof(tsbuf), "%lld", (long long)ts);
+    n = edge_auth_proxy_canonical(user, roles_csv, tsbuf, canon, sizeof(canon));
+    if (n < 0) {
+        return -1;
+    }
+    hmac_sha256(ctx->proxy_hmac_key, ctx->proxy_hmac_key_len,
+                (const uint8_t *)canon, (size_t)n, mac);
+    return b64_encode(mac, 32, sig_out, sig_out_sz, 1);
+}
+
+int edge_auth_proxy_verify(const edge_auth_ctx_t *ctx, const char *user,
+                           const char *roles_hdr, const char *ts_hdr,
+                           const char *sig_hdr, edge_principal_t *out)
+{
+    char canon[256];
+    uint8_t mac[32];
+    uint8_t sig[32];
+    size_t sig_len = 0;
+    int n;
+    int64_t ts = 0;
+    int64_t now;
+    int64_t skew;
+    uint32_t max_skew;
+    char *end = NULL;
+    const char *roles_use;
+
+    if (out) {
+        edge_principal_clear(out);
+    }
+    if (!ctx || !user || !user[0] || !ts_hdr || !sig_hdr || !out) {
+        return -1;
+    }
+    if (ctx->proxy_hmac_key_len == 0) {
+        return -1;
+    }
+    if (strlen(user) >= EDGE_AUTH_SUB_MAX) {
+        return -1;
+    }
+    /* reject user with control chars / newlines (canonical injection) */
+    {
+        const char *u = user;
+        while (*u) {
+            if ((unsigned char)*u < 0x20 || *u == '\n' || *u == '\r') {
+                return -1;
+            }
+            u++;
+        }
+    }
+    roles_use = (roles_hdr && roles_hdr[0]) ? roles_hdr : "employee";
+    {
+        const char *r = roles_use;
+        while (*r) {
+            if ((unsigned char)*r < 0x20 || *r == '\n' || *r == '\r') {
+                return -1;
+            }
+            r++;
+        }
+    }
+
+    ts = (int64_t)strtoll(ts_hdr, &end, 10);
+    if (end == ts_hdr || *end != '\0' || ts <= 0) {
+        return -1;
+    }
+    now = edge_auth_now_sec(ctx);
+    max_skew = ctx->proxy_max_skew_s ? ctx->proxy_max_skew_s : 300;
+    skew = now > ts ? now - ts : ts - now;
+    if (skew > (int64_t)max_skew) {
+        return -1;
+    }
+
+    n = edge_auth_proxy_canonical(user, roles_use, ts_hdr, canon, sizeof(canon));
+    if (n < 0) {
+        return -1;
+    }
+    hmac_sha256(ctx->proxy_hmac_key, ctx->proxy_hmac_key_len,
+                (const uint8_t *)canon, (size_t)n, mac);
+    if (b64_decode(sig_hdr, strlen(sig_hdr), sig, sizeof(sig), &sig_len) != 0 ||
+        sig_len != 32) {
+        return -1;
+    }
+    if (!ct_eq(mac, sig, 32)) {
+        return -1;
+    }
+
+    out->authenticated = 1;
+    snprintf(out->sub, sizeof(out->sub), "%s", user);
+    out->roles = edge_auth_roles_from_csv(roles_use);
+    out->exp = ts + (int64_t)max_skew;
+    return 0;
 }

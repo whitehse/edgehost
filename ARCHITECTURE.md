@@ -2,7 +2,7 @@
 
 ## Status
 
-**P1.7c**: state REST + WS stream + **lab auth / RBAC** (ADR-013).
+**P1.7d**: state REST + WS stream + lab session + **proxy header HMAC** (ADR-013).
 
 ## Layers
 
@@ -29,16 +29,16 @@
 | Events | `STATE_CHANGED` JSON text frames |
 | Auth | employee session when `auth.mode=lab_password` |
 
-## Auth (P1.7c)
+## Auth (P1.7c–d)
 
 | Item | Detail |
 |------|--------|
-| Mode | `open` (default) or `lab_password` |
-| Login | `POST /auth/lab-login` `{"password":"…"}` |
-| Cookie | `edge_session` HMAC-SHA256 session blob |
+| Mode | `open` (default), `lab_password`, `proxy_headers` |
+| Lab login | `POST /auth/lab-login` → `edge_session` cookie |
+| Proxy | `X-User` + `X-Auth-Timestamp` + `X-Auth-Signature` (+ optional `X-Roles`) |
 | Me | `GET /auth/me` |
-| Secrets | env `EDGEHOST_LAB_PASSWORD`, `EDGEHOST_SESSION_HMAC` |
+| Secrets | `EDGEHOST_LAB_PASSWORD`, `EDGEHOST_SESSION_HMAC`, `EDGEHOST_PROXY_HMAC` |
 
 ## Next
 
-P1.7d proxy header HMAC; P1.8 plugin ABI.
+P1.8 plugin ABI.

@@ -29,7 +29,10 @@ void edge_config_defaults(edge_config_t *c)
              "EDGEHOST_LAB_PASSWORD");
     snprintf(c->auth_session_hmac_key_env, sizeof(c->auth_session_hmac_key_env),
              "EDGEHOST_SESSION_HMAC");
+    snprintf(c->auth_proxy_hmac_key_env, sizeof(c->auth_proxy_hmac_key_env),
+             "EDGEHOST_PROXY_HMAC");
     c->auth_session_ttl_s = 28800;
+    c->auth_proxy_max_skew_s = 300;
     c->generation = 0;
 }
 
@@ -83,6 +86,12 @@ int edge_config_validate(const edge_config_t *c, char *err, size_t err_len)
     if (c->auth_session_ttl_s == 0) {
         if (err && err_len) {
             snprintf(err, err_len, "auth.session_ttl_s must be > 0");
+        }
+        return -1;
+    }
+    if (c->auth_proxy_max_skew_s == 0) {
+        if (err && err_len) {
+            snprintf(err, err_len, "auth.proxy_max_skew_s must be > 0");
         }
         return -1;
     }

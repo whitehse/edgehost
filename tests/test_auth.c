@@ -1,5 +1,5 @@
 /**
- * P1.7c: RBAC, lab session HMAC, POST /auth/lab-login, state gate.
+ * P1.7c–d: RBAC, lab session, proxy X-User HMAC, HTTP gates.
  */
 #include "edge_auth.h"
 #include "edge_auth_host.h"
@@ -321,7 +321,170 @@ static void test_auth_host_from_env(void)
     assert(auth.hmac_key_len == strlen("secret-hmac-key"));
     unsetenv("EDGEHOST_LAB_PASSWORD");
     unsetenv("EDGEHOST_SESSION_HMAC");
+
+    snprintf(cfg.auth_mode, sizeof(cfg.auth_mode), "proxy_headers");
+    unsetenv("EDGEHOST_PROXY_HMAC");
+    assert(edge_auth_ctx_from_config(&cfg, &auth, err, sizeof(err)) != 0);
+    setenv("EDGEHOST_PROXY_HMAC", "proxy-secret-key", 1);
+    assert(edge_auth_ctx_from_config(&cfg, &auth, err, sizeof(err)) == 0);
+    assert(auth.mode == EDGE_AUTH_MODE_PROXY_HEADERS);
+    assert(auth.proxy_hmac_key_len == strlen("proxy-secret-key"));
+    unsetenv("EDGEHOST_PROXY_HMAC");
     printf("  PASS: auth_host env resolve\n");
+}
+
+static void test_proxy_sign_verify(void)
+{
+    edge_auth_ctx_t ctx;
+    edge_principal_t p;
+    char sig[EDGE_AUTH_PROXY_SIG_MAX];
+    char bad[EDGE_AUTH_PROXY_SIG_MAX];
+
+    edge_auth_ctx_init(&ctx);
+    ctx.mode = EDGE_AUTH_MODE_PROXY_HEADERS;
+    ctx.now_sec_override = 1700000000;
+    ctx.proxy_max_skew_s = 60;
+    ctx.proxy_hmac_key_len = 11;
+    memcpy(ctx.proxy_hmac_key, "proxy-secret", 11);
+
+    assert(edge_auth_proxy_sign(&ctx, "alice", "employee,employee_admin",
+                                1700000000, sig, sizeof(sig)) == 0);
+    assert(edge_auth_proxy_verify(&ctx, "alice", "employee,employee_admin",
+                                  "1700000000", sig, &p) == 0);
+    assert(p.authenticated);
+    assert(strcmp(p.sub, "alice") == 0);
+    assert(edge_auth_role_has(p.roles, EDGE_ROLE_EMPLOYEE));
+    assert(edge_auth_role_has(p.roles, EDGE_ROLE_EMPLOYEE_ADMIN));
+
+    /* default roles when header omitted */
+    assert(edge_auth_proxy_sign(&ctx, "bob", NULL, 1700000000, sig,
+                                sizeof(sig)) == 0);
+    assert(edge_auth_proxy_verify(&ctx, "bob", NULL, "1700000000", sig, &p) ==
+           0);
+    assert(edge_auth_role_has(p.roles, EDGE_ROLE_EMPLOYEE));
+
+    /* bad sig */
+    snprintf(bad, sizeof(bad), "%s", sig);
+    bad[0] = (char)(bad[0] ^ 1);
+    assert(edge_auth_proxy_verify(&ctx, "bob", NULL, "1700000000", bad, &p) !=
+           0);
+
+    /* skew */
+    ctx.now_sec_override = 1700000000 + 120;
+    assert(edge_auth_proxy_verify(&ctx, "bob", NULL, "1700000000", sig, &p) !=
+           0);
+
+    assert(edge_auth_roles_from_csv("ingest") == EDGE_ROLE_INGEST);
+    assert(edge_auth_mode_enforced(EDGE_AUTH_MODE_PROXY_HEADERS));
+    printf("  PASS: proxy sign/verify/skew\n");
+}
+
+static void test_http_proxy_headers(void)
+{
+    edge_auth_ctx_t auth;
+    edge_state_store_t *st = edge_state_create();
+    edge_http1_serve_t *s = edge_http1_serve_create();
+    edge_metrics_t m;
+    char resp[2048];
+    char sig[EDGE_AUTH_PROXY_SIG_MAX];
+    char req[1024];
+    size_t rlen = 0;
+    int rc;
+    int64_t ts = 1700000500;
+
+    edge_metrics_init(&m);
+    edge_auth_ctx_init(&auth);
+    auth.mode = EDGE_AUTH_MODE_PROXY_HEADERS;
+    auth.now_sec_override = ts;
+    auth.proxy_max_skew_s = 300;
+    auth.proxy_hmac_key_len = 10;
+    memcpy(auth.proxy_hmac_key, "proxy-hmac", 10);
+
+    assert(st && s);
+    edge_http1_serve_set_state(s, st);
+    edge_http1_serve_set_auth(s, &auth);
+
+    /* no headers → 401 */
+    rc = feed(s,
+              "GET /api/v1/state/net.core/k HTTP/1.1\r\nHost: t\r\n\r\n", resp,
+              sizeof(resp), &rlen, &m);
+    assert(rc == 1);
+    assert(strstr(resp, "401") != NULL);
+
+    assert(edge_auth_proxy_sign(&auth, "carol", "employee", ts, sig,
+                                sizeof(sig)) == 0);
+
+    /* signed headers → PUT ok */
+    edge_http1_serve_reset(s);
+    edge_http1_serve_set_state(s, st);
+    edge_http1_serve_set_auth(s, &auth);
+    {
+        int n = snprintf(
+            req, sizeof(req),
+            "PUT /api/v1/state/net.core/router/r2 HTTP/1.1\r\n"
+            "Host: t\r\n"
+            "X-User: carol\r\n"
+            "X-Roles: employee\r\n"
+            "X-Auth-Timestamp: %lld\r\n"
+            "X-Auth-Signature: %s\r\n"
+            "Content-Length: 25\r\n"
+            "\r\n"
+            "{\"id\":\"r2\",\"status\":\"ok\"}",
+            (long long)ts, sig);
+        assert(n > 0 && (size_t)n < sizeof(req));
+        rlen = 0;
+        rc = feed(s, req, resp, sizeof(resp), &rlen, &m);
+        assert(rc == 1);
+        assert(strstr(resp, "204") != NULL);
+    }
+
+    /* GET with default roles (no X-Roles header) */
+    edge_http1_serve_reset(s);
+    edge_http1_serve_set_state(s, st);
+    edge_http1_serve_set_auth(s, &auth);
+    {
+        int n;
+        assert(edge_auth_proxy_sign(&auth, "carol", NULL, ts, sig,
+                                    sizeof(sig)) == 0);
+        n = snprintf(req, sizeof(req),
+                     "GET /api/v1/state/net.core/router/r2 HTTP/1.1\r\n"
+                     "Host: t\r\n"
+                     "X-User: carol\r\n"
+                     "X-Auth-Timestamp: %lld\r\n"
+                     "X-Auth-Signature: %s\r\n"
+                     "\r\n",
+                     (long long)ts, sig);
+        assert(n > 0);
+        rlen = 0;
+        rc = feed(s, req, resp, sizeof(resp), &rlen, &m);
+        assert(rc == 1);
+        assert(strstr(resp, "200") != NULL);
+        assert(strstr(resp, "r2") != NULL);
+    }
+
+    /* forged user with reused sig → 401 */
+    edge_http1_serve_reset(s);
+    edge_http1_serve_set_state(s, st);
+    edge_http1_serve_set_auth(s, &auth);
+    {
+        int n = snprintf(req, sizeof(req),
+                         "GET /api/v1/state/net.core/router/r2 HTTP/1.1\r\n"
+                         "Host: t\r\n"
+                         "X-User: evil\r\n"
+                         "X-Auth-Timestamp: %lld\r\n"
+                         "X-Auth-Signature: %s\r\n"
+                         "\r\n",
+                         (long long)ts, sig);
+        assert(n > 0);
+        rlen = 0;
+        rc = feed(s, req, resp, sizeof(resp), &rlen, &m);
+        assert(rc == 1);
+        assert(strstr(resp, "401") != NULL);
+    }
+
+    edge_http1_serve_destroy(s);
+    edge_state_destroy(st);
+    printf("  PASS: HTTP proxy headers\n");
 }
 
 int main(void)
@@ -333,6 +496,8 @@ int main(void)
     test_config_auth_yaml();
     test_http_login_and_state();
     test_auth_host_from_env();
+    test_proxy_sign_verify();
+    test_http_proxy_headers();
     printf("All auth tests PASSED\n");
     return 0;
 }

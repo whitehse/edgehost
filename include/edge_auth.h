@@ -1,6 +1,6 @@
 /**
  * @file edge_auth.h
- * @brief Principals, RBAC policy, and signed lab sessions (P1.7c / ADR-013).
+ * @brief Principals, RBAC, lab sessions (P1.7c), proxy header HMAC (P1.7d).
  *
  * Syscall-free. Host loads secrets from env and attaches an edge_auth_ctx_t
  * to HTTP serve. Mode OPEN leaves APIs open (default for unit tests).
@@ -23,11 +23,19 @@ extern "C" {
 #define EDGE_AUTH_ENV_NAME_MAX  64
 #define EDGE_AUTH_ROLES_MAX     8
 #define EDGE_AUTH_ROUTER_IDS    8
+#define EDGE_AUTH_ROLES_CSV_MAX 128
+#define EDGE_AUTH_PROXY_SIG_MAX 64
+
+/** Proxy injects these headers (P1.7d); signature covers canonical form. */
+#define EDGE_AUTH_HDR_USER      "X-User"
+#define EDGE_AUTH_HDR_ROLES     "X-Roles"
+#define EDGE_AUTH_HDR_TS        "X-Auth-Timestamp"
+#define EDGE_AUTH_HDR_SIG       "X-Auth-Signature"
 
 typedef enum {
     EDGE_AUTH_MODE_OPEN = 0,         /* no checks (tests / explicit open lab) */
     EDGE_AUTH_MODE_LAB_PASSWORD = 1, /* P1.7c step 1 */
-    EDGE_AUTH_MODE_PROXY_HEADERS = 2 /* P1.7d stub */
+    EDGE_AUTH_MODE_PROXY_HEADERS = 2 /* P1.7d: reverse-proxy X-User + HMAC */
 } edge_auth_mode_t;
 
 /** Role bit flags (stable across authn mechanisms). */
@@ -67,17 +75,20 @@ typedef struct {
 
 /**
  * Runtime auth context (host fills secrets; not owned by edgecore).
- * When mode is LAB_PASSWORD, password and hmac_key must be set.
+ * LAB_PASSWORD: lab_password + hmac_key (session cookie).
+ * PROXY_HEADERS: proxy_hmac_key for X-Auth-Signature.
  */
 typedef struct {
     edge_auth_mode_t mode;
     char             lab_password[EDGE_AUTH_PASSWORD_MAX];
     uint8_t          hmac_key[EDGE_AUTH_HMAC_KEY_MAX];
     size_t           hmac_key_len;
-    uint32_t         session_ttl_s; /* default 28800 */
+    uint8_t          proxy_hmac_key[EDGE_AUTH_HMAC_KEY_MAX];
+    size_t           proxy_hmac_key_len;
+    uint32_t         session_ttl_s;    /* default 28800 */
+    uint32_t         proxy_max_skew_s; /* default 300; timestamp window */
     /**
-     * Clock for exp checks. If now_sec_override > 0, use it; else time(NULL)
-     * when EDGE_AUTH_USE_TIME is available via edge_auth_now_sec().
+     * Clock for exp/skew checks. If now_sec_override > 0, use it; else time(NULL).
      */
     int64_t          now_sec_override;
 } edge_auth_ctx_t;
@@ -142,6 +153,42 @@ int edge_auth_parse_login_password(const char *body, size_t body_len, char *out,
 /** Map HTTP method + path to resource (0 = not protected / unknown). */
 edge_auth_resource_t edge_auth_classify(const char *method, const char *path,
                                         int state_is_list);
+
+/** True when mode requires principal for protected routes. */
+int edge_auth_mode_enforced(edge_auth_mode_t mode);
+
+/**
+ * Parse comma-separated role names into role bits.
+ * Empty/NULL → EDGE_ROLE_EMPLOYEE (proxy default).
+ */
+uint32_t edge_auth_roles_from_csv(const char *csv);
+
+/**
+ * Canonical string for proxy HMAC (NUL-terminated in out):
+ *   "v1\\n" + ts + "\\n" + user + "\\n" + roles
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_auth_proxy_canonical(const char *user, const char *roles_csv,
+                              const char *ts, char *out, size_t out_sz);
+
+/**
+ * Sign proxy headers (base64url HMAC-SHA256 of canonical).
+ * @p roles_csv may be NULL → "employee".
+ * @return 0 ok, -1 error.
+ */
+int edge_auth_proxy_sign(const edge_auth_ctx_t *ctx, const char *user,
+                         const char *roles_csv, int64_t ts, char *sig_out,
+                         size_t sig_out_sz);
+
+/**
+ * Verify X-User / X-Roles / X-Auth-Timestamp / X-Auth-Signature.
+ * roles_hdr may be NULL/empty → employee.
+ * Checks HMAC and |now - ts| <= proxy_max_skew_s.
+ * @return 0 ok (principal filled), -1 invalid.
+ */
+int edge_auth_proxy_verify(const edge_auth_ctx_t *ctx, const char *user,
+                           const char *roles_hdr, const char *ts_hdr,
+                           const char *sig_hdr, edge_principal_t *out);
 
 #ifdef __cplusplus
 }

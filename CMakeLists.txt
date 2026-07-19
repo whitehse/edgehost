@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.7c: auth_rbac + lab password session (ADR-013).
+# P1.7d: proxy X-User HMAC session (ADR-013 step 2).
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.7.2)
+project(edgehost LANGUAGES C VERSION 0.7.3)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

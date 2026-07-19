@@ -105,5 +105,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.7c complete**: lab password session + RBAC (ADR-013); `POST /auth/lab-login`.  
-**Next**: **P1.7d** — proxy `X-User` HMAC session (optional).
+**P1.7d complete**: lab session + proxy `X-User` HMAC headers (ADR-013).  
+**Next**: **P1.8a** — plugin ABI HTTP/SESSION + PENDING.

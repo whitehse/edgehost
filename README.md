@@ -4,8 +4,8 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.7c — HTTP/1 + SPA + packages + state REST + WS stream +
-**lab password session / RBAC** (ADR-013). Default config mode is `open`.
+**Status:** P1.7d — HTTP/1 + SPA + packages + state REST + WS stream +
+**lab session / proxy X-User HMAC** (ADR-013). Default auth mode is `open`.
 
 ## Build
 
@@ -14,15 +14,11 @@ cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on
 
 # open lab (default auth.mode: open):
 ./build/edgehost --host 127.0.0.1 --port 8080 --config config/edgehost.example.yaml
-curl -s http://127.0.0.1:8080/health
-curl -s -X PUT http://127.0.0.1:8080/api/v1/state/net.core/router/r1 \
-  -H 'Content-Type: application/json' -d '{"id":"r1","status":"ok"}'
 
-# lab_password mode:
-# export EDGEHOST_LAB_PASSWORD=… EDGEHOST_SESSION_HMAC=…
-# set auth.mode: lab_password in YAML
-# curl -c jar -X POST …/auth/lab-login -d '{"password":"…"}'
-# curl -b jar …/api/v1/state/…
+# lab_password: EDGEHOST_LAB_PASSWORD + EDGEHOST_SESSION_HMAC
+#   POST /auth/lab-login → Cookie edge_session
+# proxy_headers: EDGEHOST_PROXY_HMAC
+#   reverse-proxy injects X-User, X-Auth-Timestamp, X-Auth-Signature
 ```
 
 ## Dependency pins

@@ -211,7 +211,7 @@ static int build_response(char *out, size_t out_cap, int status,
 
 static int auth_enforced(const edge_http1_serve_t *s)
 {
-    return s && s->auth && s->auth->mode == EDGE_AUTH_MODE_LAB_PASSWORD;
+    return s && s->auth && edge_auth_mode_enforced(s->auth->mode);
 }
 
 static int deny_unauthorized(edge_metrics_t *metrics, char *out, size_t out_cap,
@@ -1072,13 +1072,33 @@ int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len
                 snprintf(s->request_id, sizeof(s->request_id), "eh0");
             }
             edge_principal_clear(&s->principal);
-            if (s->auth && s->auth->mode == EDGE_AUTH_MODE_LAB_PASSWORD &&
+            if (s->auth &&
+                s->auth->mode == EDGE_AUTH_MODE_LAB_PASSWORD &&
                 http1_get_header(s->h1, "Cookie", cookie_hdr,
                                  sizeof(cookie_hdr)) == 0 &&
                 edge_auth_cookie_extract(cookie_hdr, cookie_val,
                                          sizeof(cookie_val)) == 0) {
                 (void)edge_auth_session_verify(s->auth, cookie_val,
                                                &s->principal);
+            } else if (s->auth &&
+                       s->auth->mode == EDGE_AUTH_MODE_PROXY_HEADERS) {
+                char xuser[EDGE_AUTH_SUB_MAX];
+                char xroles[EDGE_AUTH_ROLES_CSV_MAX];
+                char xts[32];
+                char xsig[EDGE_AUTH_PROXY_SIG_MAX];
+                xuser[0] = xroles[0] = xts[0] = xsig[0] = '\0';
+                if (http1_get_header(s->h1, EDGE_AUTH_HDR_USER, xuser,
+                                     sizeof(xuser)) == 0 &&
+                    http1_get_header(s->h1, EDGE_AUTH_HDR_TS, xts,
+                                     sizeof(xts)) == 0 &&
+                    http1_get_header(s->h1, EDGE_AUTH_HDR_SIG, xsig,
+                                     sizeof(xsig)) == 0) {
+                    (void)http1_get_header(s->h1, EDGE_AUTH_HDR_ROLES, xroles,
+                                           sizeof(xroles));
+                    (void)edge_auth_proxy_verify(
+                        s->auth, xuser, xroles[0] ? xroles : NULL, xts, xsig,
+                        &s->principal);
+                }
             }
         } else if (ev.type == HTTP1_EVENT_BODY_CHUNK) {
             /* body also in acc; length tracked via content_length */

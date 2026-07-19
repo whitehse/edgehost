@@ -47,7 +47,9 @@ typedef struct {
     char     auth_mode[32];                 /* default "open" */
     char     auth_lab_password_env[64];     /* default EDGEHOST_LAB_PASSWORD */
     char     auth_session_hmac_key_env[64]; /* default EDGEHOST_SESSION_HMAC */
+    char     auth_proxy_hmac_key_env[64];   /* default EDGEHOST_PROXY_HMAC */
     uint32_t auth_session_ttl_s;            /* default 28800 */
+    uint32_t auth_proxy_max_skew_s;         /* default 300 */
 
     /**
      * Set by edgecore_apply_config on success (not loaded from YAML).

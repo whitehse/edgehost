@@ -135,6 +135,9 @@ int main(int argc, char **argv)
     if (auth.mode == EDGE_AUTH_MODE_LAB_PASSWORD) {
         fprintf(stderr,
                 "edgehost: auth mode=lab_password (POST /auth/lab-login)\n");
+    } else if (auth.mode == EDGE_AUTH_MODE_PROXY_HEADERS) {
+        fprintf(stderr,
+                "edgehost: auth mode=proxy_headers (X-User + X-Auth-Signature)\n");
     }
 
     edge_iouring_opts_defaults(&iopts);

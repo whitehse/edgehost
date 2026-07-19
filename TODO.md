@@ -14,10 +14,10 @@
 - [x] **P1.7a** state store (`net.core`, `map.dynamic`) + REST GET/PUT/DELETE
 - [x] **P1.7b** WS `/api/v1/stream` fan-out STATE_CHANGED
 - [x] **P1.7c** auth_rbac + lab password session (ADR-013)
+- [x] **P1.7d** proxy `X-User` HMAC session (ADR-013 step 2)
 
 ## Next (program Track 1)
 
-- [ ] **P1.7d** optional proxy `X-User` HMAC session
 - [ ] **P1.8a–b** plugin ABI + openai_proxy E2E
 - [ ] **P1.9–P1.10** slack/teams stubs
 - [ ] **P1.11–P1.12** pqproxy metrics + PG NOTIFY

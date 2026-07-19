@@ -209,6 +209,20 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->auth_session_ttl_s = (uint32_t)sz;
         return 0;
     }
+    if (strcmp(key, "auth.proxy_hmac_key_env") == 0) {
+        if (copy_str(c->auth_proxy_hmac_key_env,
+                     sizeof(c->auth_proxy_hmac_key_env), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "auth.proxy_max_skew_s") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid skew");
+        }
+        c->auth_proxy_max_skew_s = (uint32_t)sz;
+        return 0;
+    }
 #undef FAIL
     return 0; /* unknown keys ignored */
 }
@@ -236,6 +250,8 @@ static const char *const g_paths[] = {
     "auth.lab_password_env",
     "auth.session_hmac_key_env",
     "auth.session_ttl_s",
+    "auth.proxy_hmac_key_env",
+    "auth.proxy_max_skew_s",
     NULL
 };
 
