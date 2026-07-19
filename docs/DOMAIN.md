@@ -9,5 +9,8 @@
 | **State namespace** | Keyed store domain (`net.core`, `map.dynamic`, …) |
 | **SIGHUP apply** | Reload YAML via shadow config + atomic swap (new vs pqproxy) |
 | **Class A host** | Full io_uring sim path (edgehost + libsim) |
+| **Pull event** | Host drains core via `edgecore_next_event` (no callbacks) |
+| **NEED_ALLOC** | Core event requesting host-owned buffer growth (P1.2; X1) |
 
-See program design for full API sketches (`edgecore.h`, `edge_plugin.h`, …).
+Public API (P1.1): `include/edgecore.h` — `edgecore_create`, `edgecore_next_event`,
+`edgecore_destroy`. See program design for full sketches (`edge_plugin.h`, …).

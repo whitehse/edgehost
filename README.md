@@ -4,7 +4,8 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.0 — dependency pins and CMake Find modules. No listen socket yet.
+**Status:** P1.1 — `libedgecore` skeleton (`create` / `next_event`). No listen
+socket yet.
 
 ## Build
 
@@ -29,6 +30,7 @@ deps/update_pins.sh   # refresh SHAs from local checkouts
 - [AGENTS.md](AGENTS.md) — agent entry
 - [ARCHITECTURE.md](ARCHITECTURE.md) — core vs host
 - [TODO.md](TODO.md) — PR plan
+- [docs/decisions/](docs/decisions/) — ADRs
 - Program design: `~/edge-platform-program-design.md`
 
 ## License

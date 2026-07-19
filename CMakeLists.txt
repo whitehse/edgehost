@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.0: deps/pins + Find modules skeleton (no edgecore binary yet).
+# P1.1: libedgecore skeleton (create/next_event) + ADRs 001–002, 011–012.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.0.1)
+project(edgehost LANGUAGES C VERSION 0.1.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -20,7 +20,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/EdgeLoadPins.cmake")
 option(EDGEHOST_REQUIRE_SIBLINGS
   "Fail configure if phase-1 sibling headers are missing" ON)
 option(EDGEHOST_REQUIRE_LIBSIM
-  "Fail configure if libsim is missing (off until P0.1)" OFF)
+  "Fail configure if libsim is missing (soft until class-A fuzz)" OFF)
 
 # --- Phase-1 composition roots (headers required when EDGEHOST_REQUIRE_SIBLINGS) ---
 if(EDGEHOST_REQUIRE_SIBLINGS)
@@ -45,7 +45,7 @@ else()
   find_package(Libsim QUIET)
 endif()
 
-message(STATUS "edgehost P1.0 dependency map:")
+message(STATUS "edgehost dependency map:")
 message(STATUS "  SIBLING_ROOT=${SIBLING_ROOT}")
 message(STATUS "  shaggy     FOUND=${Shaggy_FOUND} ROOT=${SHAGGY_ROOT}")
 message(STATUS "  libyaml    FOUND=${Libyaml_FOUND} ROOT=${LIBYAML_ROOT}")
@@ -57,7 +57,16 @@ message(STATUS "  libteams   FOUND=${Libteams_FOUND} ROOT=${LIBTEAMS_ROOT}")
 message(STATUS "  libwebmap  FOUND=${Libwebmap_FOUND} ROOT=${LIBWEBMAP_ROOT}")
 message(STATUS "  libsim     FOUND=${Libsim_FOUND} ROOT=${LIBSIM_ROOT}")
 
-# Interface target consumers will link once edgecore exists (P1.1+).
+# --- libedgecore (syscall-free; P1.1 skeleton) ---
+add_library(edgecore STATIC
+  src/core/edgecore.c
+)
+target_include_directories(edgecore PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+# Interface target for sibling headers (host/plugins later).
 add_library(edgehost_deps INTERFACE)
 if(Shaggy_FOUND)
   target_link_libraries(edgehost_deps INTERFACE Shaggy::headers)
@@ -82,8 +91,13 @@ if(Librest_FOUND)
   target_compile_definitions(edgehost_deps_smoke PRIVATE EDGEHOST_HAVE_LIBREST=1)
 endif()
 
+# edgecore create/next_event smoke (P1.1)
+add_executable(edgecore_smoke tests/test_edgecore_smoke.c)
+target_link_libraries(edgecore_smoke PRIVATE edgecore)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
+add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
 
 # Pin verification (local checkouts vs deps/pins.txt)
 find_program(EDGEHOST_BASH bash)
@@ -95,7 +109,11 @@ if(EDGEHOST_BASH)
   )
 endif()
 
-# Install Find modules for out-of-tree consumers later
+# Install edgecore + Find modules for out-of-tree consumers later
+include(GNUInstallDirs)
+install(TARGETS edgecore ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY cmake/
   DESTINATION lib/cmake/edgehost
   FILES_MATCHING PATTERN "Find*.cmake" PATTERN "Edge*.cmake"

@@ -3,10 +3,10 @@
 ## Done
 
 - [x] **P1.0** deps/pins.txt + CMake Find modules + AGENTS pin policy + deps smoke
+- [x] **P1.1** scaffold + edgecore skeleton + ADRs 001–002, 011–012 (`create`/`next_event` smoke)
 
 ## Next (program Track 1)
 
-- [ ] **P1.1** scaffold + edgecore skeleton + ADRs 001–002, 011–012 (`create`/`next_event` smoke)
 - [ ] **P1.2** host_alloc + NEED_ALLOC path + ADR-003
 - [ ] **P1.3** YAML load + SIGHUP apply + ADR-005
 - [ ] **P1.4a** io_uring accept + fixed static response
@@ -23,4 +23,5 @@
 
 ## Soft deps
 
-- [ ] libsim P0.1–P0.3 (separate repo) before class-A fuzz is green
+- [x] libsim P0.1–P0.4 (separate repo; pin in deps/pins.txt)
+- [ ] Wire class-A fuzz via P1.5 once host accept exists

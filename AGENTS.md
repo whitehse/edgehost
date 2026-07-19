@@ -6,7 +6,7 @@ sockets, files, signals, TLS (**mbedTLS**), and process malloc. Composes sibling
 protocol libraries (shaggy, libyaml, librest, …) — does not reimplement them.
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.0** — `deps/pins.txt` + CMake `Find*` modules.
+**Current milestone**: **P1.1** — edgecore skeleton + ADRs 001–002, 011–012.
 
 ## Key commands
 
@@ -36,10 +36,20 @@ cmake -B build -S . \
 | `TODO.md` | PR track checklist |
 | `docs/DOMAIN.md` | Glossary |
 | `docs/README.md` | Index |
+| `docs/decisions/` | ADRs (write when work lands) |
 | `deps/pins.txt` | Known-good sibling SHAs |
 | Program design | `~/edge-platform-program-design.md` |
 
-## Dependency pins (P1.0 — read this)
+## ADRs (P1.1)
+
+| ADR | Title |
+|-----|-------|
+| [001](docs/decisions/001-pure-c-choice.md) | Pure C11 |
+| [002](docs/decisions/002-core-host-split.md) | libedgecore vs host |
+| [011](docs/decisions/011-fuzz-and-sim-class-a.md) | Class A fuzz/sim policy |
+| [012](docs/decisions/012-agent-ready-documentation.md) | Doc layout + no stub ADRs |
+
+## Dependency pins
 
 | Rule | Detail |
 |------|--------|
@@ -48,14 +58,14 @@ cmake -B build -S . \
 | **CMake** | `cmake/Find*.cmake` accept `*_ROOT` (e.g. `SHAGGY_ROOT`) |
 | **Update** | `deps/update_pins.sh` after intentional sibling upgrades |
 | **Verify** | `deps/verify_pins.sh` / ctest `edgehost_verify_pins` |
-| **libsim** | Not required until Track 0 P0.1; `FindLibsim` is soft |
+| **libsim** | Soft until class-A fuzz (P1.5); `FindLibsim` available |
 
 Do **not** vendor sibling sources into this repo. Link against pins or local roots.
 
 ## Operating rules
 
-- **edgecore** (when added in P1.1+): no syscalls; no silent `malloc` after create
-  (emit `NEED_ALLOC` / host_alloc — ADR-003 / X1).
+- **edgecore** (`src/core/*`): no syscalls; no silent `malloc` after create
+  (emit `NEED_ALLOC` / host_alloc — ADR-003 / X1 in P1.2).
 - **Host** (`src/host/*`): sole place for io_uring, sockets, files, process malloc, signals.
 - Compose shaggy/librest/libyaml/pique/libslack/libteams/libharness — do not reimplement wire protocols.
 - C11, CMake ≥ 3.20, `-Wall -Wextra -Wpedantic -Werror`.
@@ -66,9 +76,9 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 - Configures and builds under strict warnings.
 - `ctest` passes.
 - Pins/docs updated if dependency set changes.
-- No new syscalls in core paths (when core exists).
+- No new syscalls in core paths.
 
 ## Current status
 
-**P1.0 complete**: pins file, Find modules, deps smoke test, agent docs.  
-**Next**: **P1.1** — edgecore skeleton (`create` / `next_event` smoke) + ADRs 001–002, 011–012.
+**P1.1 complete**: `libedgecore` create/next_event smoke, ADRs 001–002, 011–012.  
+**Next**: **P1.2** — host_alloc + NEED_ALLOC path + ADR-003.
