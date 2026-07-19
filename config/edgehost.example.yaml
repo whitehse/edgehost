@@ -40,3 +40,19 @@ auth:
   proxy_hmac_key_env: EDGEHOST_PROXY_HMAC
   proxy_max_skew_s: 300
 
+dns:
+  allow_blocking: false       # true only in lab without upstream_addr
+
+# OpenAI-compatible proxy (P1.8b). Requires OPENAI_API_KEY when enabled.
+plugins:
+  openai_proxy:
+    enabled: false
+    upstream: "https://api.openai.com"
+    # upstream_addr: "1.2.3.4"   # skip DNS
+    # upstream_host: "api.openai.com"
+    api_key_env: OPENAI_API_KEY
+    service_api_key_env: EDGEHOST_OPENAI_SERVICE_KEY
+    timeout_ms: 60000
+    rate_limit_rpm: 60
+    max_concurrent_per_principal: 4
+

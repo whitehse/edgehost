@@ -15,6 +15,7 @@
 #include "edge_auth.h"
 #include "edge_config.h"
 #include "edge_metrics.h"
+#include "edge_plugin_host.h"
 #include "edge_state.h"
 
 #include <signal.h>
@@ -57,6 +58,12 @@ typedef struct {
      * Not destroyed (caller-owned).
      */
     edge_auth_ctx_t *auth;
+    /**
+     * Optional plugin host (P1.8b openai_proxy). Not destroyed.
+     */
+    edge_plugin_host_t *plugins;
+    /** Service API key for Bearer → service_openai (optional). */
+    const char *service_api_key;
 } edge_iouring_opts_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o);

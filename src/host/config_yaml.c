@@ -223,6 +223,79 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->auth_proxy_max_skew_s = (uint32_t)sz;
         return 0;
     }
+    if (strcmp(key, "dns.allow_blocking") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->dns_allow_blocking = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.enabled") == 0 ||
+        strcmp(key, "openai_proxy.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->openai_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.upstream") == 0 ||
+        strcmp(key, "openai_proxy.upstream") == 0) {
+        if (copy_str(c->openai_upstream, sizeof(c->openai_upstream), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.upstream_addr") == 0 ||
+        strcmp(key, "openai_proxy.upstream_addr") == 0) {
+        if (copy_str(c->openai_upstream_addr, sizeof(c->openai_upstream_addr),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.upstream_host") == 0 ||
+        strcmp(key, "openai_proxy.upstream_host") == 0) {
+        if (copy_str(c->openai_upstream_host, sizeof(c->openai_upstream_host),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.api_key_env") == 0) {
+        if (copy_str(c->openai_api_key_env, sizeof(c->openai_api_key_env),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.service_api_key_env") == 0) {
+        if (copy_str(c->openai_service_key_env, sizeof(c->openai_service_key_env),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.timeout_ms") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->openai_timeout_ms = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.rate_limit_rpm") == 0) {
+        if (parse_size(val, &sz) != 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->openai_rate_limit_rpm = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.openai_proxy.max_concurrent_per_principal") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->openai_max_concurrent = (uint32_t)sz;
+        return 0;
+    }
 #undef FAIL
     return 0; /* unknown keys ignored */
 }
@@ -252,6 +325,20 @@ static const char *const g_paths[] = {
     "auth.session_ttl_s",
     "auth.proxy_hmac_key_env",
     "auth.proxy_max_skew_s",
+    "dns.allow_blocking",
+    "plugins.openai_proxy.enabled",
+    "openai_proxy.enabled",
+    "plugins.openai_proxy.upstream",
+    "openai_proxy.upstream",
+    "plugins.openai_proxy.upstream_addr",
+    "openai_proxy.upstream_addr",
+    "plugins.openai_proxy.upstream_host",
+    "openai_proxy.upstream_host",
+    "plugins.openai_proxy.api_key_env",
+    "plugins.openai_proxy.service_api_key_env",
+    "plugins.openai_proxy.timeout_ms",
+    "plugins.openai_proxy.rate_limit_rpm",
+    "plugins.openai_proxy.max_concurrent_per_principal",
     NULL
 };
 

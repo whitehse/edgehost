@@ -33,6 +33,17 @@ void edge_config_defaults(edge_config_t *c)
              "EDGEHOST_PROXY_HMAC");
     c->auth_session_ttl_s = 28800;
     c->auth_proxy_max_skew_s = 300;
+    c->dns_allow_blocking = 0;
+    c->openai_enabled = 0;
+    snprintf(c->openai_upstream, sizeof(c->openai_upstream),
+             "https://api.openai.com");
+    snprintf(c->openai_api_key_env, sizeof(c->openai_api_key_env),
+             "OPENAI_API_KEY");
+    snprintf(c->openai_service_key_env, sizeof(c->openai_service_key_env),
+             "EDGEHOST_OPENAI_SERVICE_KEY");
+    c->openai_timeout_ms = 60000;
+    c->openai_rate_limit_rpm = 60;
+    c->openai_max_concurrent = 4;
     c->generation = 0;
 }
 

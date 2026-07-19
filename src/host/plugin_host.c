@@ -5,6 +5,8 @@
 
 #include "edge_plugin_host.h"
 
+#include "edge_outbound.h"
+
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -33,14 +35,20 @@ struct edge_plugin_host {
 
     uint64_t next_outbound_id; /* starts at 1 */
 
-    /* last accepted client request (shallow + body copy for tests) */
+    /* last accepted client request (deep copy; lives past on_http return) */
     edge_http_client_req_t last_req;
     char                   last_method[16];
     char                   last_url[512];
     char                   last_host[256];
+    char                   last_addr[64];
     uint8_t               *last_body;
     size_t                 last_body_len;
     size_t                 last_body_cap;
+    char                   last_hdr_names[8][64];
+    char                   last_hdr_values[8][384];
+    const char            *last_hdr_name_ptrs[8];
+    const char            *last_hdr_value_ptrs[8];
+    size_t                 last_n_headers;
     uint64_t               last_outbound_id;
     int                    has_last_req;
 };
@@ -109,6 +117,8 @@ static int api_log(void *ctx, int level, const char *fmt, ...)
 static int store_last_req(edge_plugin_host_t *h, const edge_http_client_req_t *req)
 {
     size_t blen;
+    size_t i;
+    size_t nh;
 
     if (!req || !req->method || !req->url) {
         return -1;
@@ -119,6 +129,11 @@ static int store_last_req(edge_plugin_host_t *h, const edge_http_client_req_t *r
         snprintf(h->last_host, sizeof(h->last_host), "%s", req->host);
     } else {
         h->last_host[0] = '\0';
+    }
+    if (req->addr_override) {
+        snprintf(h->last_addr, sizeof(h->last_addr), "%s", req->addr_override);
+    } else {
+        h->last_addr[0] = '\0';
     }
     blen = req->body_len;
     if (blen > 0 && req->body) {
@@ -135,19 +150,32 @@ static int store_last_req(edge_plugin_host_t *h, const edge_http_client_req_t *r
     } else {
         h->last_body_len = 0;
     }
+    nh = req->n_headers;
+    if (nh > 8) {
+        nh = 8;
+    }
+    h->last_n_headers = nh;
+    for (i = 0; i < nh; i++) {
+        snprintf(h->last_hdr_names[i], sizeof(h->last_hdr_names[i]), "%s",
+                 req->hdr_names && req->hdr_names[i] ? req->hdr_names[i] : "");
+        snprintf(h->last_hdr_values[i], sizeof(h->last_hdr_values[i]), "%s",
+                 req->hdr_values && req->hdr_values[i] ? req->hdr_values[i]
+                                                       : "");
+        h->last_hdr_name_ptrs[i] = h->last_hdr_names[i];
+        h->last_hdr_value_ptrs[i] = h->last_hdr_values[i];
+    }
     memset(&h->last_req, 0, sizeof(h->last_req));
     h->last_req.method = h->last_method;
     h->last_req.url = h->last_url;
     h->last_req.host = h->last_host[0] ? h->last_host : NULL;
-    h->last_req.addr_override = req->addr_override;
+    h->last_req.addr_override = h->last_addr[0] ? h->last_addr : NULL;
     h->last_req.body = h->last_body_len ? h->last_body : NULL;
     h->last_req.body_len = h->last_body_len;
     h->last_req.timeout_ms = req->timeout_ms;
     h->last_req.user_tag = req->user_tag;
-    /* headers not deep-copied in v0 (test plugins rarely need them) */
-    h->last_req.hdr_names = req->hdr_names;
-    h->last_req.hdr_values = req->hdr_values;
-    h->last_req.n_headers = req->n_headers;
+    h->last_req.hdr_names = h->last_hdr_name_ptrs;
+    h->last_req.hdr_values = h->last_hdr_value_ptrs;
+    h->last_req.n_headers = h->last_n_headers;
     h->has_last_req = 1;
     return 0;
 }
@@ -464,4 +492,57 @@ edge_plugin_host_last_client_req(const edge_plugin_host_t *h)
 uint64_t edge_plugin_host_last_outbound_id(const edge_plugin_host_t *h)
 {
     return h ? h->last_outbound_id : 0;
+}
+
+int edge_plugin_host_finish_pending_sync(edge_plugin_host_t *h,
+                                         int allow_blocking_dns,
+                                         size_t max_upstream_body,
+                                         edge_http_res_t *res)
+{
+    edge_outbound_opts_t oopts;
+    edge_http_client_result_t up;
+    const edge_http_client_req_t *creq;
+    uint8_t *ubuf = NULL;
+    size_t ulen = 0;
+    size_t cap;
+    int rc;
+
+    if (!h || !res) {
+        return EDGE_PLUGIN_ERR;
+    }
+    creq = edge_plugin_host_last_client_req(h);
+    if (!creq || h->last_outbound_id == 0) {
+        return EDGE_PLUGIN_ERR;
+    }
+    edge_outbound_opts_defaults(&oopts);
+    oopts.allow_blocking_dns = allow_blocking_dns;
+    oopts.max_response_body =
+        max_upstream_body ? max_upstream_body : oopts.max_response_body;
+    if (creq->timeout_ms) {
+        oopts.default_timeout_ms = creq->timeout_ms;
+    }
+    cap = oopts.max_response_body;
+    if (cap < 4096) {
+        cap = 4096;
+    }
+    ubuf = (uint8_t *)malloc(cap);
+    if (!ubuf) {
+        res->status = 500;
+        (void)edge_http_res_set_body(res, "{\"error\":\"NOMEM\"}", 16);
+        (void)edge_pending_release_outbound(h->pending, h->last_outbound_id);
+        return EDGE_PLUGIN_ERR;
+    }
+    memset(&up, 0, sizeof(up));
+    up.user_tag = creq->user_tag;
+    if (edge_outbound_http_execute(creq, &oopts, &up, ubuf, cap, &ulen) != 0) {
+        up.transport_err = EIO;
+    }
+    /* execute may zero the result struct; always restore correlation ids */
+    up.outbound_id = h->last_outbound_id;
+    up.user_tag = creq->user_tag;
+    up.body = ubuf;
+    up.body_len = ulen;
+    rc = edge_plugin_host_complete_outbound(h, &up, res);
+    free(ubuf);
+    return rc;
 }

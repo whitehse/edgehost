@@ -1,12 +1,15 @@
 /**
  * @file main.c
- * @brief edgehost process entry — config, auth, io_uring HTTP/WS (P1.7c).
+ * @brief edgehost process entry — config, auth, plugins, io_uring (P1.8b).
  */
 
 #include "edge_auth_host.h"
 #include "edge_config.h"
 #include "edge_config_hup.h"
 #include "edge_iouring.h"
+#include "edge_openai_proxy.h"
+#include "edge_plugin_host.h"
+#include "edge_state.h"
 #include "edgecore.h"
 
 #include <getopt.h>
@@ -44,10 +47,20 @@ int main(int argc, char **argv)
     edgecore_t *core;
     edge_iouring_opts_t iopts;
     edge_auth_ctx_t auth;
+    edge_plugin_host_t *ph = NULL;
+    edge_plugin_t openai_plugin;
+    edge_openai_proxy_config_t openai_cfg;
+    edge_openai_proxy_config_t openai_cfg_store;
+    edge_state_store_t *store = NULL;
+    char service_key_buf[256];
+    const char *service_key = NULL;
     edge_event_t ev;
     char err[160];
     int rc;
     int opt;
+
+    memset(&openai_plugin, 0, sizeof(openai_plugin));
+    service_key_buf[0] = '\0';
 
     static struct option long_opts[] = {
         {"config", required_argument, 0, 'c'},
@@ -140,9 +153,78 @@ int main(int argc, char **argv)
                 "edgehost: auth mode=proxy_headers (X-User + X-Auth-Signature)\n");
     }
 
+    {
+        const edge_config_t *ac = edgecore_config(core);
+        if (ac->openai_enabled) {
+            edge_plugin_host_config_t phc;
+            edge_openai_proxy_config_defaults(&openai_cfg);
+            openai_cfg.enabled = 1;
+            snprintf(openai_cfg.upstream, sizeof(openai_cfg.upstream), "%s",
+                     ac->openai_upstream);
+            snprintf(openai_cfg.upstream_addr, sizeof(openai_cfg.upstream_addr),
+                     "%s", ac->openai_upstream_addr);
+            snprintf(openai_cfg.upstream_host, sizeof(openai_cfg.upstream_host),
+                     "%s", ac->openai_upstream_host);
+            snprintf(openai_cfg.api_key_env, sizeof(openai_cfg.api_key_env), "%s",
+                     ac->openai_api_key_env);
+            snprintf(openai_cfg.service_api_key_env,
+                     sizeof(openai_cfg.service_api_key_env), "%s",
+                     ac->openai_service_key_env);
+            openai_cfg.timeout_ms = ac->openai_timeout_ms;
+            openai_cfg.rate_limit_rpm = ac->openai_rate_limit_rpm;
+            openai_cfg.max_concurrent_per_principal = ac->openai_max_concurrent;
+
+            store = edge_state_create();
+            memset(&phc, 0, sizeof(phc));
+            phc.max_pending = ac->http_max_pending_outbound;
+            phc.state = store;
+            ph = edge_plugin_host_create(&phc);
+            if (!ph) {
+                fprintf(stderr, "edgehost: plugin host create failed\n");
+                edgecore_destroy(core);
+                edge_state_destroy(store);
+                return 1;
+            }
+            if (edge_openai_proxy_init_plugin(&openai_plugin, &openai_cfg_store,
+                                              &openai_cfg) != 0) {
+                fprintf(stderr,
+                        "edgehost: openai_proxy init failed (set %s)\n",
+                        openai_cfg.api_key_env);
+                edge_plugin_host_destroy(ph);
+                edge_state_destroy(store);
+                edgecore_destroy(core);
+                return 1;
+            }
+            if (edge_plugin_host_register(ph, &openai_plugin, NULL) != 0 ||
+                edge_plugin_host_add_route(ph, "/v1", &openai_plugin) != 0) {
+                fprintf(stderr, "edgehost: openai_proxy register failed\n");
+                edge_plugin_host_destroy(ph);
+                edge_state_destroy(store);
+                edgecore_destroy(core);
+                return 1;
+            }
+            {
+                const char *sk = getenv(openai_cfg.service_api_key_env[0]
+                                            ? openai_cfg.service_api_key_env
+                                            : "EDGEHOST_OPENAI_SERVICE_KEY");
+                if (sk && sk[0] && strlen(sk) < sizeof(service_key_buf)) {
+                    snprintf(service_key_buf, sizeof(service_key_buf), "%s", sk);
+                    service_key = service_key_buf;
+                }
+            }
+            fprintf(stderr, "edgehost: openai_proxy enabled upstream=%s\n",
+                    openai_cfg.upstream);
+        }
+    }
+
     edge_iouring_opts_defaults(&iopts);
     iopts.stop = &g_stop;
     iopts.auth = &auth;
+    iopts.plugins = ph;
+    iopts.service_api_key = service_key;
+    if (store) {
+        iopts.state = store;
+    }
     if (once) {
         iopts.max_accepts = 1;
     }
@@ -152,6 +234,12 @@ int main(int argc, char **argv)
     (void)edgehost_hup_take();
 
     rc = edge_iouring_run(edgecore_config(core), &iopts);
+    if (ph) {
+        edge_plugin_host_destroy(ph);
+    }
+    if (store) {
+        edge_state_destroy(store);
+    }
     edgecore_destroy(core);
     return rc;
 }

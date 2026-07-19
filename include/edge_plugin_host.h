@@ -86,6 +86,16 @@ edge_plugin_host_last_client_req(const edge_plugin_host_t *h);
 
 uint64_t edge_plugin_host_last_outbound_id(const edge_plugin_host_t *h);
 
+/**
+ * After dispatch returned PENDING: run host outbound client on last request,
+ * then on_http_complete. Phase-1 blocking complete (P1.8b).
+ * @return EDGE_PLUGIN_OK | ERR
+ */
+int edge_plugin_host_finish_pending_sync(edge_plugin_host_t *h,
+                                         int allow_blocking_dns,
+                                         size_t max_upstream_body,
+                                         edge_http_res_t *res);
+
 #ifdef __cplusplus
 }
 #endif

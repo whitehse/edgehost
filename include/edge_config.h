@@ -51,6 +51,22 @@ typedef struct {
     uint32_t auth_session_ttl_s;            /* default 28800 */
     uint32_t auth_proxy_max_skew_s;         /* default 300 */
 
+    /** DNS policy (P1.8b outbound). */
+    int dns_allow_blocking; /* lab only; default 0 */
+
+    /**
+     * openai_proxy plugin (P1.8b). Secrets from env; never stored from YAML.
+     */
+    int      openai_enabled;
+    char     openai_upstream[512];
+    char     openai_upstream_addr[64];
+    char     openai_upstream_host[256];
+    char     openai_api_key_env[64];
+    char     openai_service_key_env[64];
+    uint32_t openai_timeout_ms;
+    uint32_t openai_rate_limit_rpm;
+    uint32_t openai_max_concurrent;
+
     /**
      * Set by edgecore_apply_config on success (not loaded from YAML).
      * Monotonic generation for tests and observability.

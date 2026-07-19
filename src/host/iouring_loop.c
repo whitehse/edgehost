@@ -76,6 +76,8 @@ typedef struct {
     int                        store_owned;
     edge_ws_hub_t             *hub;
     edge_auth_ctx_t           *auth; /* not owned; may be NULL */
+    edge_plugin_host_t        *plugins;
+    const char                *service_api_key;
 } server_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
@@ -94,6 +96,8 @@ void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
     o->metrics = NULL;
     o->state = NULL;
     o->auth = NULL;
+    o->plugins = NULL;
+    o->service_api_key = NULL;
 }
 
 static uint64_t pack_ud(int op, int slot)
@@ -218,6 +222,11 @@ static conn_t *alloc_conn(server_t *srv)
             edge_http1_serve_set_state(c->http, srv->store);
             edge_http1_serve_set_ws_hub(c->http, srv->hub);
             edge_http1_serve_set_auth(c->http, srv->auth);
+            edge_http1_serve_set_plugin_host(c->http, srv->plugins);
+            edge_http1_serve_set_outbound_policy(
+                c->http, srv->cfg->dns_allow_blocking,
+                srv->cfg->http_max_upstream_body_bytes);
+            edge_http1_serve_set_service_api_key(c->http, srv->service_api_key);
             return c;
         }
     }
@@ -556,6 +565,8 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     }
 
     srv.auth = opts->auth;
+    srv.plugins = opts->plugins;
+    srv.service_api_key = opts->service_api_key;
     srv.hub = edge_ws_hub_create((size_t)srv.max_conns);
     if (!srv.hub) {
         if (srv.store_owned && srv.store) {

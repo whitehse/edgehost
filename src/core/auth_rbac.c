@@ -376,6 +376,7 @@ const char *edge_auth_resource_name(edge_auth_resource_t r)
     case EDGE_RES_STATE_LIST:   return "STATE_LIST";
     case EDGE_RES_WS_STREAM:    return "WS_STREAM";
     case EDGE_RES_PACKAGES:     return "PACKAGES";
+    case EDGE_RES_OPENAI:       return "OPENAI";
     default:                    return "NONE";
     }
 }
@@ -424,10 +425,17 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
         case EDGE_RES_STATE_LIST:
         case EDGE_RES_WS_STREAM:
         case EDGE_RES_PACKAGES:
+        case EDGE_RES_OPENAI:
             return EDGE_AUTH_ALLOW;
         default:
             return EDGE_AUTH_DENY;
         }
+    }
+    if (edge_auth_role_has(p->roles, EDGE_ROLE_SERVICE_OPENAI)) {
+        if (res == EDGE_RES_OPENAI) {
+            return EDGE_AUTH_ALLOW;
+        }
+        return EDGE_AUTH_DENY;
     }
     if (edge_auth_role_has(p->roles, EDGE_ROLE_INGEST)) {
         if (res == EDGE_RES_STATE_PUT) {
@@ -828,6 +836,9 @@ edge_auth_resource_t edge_auth_classify(const char *method, const char *path,
         if (strcmp(method, "GET") == 0) {
             return EDGE_RES_PACKAGES;
         }
+    }
+    if (strncmp(path, "/v1/", 4) == 0 || strcmp(path, "/v1") == 0) {
+        return EDGE_RES_OPENAI;
     }
     return EDGE_RES_NONE;
 }

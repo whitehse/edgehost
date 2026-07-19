@@ -61,7 +61,8 @@ typedef enum {
     EDGE_RES_STATE_DELETE,
     EDGE_RES_STATE_LIST,
     EDGE_RES_WS_STREAM,
-    EDGE_RES_PACKAGES
+    EDGE_RES_PACKAGES,
+    EDGE_RES_OPENAI /* openai_proxy /v1 routes */
 } edge_auth_resource_t;
 
 typedef struct {

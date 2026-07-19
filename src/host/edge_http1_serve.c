@@ -27,6 +27,11 @@ struct edge_http1_serve {
     edge_ws_hub_t       *hub;   /* not owned */
     edge_auth_ctx_t     *auth;  /* not owned */
     edge_principal_t     principal;
+    edge_plugin_host_t  *plugins; /* not owned */
+    int                  allow_blocking_dns;
+    size_t               max_upstream_body;
+    const char          *service_api_key; /* not owned */
+    uint32_t             inbound_slot;    /* set by host; default 0 */
 
     /* Accumulated request for body (PUT/POST) — host buffer */
     uint8_t              acc[EDGE_HTTP_ACC_MAX];
@@ -795,6 +800,87 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
         return st;
     }
 
+    /* OpenAI-compatible proxy under /v1 (P1.8b) */
+    if (s->plugins &&
+        (strncmp(s->path, "/v1/", 4) == 0 || strcmp(s->path, "/v1") == 0)) {
+        edge_plugin_t *pl = edge_plugin_host_match(s->plugins, s->path);
+        edge_http_req_t preq;
+        edge_http_res_t pres;
+        uint8_t *pbody = NULL;
+        size_t pcap = s->max_upstream_body ? s->max_upstream_body
+                                           : (256u * 1024u);
+        int pst;
+        edge_principal_t lab_prin;
+
+        if (!pl) {
+            if (build_response(out, out_cap, 404, "Not Found", "application/json",
+                               "{\"error\":\"NOT_FOUND\"}", 20, out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 404);
+            return 1;
+        }
+        /* Auth: open mode → synthetic employee; else require principal */
+        if (!auth_enforced(s)) {
+            edge_principal_clear(&lab_prin);
+            lab_prin.authenticated = 1;
+            snprintf(lab_prin.sub, sizeof(lab_prin.sub), "lab");
+            lab_prin.roles = EDGE_ROLE_EMPLOYEE;
+            s->principal = lab_prin;
+        } else {
+            st = require_rbac(s, EDGE_RES_OPENAI, NULL, NULL, metrics, out,
+                              out_cap, out_len);
+            if (st != 0) {
+                return st;
+            }
+        }
+        if (pcap < 65536) {
+            pcap = 65536;
+        }
+        pbody = (uint8_t *)malloc(pcap);
+        if (!pbody) {
+            return -1;
+        }
+        memset(&preq, 0, sizeof(preq));
+        preq.method = s->method;
+        preq.path = s->path;
+        preq.principal = &s->principal;
+        preq.inbound_slot = s->inbound_slot;
+        {
+            const char *body;
+            size_t blen = 0;
+            get_body(s, &body, &blen);
+            preq.body = (const uint8_t *)body;
+            preq.body_len = blen;
+        }
+        memset(&pres, 0, sizeof(pres));
+        pres.body = pbody;
+        pres.body_cap = pcap;
+        pst = edge_plugin_host_dispatch_http(s->plugins, pl, &preq, &pres);
+        if (pst == EDGE_PLUGIN_PENDING) {
+            pst = edge_plugin_host_finish_pending_sync(
+                s->plugins, s->allow_blocking_dns, s->max_upstream_body, &pres);
+        }
+        if (pres.status == 0) {
+            pres.status = (pst == EDGE_PLUGIN_OK) ? 200 : 500;
+        }
+        {
+            const char *ctype = pres.content_type[0] ? pres.content_type
+                                                     : "application/json";
+            const char *reason = pres.reason[0] ? pres.reason : NULL;
+            if (build_response(out, out_cap, pres.status,
+                               reason ? reason : "OK", ctype,
+                               (const char *)pres.body, pres.body_len,
+                               out_len) != 0) {
+                free(pbody);
+                return -1;
+            }
+        }
+        note_response(metrics, pres.status);
+        free(pbody);
+        return 1;
+    }
+
     /* WebSocket stream upgrade (P1.7b) */
     if (edge_ws_path_is_stream(s->path)) {
         st = dispatch_stream(s, metrics, out, out_cap, out_len);
@@ -976,6 +1062,32 @@ void edge_http1_serve_set_auth(edge_http1_serve_t *s, edge_auth_ctx_t *auth)
     }
 }
 
+void edge_http1_serve_set_plugin_host(edge_http1_serve_t *s,
+                                      edge_plugin_host_t *ph)
+{
+    if (s) {
+        s->plugins = ph;
+    }
+}
+
+void edge_http1_serve_set_outbound_policy(edge_http1_serve_t *s,
+                                          int allow_blocking_dns,
+                                          size_t max_upstream_body)
+{
+    if (s) {
+        s->allow_blocking_dns = allow_blocking_dns;
+        s->max_upstream_body = max_upstream_body;
+    }
+}
+
+void edge_http1_serve_set_service_api_key(edge_http1_serve_t *s,
+                                          const char *service_api_key)
+{
+    if (s) {
+        s->service_api_key = service_api_key;
+    }
+}
+
 int edge_http1_serve_took_ws_upgrade(const edge_http1_serve_t *s)
 {
     return s && s->ws_upgrade;
@@ -1098,6 +1210,22 @@ int edge_http1_serve_feed(edge_http1_serve_t *s, const uint8_t *data, size_t len
                     (void)edge_auth_proxy_verify(
                         s->auth, xuser, xroles[0] ? xroles : NULL, xts, xsig,
                         &s->principal);
+                }
+            }
+            /* Service bearer → service_openai (independent of employee ladder) */
+            if (!s->principal.authenticated && s->service_api_key &&
+                s->service_api_key[0]) {
+                char authz[384];
+                if (http1_get_header(s->h1, "Authorization", authz,
+                                     sizeof(authz)) == 0 &&
+                    strncmp(authz, "Bearer ", 7) == 0) {
+                    const char *tok = authz + 7;
+                    if (strcmp(tok, s->service_api_key) == 0) {
+                        s->principal.authenticated = 1;
+                        snprintf(s->principal.sub, sizeof(s->principal.sub),
+                                 "service");
+                        s->principal.roles = EDGE_ROLE_SERVICE_OPENAI;
+                    }
                 }
             }
         } else if (ev.type == HTTP1_EVENT_BODY_CHUNK) {

@@ -7,6 +7,7 @@
 
 #include "edge_auth.h"
 #include "edge_metrics.h"
+#include "edge_plugin_host.h"
 #include "edge_state.h"
 #include "edge_ws.h"
 
@@ -45,6 +46,24 @@ void edge_http1_serve_set_ws_hub(edge_http1_serve_t *s, edge_ws_hub_t *hub);
  * Attach auth context (not owned; may be NULL → treat as OPEN).
  */
 void edge_http1_serve_set_auth(edge_http1_serve_t *s, edge_auth_ctx_t *auth);
+
+/**
+ * Attach plugin host for /v1 openai_proxy routes (not owned; may be NULL).
+ */
+void edge_http1_serve_set_plugin_host(edge_http1_serve_t *s,
+                                      edge_plugin_host_t *ph);
+
+/** DNS / outbound policy for PENDING sync complete. */
+void edge_http1_serve_set_outbound_policy(edge_http1_serve_t *s,
+                                          int allow_blocking_dns,
+                                          size_t max_upstream_body);
+
+/**
+ * Optional service API key for Authorization: Bearer → service_openai principal.
+ * Not owned; pointer must outlive requests (or NULL).
+ */
+void edge_http1_serve_set_service_api_key(edge_http1_serve_t *s,
+                                          const char *service_api_key);
 
 /**
  * Feed inbound bytes.

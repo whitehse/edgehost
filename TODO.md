@@ -16,13 +16,14 @@
 - [x] **P1.7c** auth_rbac + lab password session (ADR-013)
 - [x] **P1.7d** proxy `X-User` HMAC session (ADR-013 step 2)
 - [x] **P1.8a** plugin ABI HTTP/SESSION + PENDING + host API v0 (ADR-008)
+- [x] **P1.8b** openai_proxy E2E via PENDING + outbound HTTP(S) (ADR-014)
 
 ## Next (program Track 1)
 
-- [ ] **P1.8b** openai_proxy E2E via PENDING + tls_client (needs P1.13b)
 - [ ] **P1.9–P1.10** slack/teams stubs
 - [ ] **P1.11–P1.12** pqproxy metrics + PG NOTIFY
-- [ ] **P1.13 / P1.13b** OpenSSL non-blocking server + client (not mbedTLS)
+- [ ] **P1.13 / P1.13b** OpenSSL non-blocking server + client polish
+
 - [ ] **P1.14–P1.15** extra ns hooks + deploy notes
 
 ## Soft deps

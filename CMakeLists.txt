@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.8a: plugin ABI HTTP/SESSION + PENDING + host API v0 (ADR-008).
+# P1.8b: openai_proxy E2E via PENDING + outbound HTTP(S) (ADR-014).
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.8.0)
+project(edgehost LANGUAGES C VERSION 0.8.1)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -51,6 +51,9 @@ if(NOT LIBURING_LIBRARY OR NOT LIBURING_INCLUDE_DIR)
   message(FATAL_ERROR "liburing required (install liburing-dev)")
 endif()
 
+find_package(OpenSSL REQUIRED)
+message(STATUS "  OpenSSL    ${OPENSSL_VERSION}")
+
 message(STATUS "edgehost dependency map:")
 message(STATUS "  SIBLING_ROOT=${SIBLING_ROOT}")
 message(STATUS "  shaggy     FOUND=${Shaggy_FOUND} ROOT=${SHAGGY_ROOT} LIB=${SHAGGY_LIBRARY}")
@@ -83,13 +86,17 @@ target_include_directories(edgecore PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
-# --- Host: plugin registry + host API v0 ---
-add_library(edgehost_plugins STATIC src/host/plugin_host.c)
+# --- Host: plugin registry + host API v0 + outbound HTTP(S) ---
+add_library(edgehost_plugins STATIC
+  src/host/plugin_host.c
+  src/host/outbound_http.c
+  src/plugins/openai_proxy.c
+)
 target_include_directories(edgehost_plugins PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(edgehost_plugins PUBLIC edgecore)
+target_link_libraries(edgehost_plugins PUBLIC edgecore OpenSSL::SSL OpenSSL::Crypto)
 
 # --- Host: alloc ---
 add_library(edgehost_alloc STATIC src/host/host_alloc.c)
@@ -129,7 +136,7 @@ target_include_directories(edgehost_http PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(edgehost_http PUBLIC edgecore)
+target_link_libraries(edgehost_http PUBLIC edgecore edgehost_plugins)
 if(TARGET Shaggy::shaggy)
   target_link_libraries(edgehost_http PUBLIC Shaggy::shaggy)
 elseif(SHAGGY_LIBRARY)
@@ -176,7 +183,8 @@ endif()
 
 # edgehost binary
 add_executable(edgehost src/host/main.c)
-target_link_libraries(edgehost PRIVATE edgecore edgehost_config edgehost_iouring)
+target_link_libraries(edgehost PRIVATE
+  edgecore edgehost_config edgehost_iouring edgehost_plugins)
 
 # Sibling header smoke
 add_library(edgehost_deps INTERFACE)
@@ -229,6 +237,10 @@ target_link_libraries(edgehost_auth_test PRIVATE edgecore edgehost_http edgehost
 add_executable(edgehost_pending_test tests/test_pending_plugin.c)
 target_link_libraries(edgehost_pending_test PRIVATE edgecore edgehost_plugins)
 
+add_executable(edgehost_openai_test tests/test_openai_proxy.c)
+target_link_libraries(edgehost_openai_test PRIVATE
+  edgecore edgehost_plugins edgehost_http pthread)
+
 enable_testing()
 add_test(NAME edgehost_deps_smoke COMMAND edgehost_deps_smoke)
 add_test(NAME edgecore_smoke COMMAND edgecore_smoke)
@@ -242,6 +254,7 @@ add_test(NAME edgehost_state_store COMMAND edgehost_state_test)
 add_test(NAME edgehost_ws_stream COMMAND edgehost_ws_test)
 add_test(NAME edgehost_auth COMMAND edgehost_auth_test)
 add_test(NAME edgehost_pending_plugin COMMAND edgehost_pending_test)
+add_test(NAME edgehost_openai_proxy COMMAND edgehost_openai_test)
 
 if(EDGEHOST_HAVE_SIM)
   add_executable(edgehost_sim_test tests/test_sim_main.c)

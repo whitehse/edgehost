@@ -2,7 +2,7 @@
 
 ## Status
 
-**P1.8a**: state + WS + auth + **plugin ABI / PENDING** (ADR-008).
+**P1.8b**: state + WS + auth + plugins + **openai_proxy E2E** (ADR-014).
 
 ## Layers
 
@@ -23,7 +23,8 @@
 | Status | `OK` \| `PENDING` \| `ERR` |
 | Host API | state_get/put, log, http_client_request, timers (stub) |
 | pending_table | fixed cap; one outbound per inbound slot |
-| Real TLS outbound | P1.8b + P1.13b |
+| Outbound | `outbound_http` blocking HTTP/HTTPS (OpenSSL); addr override preferred |
+| openai_proxy | `POST /v1/chat/completions`, `/v1/responses`, `GET /v1/models` |
 
 ## Auth
 
@@ -35,4 +36,4 @@
 
 ## Next
 
-P1.8b openai_proxy E2E; P1.9–P1.10 stubs; P1.13 TLS.
+P1.9–P1.10 stubs; P1.13 non-blocking TLS polish.
