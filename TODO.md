@@ -59,9 +59,14 @@ Design: `docs/designs/e7-netconf-callhome.md` · ADR-018 · guide
 - [x] **PR-6** SPA `/e7/`
 - [x] **PR-7** Docs / ADR-018 / lab guide / indexes
 
-### Deferred / gated
+### Partial / scaffold / deferred
 
-- [ ] **PR-8** SSH Call Home (libnetconf libassh milestone)
-- [ ] **PR-9** Map phase 2 ONT points
-- [ ] **PR-10** Optional Postgres durable allowlist
+- [~] **PR-8** SSH Call Home — **host scaffold only** (`EDGEHOST_E7_SSH_AVAILABLE=0`;
+  create/bind fail with clear stderr). Full path gated on libnetconf **libassh**.
+- [~] **PR-9** Map ONT mirror — **partial**: lab.v1 puts `map.dynamic`
+  `ont/{mac}/{ont}` when lon/lat present; home outlines still future.
+- [ ] **PR-10** Optional Postgres durable allowlist (no `edge_pg` on this branch)
 - [ ] Real Calix notification samples → `calix.e7.*` extractors
+- [x] **K15 SIGHUP** allowlist merge (`reload_policy: merge` / `replace_all`) +
+  iouring HUP path (`config_path` / edgecore apply)
+- [x] Lab e2e script `scripts/e7-callhome-e2e.sh`

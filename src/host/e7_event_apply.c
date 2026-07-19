@@ -8,7 +8,9 @@
 
 #include "edge_e7_event_apply.h"
 
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 const char *edge_e7_apply_err_name(edge_e7_apply_err_t e)
@@ -292,6 +294,106 @@ static edge_e7_apply_err_t apply_state(edge_state_store_t *store,
     return EDGE_E7_APPLY_OK;
 }
 
+/**
+ * Parse a coordinate token; rejects empty, trailing junk, NaN/Inf spellings.
+ * @return 0 ok, -1 invalid.
+ */
+static int parse_coord(const char *s, double *out)
+{
+    char *end = NULL;
+    double v;
+    size_t i;
+
+    if (!s || !s[0] || !out) {
+        return -1;
+    }
+    for (i = 0; s[i] != '\0'; i++) {
+        char c = s[i];
+        if (c == 'n' || c == 'N' || c == 'i' || c == 'I') {
+            return -1; /* reject nan/inf */
+        }
+    }
+    errno = 0;
+    v = strtod(s, &end);
+    if (end == s || *end != '\0' || errno == ERANGE) {
+        return -1;
+    }
+    /* Reject non-finite without libm: Inf fails v==v? no NaN; Inf*0 != 0. */
+    if (v != v || (v * 0.0) != 0.0) {
+        return -1;
+    }
+    *out = v;
+    return 0;
+}
+
+/** Map oper-state token → map.dynamic status (up→ok, down→down, else unknown). */
+static const char *oper_to_map_status(const char *oper)
+{
+    if (oper && strcmp(oper, "up") == 0) {
+        return "ok";
+    }
+    if (oper && strcmp(oper, "down") == 0) {
+        return "down";
+    }
+    return "unknown";
+}
+
+/**
+ * Optional PR-9 map.dynamic ONT mirror when lon/lat present.
+ * Ignores put failure (ns disabled) so net.pon success still wins.
+ */
+static void try_map_dynamic_ont(edge_state_store_t *store, const char *mac,
+                                const char *mac_key, const char *ont_id,
+                                const char *ont_key, const char *oper,
+                                const char *event_time, const char *xml,
+                                size_t xml_len)
+{
+    char lon_s[64];
+    char lat_s[64];
+    double lon = 0.0;
+    double lat = 0.0;
+    char key[EDGE_STATE_KEY_MAX];
+    char json[768];
+    int n;
+    edge_state_err_t e;
+    const char *status;
+
+    if (!store || !mac || !mac_key || !ont_id || !ont_key || !xml) {
+        return;
+    }
+    lon_s[0] = lat_s[0] = '\0';
+    if (xml_elem_text(xml, xml_len, "lon", lon_s, sizeof(lon_s)) != 0) {
+        (void)xml_elem_text(xml, xml_len, "longitude", lon_s, sizeof(lon_s));
+    }
+    if (xml_elem_text(xml, xml_len, "lat", lat_s, sizeof(lat_s)) != 0) {
+        (void)xml_elem_text(xml, xml_len, "latitude", lat_s, sizeof(lat_s));
+    }
+    if (lon_s[0] == '\0' || lat_s[0] == '\0') {
+        return;
+    }
+    if (parse_coord(lon_s, &lon) != 0 || parse_coord(lat_s, &lat) != 0) {
+        return;
+    }
+    n = snprintf(key, sizeof(key), "ont/%s/%s", mac_key, ont_key);
+    if (n < 0 || (size_t)n >= sizeof(key)) {
+        return;
+    }
+    status = oper_to_map_status(oper);
+    n = snprintf(
+        json, sizeof(json),
+        "{\"id\":\"%s/%s\",\"class\":\"alert\",\"status\":\"%s\","
+        "\"updated_at\":\"%s\",\"mac\":\"%s\",\"ont_id\":\"%s\","
+        "\"oper_state\":\"%s\",\"geom\":{\"type\":\"Point\",\"coordinates\":"
+        "[%.6f,%.6f]},\"lon\":%.6f,\"lat\":%.6f,\"source\":\"lab.v1\"}",
+        mac_key, ont_key, status, event_time ? event_time : "", mac, ont_id,
+        oper ? oper : "", lon, lat, lon, lat);
+    if (n < 0 || (size_t)n >= sizeof(json)) {
+        return;
+    }
+    e = edge_state_put(store, "map.dynamic", key, json, (size_t)n);
+    (void)e; /* ignore NS_DISABLED / capacity — net.pon already applied */
+}
+
 edge_e7_apply_err_t edge_e7_event_apply_lab_v1(edge_state_store_t *store,
                                                const char *mac_colon,
                                                const char *notification_xml,
@@ -323,6 +425,7 @@ edge_e7_apply_err_t edge_e7_event_apply_lab_v1(edge_state_store_t *store,
         char pon_id[EDGE_E7_AID_MAX];
         char oper[EDGE_E7_TOKEN_MAX];
         char ont_key[EDGE_E7_AID_MAX];
+        edge_e7_apply_err_t ae;
 
         if (xml_elem_text(notification_xml, xml_len, "ont-id", ont_id,
                           sizeof(ont_id)) != 0 ||
@@ -346,7 +449,12 @@ edge_e7_apply_err_t edge_e7_event_apply_lab_v1(edge_state_store_t *store,
         if (n < 0 || (size_t)n >= sizeof(json)) {
             return EDGE_E7_APPLY_BAD_XML;
         }
-        return apply_state(store, key, json);
+        ae = apply_state(store, key, json);
+        if (ae == EDGE_E7_APPLY_OK) {
+            try_map_dynamic_ont(store, mac, mac_key, ont_id, ont_key, oper,
+                                event_time, notification_xml, xml_len);
+        }
+        return ae;
     }
 
     if (xml_has_elem(notification_xml, xml_len, "pon-alarm")) {

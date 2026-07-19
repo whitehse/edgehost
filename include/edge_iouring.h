@@ -18,6 +18,7 @@
 #include "edge_metrics.h"
 #include "edge_plugin_host.h"
 #include "edge_state.h"
+#include "edgecore.h"
 
 #include <signal.h>
 #include <stddef.h>
@@ -71,6 +72,19 @@ typedef struct {
      * (UD_DOMAIN_E7); session I/O is pumped on tick (poll path).
      */
     edge_e7_callhome_t *e7;
+    /**
+     * Optional YAML path for SIGHUP live reload (ADR-005 / K15). When set and
+     * edgehost_hup_take() is true in the wait loop, reloads YAML and applies
+     * to @p core (if set), state store, and e7 callhome.
+     * Not copied — must remain valid for the duration of edge_iouring_run.
+     */
+    const char *config_path;
+    /**
+     * Optional edgecore for shadow apply on SIGHUP (edgehost_reload_config).
+     * Not destroyed. When NULL, HUP still reloads YAML into a local shadow and
+     * applies state + e7 only (no CONFIG_APPLIED event).
+     */
+    edgecore_t *core;
 } edge_iouring_opts_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o);

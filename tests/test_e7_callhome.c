@@ -780,6 +780,118 @@ static void test_status_json_and_allowlist(void)
     printf("  PASS: status JSON + runtime allowlist + empty onts\n");
 }
 
+/** K15: reload_policy merge — YAML wins for listed MACs; runtime-only kept. */
+static void test_apply_config_merge(void)
+{
+    edge_config_t cfg;
+    edge_config_t next;
+    edge_e7_callhome_opts_t opts;
+    edge_e7_callhome_t *ch;
+    edge_state_store_t *st;
+    char buf[4096];
+    int n;
+
+    edge_config_defaults(&cfg);
+    cfg.e7_enabled = 1;
+    cfg.e7_max_sessions = 4;
+    cfg.e7_rss_budget_bytes = 256u * 1024u * 1024u;
+    snprintf(cfg.e7_listen_host, sizeof(cfg.e7_listen_host), "127.0.0.1");
+    cfg.e7_listen_port = 4334;
+    snprintf(cfg.e7_reload_policy, sizeof(cfg.e7_reload_policy), "merge");
+    cfg.e7_shelf_count = 1;
+    snprintf(cfg.e7_shelves[0].mac, sizeof(cfg.e7_shelves[0].mac),
+             "00:02:5d:d9:21:47");
+    snprintf(cfg.e7_shelves[0].shelf_id, sizeof(cfg.e7_shelves[0].shelf_id),
+             "yaml-seed");
+    cfg.e7_shelves[0].enabled = 1;
+
+    st = edge_state_create();
+    assert(st);
+    (void)edge_state_ns_set_enabled(st, "inventory", 1);
+    (void)edge_state_ns_set_enabled(st, "net.pon", 1);
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cfg = &cfg;
+    opts.state = st;
+    ch = edge_e7_callhome_create(&opts);
+    assert(ch);
+
+    /* Runtime-only shelf (not in next YAML). */
+    assert(edge_e7_callhome_allowlist_upsert(ch, "aa:bb:cc:dd:ee:ff",
+                                             "runtime-only", 1) == 0);
+
+    /* Next YAML: update seed label/enabled, add new shelf, omit runtime-only. */
+    next = cfg;
+    snprintf(next.e7_shelves[0].shelf_id, sizeof(next.e7_shelves[0].shelf_id),
+             "yaml-updated");
+    next.e7_shelves[0].enabled = 0;
+    next.e7_shelf_count = 2;
+    snprintf(next.e7_shelves[1].mac, sizeof(next.e7_shelves[1].mac),
+             "11:22:33:44:55:66");
+    snprintf(next.e7_shelves[1].shelf_id, sizeof(next.e7_shelves[1].shelf_id),
+             "yaml-new");
+    next.e7_shelves[1].enabled = 1;
+
+    assert(edge_e7_callhome_apply_config(ch, &next) == 0);
+
+    n = edge_e7_callhome_shelf_json(ch, "00:02:5d:d9:21:47", buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "yaml-updated") != NULL);
+    assert(strstr(buf, "\"enabled\":false") != NULL ||
+           strstr(buf, "\"enabled\": false") != NULL);
+
+    n = edge_e7_callhome_shelf_json(ch, "11:22:33:44:55:66", buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "yaml-new") != NULL);
+
+    n = edge_e7_callhome_shelf_json(ch, "aa:bb:cc:dd:ee:ff", buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "runtime-only") != NULL);
+
+    n = edge_e7_callhome_status_json(ch, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"runtime_shelves\":3") != NULL);
+
+    /* replace_all drops runtime-only */
+    snprintf(next.e7_reload_policy, sizeof(next.e7_reload_policy),
+             "replace_all");
+    next.e7_shelf_count = 1;
+    assert(edge_e7_callhome_apply_config(ch, &next) == 0);
+    assert(edge_e7_callhome_shelf_json(ch, "aa:bb:cc:dd:ee:ff", buf,
+                                       sizeof(buf)) == -2);
+    n = edge_e7_callhome_status_json(ch, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"runtime_shelves\":1") != NULL);
+
+    /* SSH transport create fails while PR-8 gated */
+    {
+        edge_config_t ssh_cfg;
+        edge_e7_callhome_opts_t sopts;
+        edge_e7_callhome_t *ssh_ch;
+        edge_config_defaults(&ssh_cfg);
+        ssh_cfg.e7_enabled = 1;
+        ssh_cfg.e7_max_sessions = 4;
+        ssh_cfg.e7_rss_budget_bytes = 256u * 1024u * 1024u;
+        snprintf(ssh_cfg.e7_listen_host, sizeof(ssh_cfg.e7_listen_host),
+                 "127.0.0.1");
+        ssh_cfg.e7_listen_port = 4334;
+        snprintf(ssh_cfg.e7_transport, sizeof(ssh_cfg.e7_transport), "ssh");
+        memset(&sopts, 0, sizeof(sopts));
+        sopts.cfg = &ssh_cfg;
+        sopts.state = st;
+        ssh_ch = edge_e7_callhome_create(&sopts);
+#if EDGEHOST_E7_SSH_AVAILABLE
+        (void)ssh_ch;
+#else
+        assert(ssh_ch == NULL);
+#endif
+    }
+
+    edge_e7_callhome_destroy(ch);
+    edge_state_destroy(st);
+    printf("  PASS: apply_config merge/replace_all + ssh scaffold\n");
+}
+
 #endif /* EDGEHOST_HAVE_LIBNETCONF */
 
 int main(void)
@@ -794,6 +906,7 @@ int main(void)
     test_subscribe_apply_ont_up();
     test_reject_unknown_mac();
     test_status_json_and_allowlist();
+    test_apply_config_merge();
     printf("All e7_callhome tests passed.\n");
     return 0;
 #endif

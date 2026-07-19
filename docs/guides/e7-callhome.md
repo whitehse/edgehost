@@ -129,6 +129,7 @@ apply paths and SPA/REST until redacted field samples enable `calix.e7.*`.
 |---------|------|
 | `lab_v1_identity.xml` | Identity preamble shape for parse/tests |
 | `lab_v1_ont_up.xml` / `lab_v1_ont_down.xml` | ONT oper-state |
+| `lab_v1_ont_up_geo.xml` | ONT up + lon/lat → also `map.dynamic` (PR-9 partial) |
 | `lab_v1_pon_alarm.xml` | PON alarm |
 
 ---
@@ -164,6 +165,7 @@ State keys (also visible via `/api/v1/state/…`):
 |----|-------------|
 | `inventory` | `e7/{mac-hyphen}/config`, `…/session`, `…/cmd/{id}` |
 | `net.pon` | `e7/{mac-hyphen}/ont/{aid}`, `…/pon/{aid}` |
+| `map.dynamic` | `ont/{mac-hyphen}/{ont-aid}` when notification has lon/lat |
 
 ---
 
@@ -198,6 +200,25 @@ Linked from company home and `/lab/`.
 
 ---
 
+## SIGHUP allowlist (K15)
+
+With `--config PATH`, **SIGHUP** reloads YAML (same path as startup):
+
+1. Shadow load + validate → `edgecore_apply_config` (generation++).
+2. `edge_state_apply_config` (namespace enable/capacity).
+3. `edge_e7_callhome_apply_config`:
+   - **`reload_policy: merge`** (default): YAML MAC entries upsert into the
+     runtime allowlist (YAML wins for those MACs); **runtime-only** shelves
+     (REST upserts not in YAML) are **retained**.
+   - **`replace_all`**: clear runtime table, reseed from YAML only.
+4. **Listen host/port/enabled** are **not** rebound live — a warning is logged
+   if they change; restart required. Allowlist still applies.
+
+REST allowlist edits remain **non-durable** across process restart (unless
+re-seeded from YAML).
+
+---
+
 ## Tests
 
 ```bash
@@ -207,8 +228,18 @@ ctest -R 'e7' --output-on-failure
 ctest -E edgehost_verify_pins --output-on-failure
 ```
 
-- `edgehost_e7_event_apply_test` — lab.v1 parsers/fixtures
-- `edgehost_e7_callhome_test` — identity, CLIENT path, REST/status helpers
+- `edgehost_e7_event_apply_test` — lab.v1 parsers/fixtures (+ geo → map.dynamic)
+- `edgehost_e7_callhome_test` — identity, CLIENT path, REST/status, apply_config merge
+
+### Lab e2e script
+
+```bash
+./scripts/e7-callhome-e2e.sh
+# STRICT=1 fails if ports busy; KEEP_RUNNING=1 leaves edgehost up
+```
+
+Starts `config/edgehost.e7-lab.yaml`, lab-login, `GET /api/v1/e7/status`.
+Fail-soft (exit 0) if ports are busy or libnetconf is not linked.
 
 ---
 
@@ -216,9 +247,11 @@ ctest -E edgehost_verify_pins --output-on-failure
 
 | Item | Status |
 |------|--------|
-| `transport: ssh` | PR-8 — needs libnetconf libassh |
+| `transport: ssh` | **Scaffold only** — YAML accepts `ssh`; engine create/bind fail until libnetconf **libassh** (`EDGEHOST_E7_SSH_AVAILABLE=0`, PR-8) |
 | Identity before SSH | Still required (K17) |
 | Raw on non-loopback | Forbidden without `lab_insecure_raw` (lab only) |
-| Durable allowlist | Optional Postgres (PR-10); today YAML + runtime |
+| Durable allowlist | Optional Postgres (PR-10); deferred (no edge_pg on foundation branch) |
+| Map home outlines | Future; ONT points with coords land in `map.dynamic` now |
 
-Disable: set `plugins.e7_callhome.enabled: false` and restart or SIGHUP apply.
+Disable: set `plugins.e7_callhome.enabled: false` and restart (or SIGHUP for
+allowlist/ns flags; listen disable still needs restart).

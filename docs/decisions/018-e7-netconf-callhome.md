@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted (PR-1–PR-6 foundation; PR-7 docs). Production SSH Call Home is
-deferred (PR-8 / libnetconf libassh milestone).
+Accepted (PR-1–PR-7 foundation + remaining polish: K15 SIGHUP merge, PR-9
+partial map mirror, PR-8 host scaffold). Production SSH Call Home remains
+gated on libnetconf libassh (`EDGEHOST_E7_SSH_AVAILABLE=0`).
 
 ## Date
 
@@ -91,9 +92,12 @@ Constraints:
 - **lab.v1 is not a Calix wire format** — synthetic until real notification
   samples enable `calix.e7.*` extractors.
 - Runtime REST allowlist edits are **non-durable** (lost on restart unless
-  YAML updated).
-- Production blocked on libnetconf SSH (PR-8); identity preamble remains
-  first after accept.
+  YAML updated). SIGHUP with `reload_policy: merge` re-applies YAML MACs and
+  retains runtime-only shelves (K15).
+- Production SSH blocked on libnetconf libassh (PR-8 scaffold only); identity
+  preamble remains first after accept.
+- When lab.v1 ONT events include lon/lat, apply also mirrors into
+  `map.dynamic` `ont/{mac_key}/{ont_key}` (PR-9 partial; home outlines later).
 
 ## Alternatives considered
 

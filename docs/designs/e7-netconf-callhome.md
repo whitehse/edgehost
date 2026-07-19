@@ -598,7 +598,11 @@ Audit log line: `principal`, `mac`, `cmd_id`, `type`, `message_id`, result.
 
 ### Future map (phase 2)
 
-Unchanged intent: when lon/lat present, mirror to `map.dynamic`; extend libwebmap feed; home outlines later.
+**Partial (implemented):** when lab.v1 ONT events include finite lon/lat (or
+longitude/latitude), apply puts `map.dynamic` key `ont/{mac_key}/{ont_key}`
+(dynamic_feed-shaped JSON: id/class/status/geom/…). Map put is best-effort
+(ns disabled ignored). Call Home dirty-set also marks map keys for coalesce.
+**Still future:** home outlines, full libwebmap feed classes, real Calix geometry.
 
 ### YAML configuration
 

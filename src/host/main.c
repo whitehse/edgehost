@@ -305,16 +305,14 @@ int main(int argc, char **argv)
     iopts.plugins = ph;
     iopts.service_api_key = service_key;
     iopts.e7 = e7;
+    iopts.core = core;
+    iopts.config_path = config_path; /* SIGHUP reload (ADR-005 / K15) */
     if (store) {
         iopts.state = store;
     }
     if (once) {
         iopts.max_accepts = 1;
     }
-
-    /* HUP reloads config values for next bind only after restart in P1.4a;
-     * live rebind lands later. Still drain flag so tests of install work. */
-    (void)edgehost_hup_take();
 
     rc = edge_iouring_run(edgecore_config(core), &iopts);
     if (e7) {

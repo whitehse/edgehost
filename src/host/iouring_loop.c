@@ -8,11 +8,14 @@
 #include "edge_iouring.h"
 
 #include "edge_auth.h"
+#include "edge_config.h"
+#include "edge_config_hup.h"
 #include "edge_http1_serve.h"
 #include "edge_pq_sidecar.h"
 #include "edge_state.h"
 #include "edge_tls.h"
 #include "edge_ws.h"
+#include "edgecore.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -105,6 +108,9 @@ typedef struct {
     struct sockaddr_storage    e7_client_addr;
     socklen_t                  e7_client_addr_len;
     uint64_t                   mono_ms;
+    /* Durable shadow when HUP reloads without edgecore (opts->core NULL). */
+    edge_config_t              hup_shadow;
+    int                        hup_shadow_valid;
 } server_t;
 
 static int promote_to_ws(server_t *srv, conn_t *c);
@@ -132,6 +138,66 @@ void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
     o->plugins = NULL;
     o->service_api_key = NULL;
     o->e7 = NULL;
+    o->config_path = NULL;
+    o->core = NULL;
+}
+
+/**
+ * SIGHUP: reload YAML, apply edgecore (if any), state ns flags, e7 allowlist.
+ * Listen sockets are not rebound (log inside e7_callhome_apply_config).
+ */
+static void try_hup_reload(server_t *srv)
+{
+    const char *path;
+    char err[160];
+    const edge_config_t *applied = NULL;
+
+    if (!srv || !srv->opts || !edgehost_hup_take()) {
+        return;
+    }
+    path = srv->opts->config_path;
+    if (!path || !path[0]) {
+        fprintf(stderr,
+                "edgehost: SIGHUP ignored (no config_path on iouring opts)\n");
+        return;
+    }
+
+    if (srv->opts->core) {
+        if (edgehost_reload_config(srv->opts->core, path, err, sizeof(err)) !=
+            0) {
+            fprintf(stderr, "edgehost: SIGHUP reload failed: %s\n", err);
+            return;
+        }
+        applied = edgecore_config(srv->opts->core);
+        fprintf(stderr, "edgehost: SIGHUP config applied gen=%llu\n",
+                applied ? (unsigned long long)applied->generation : 0ull);
+    } else {
+        if (edge_config_load_yaml_path(path, &srv->hup_shadow, err,
+                                       sizeof(err)) != 0) {
+            fprintf(stderr, "edgehost: SIGHUP load failed: %s\n", err);
+            return;
+        }
+        if (edge_config_validate(&srv->hup_shadow, err, sizeof(err)) != 0) {
+            fprintf(stderr, "edgehost: SIGHUP validate failed: %s\n", err);
+            return;
+        }
+        srv->hup_shadow_valid = 1;
+        applied = &srv->hup_shadow;
+        fprintf(stderr,
+                "edgehost: SIGHUP config loaded (no edgecore; state/e7 only)\n");
+    }
+
+    if (!applied) {
+        return;
+    }
+    if (srv->store) {
+        edge_state_apply_config(srv->store, applied);
+    }
+    if (srv->e7) {
+        (void)edge_e7_callhome_apply_config(srv->e7, applied);
+    }
+    /* Keep srv.cfg pointing at live applied config. */
+    srv->cfg = applied;
 }
 
 static uint64_t pack_ud3(uint8_t domain, uint32_t op, uint32_t slot)
@@ -984,6 +1050,8 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         ts.tv_nsec = 200 * 1000 * 1000L;
         rc = io_uring_wait_cqe_timeout(&srv.ring, &cqe, &ts);
         srv.mono_ms = mono_now_ms();
+        /* ADR-005 / K15: SIGHUP → shadow YAML → apply edgecore + state + e7 */
+        try_hup_reload(&srv);
         if (rc == -ETIME || rc == -EAGAIN) {
             if (should_stop(&srv)) {
                 break;

@@ -86,6 +86,10 @@ struct edge_e7_callhome {
     edge_ws_hub_t       *hub;
 
     int                  listen_fd;
+    /* Bound listen coords (for SIGHUP change detection; no live rebind). */
+    char                 bound_host[EDGE_CONFIG_HOST_MAX];
+    uint16_t             bound_port;
+    int                  bound_enabled;
     edge_e7_session_t   *sessions;
     uint32_t             max_sessions;
     edge_e7_callhome_stats_t stats;
@@ -259,6 +263,10 @@ static void put_config_json(edge_e7_callhome_t *ch,
     }
 }
 
+/**
+ * Upsert YAML shelves into runtime (YAML MAC wins for listed entries).
+ * Does not remove runtime-only shelves — used for create seed and merge.
+ */
 static void seed_runtime_from_yaml(edge_e7_callhome_t *ch)
 {
     uint32_t i;
@@ -269,6 +277,7 @@ static void seed_runtime_from_yaml(edge_e7_callhome_t *ch)
     for (i = 0; i < ch->cfg->e7_shelf_count; i++) {
         char norm[EDGE_E7_MAC_MAX];
         edge_e7_runtime_shelf_t *rs;
+        int created = 0;
 
         if (ch->cfg->e7_shelves[i].mac[0] == '\0') {
             continue;
@@ -277,22 +286,59 @@ static void seed_runtime_from_yaml(edge_e7_callhome_t *ch)
                                   sizeof(norm)) != 0) {
             continue;
         }
-        if (runtime_find(ch, norm)) {
-            continue;
-        }
-        rs = runtime_alloc(ch);
+        rs = runtime_find(ch, norm);
         if (!rs) {
-            break;
+            rs = runtime_alloc(ch);
+            if (!rs) {
+                break;
+            }
+            created = 1;
+            memcpy(rs->mac, norm, sizeof(rs->mac));
         }
-        memcpy(rs->mac, norm, sizeof(rs->mac));
         if (ch->cfg->e7_shelves[i].shelf_id[0]) {
             snprintf(rs->label, sizeof(rs->label), "%s",
                      ch->cfg->e7_shelves[i].shelf_id);
+        } else if (created) {
+            rs->label[0] = '\0';
+        } else {
+            /* merge: YAML empty label clears? keep prior unless replace path */
+            rs->label[0] = '\0';
         }
         rs->enabled = ch->cfg->e7_shelves[i].enabled ? 1 : 0;
         rs->from_yaml = 1;
         put_config_json(ch, rs);
     }
+}
+
+static void runtime_clear_all(edge_e7_callhome_t *ch)
+{
+    if (!ch) {
+        return;
+    }
+    memset(ch->runtime, 0, sizeof(ch->runtime));
+    ch->runtime_count = 0;
+}
+
+static int e7_transport_is_ssh(const char *t)
+{
+    /* Case-insensitive "ssh" without strcasecmp (portable). */
+    char a, b, c;
+    if (!t || !t[0] || !t[1] || !t[2] || t[3] != '\0') {
+        return 0;
+    }
+    a = t[0];
+    b = t[1];
+    c = t[2];
+    if (a >= 'A' && a <= 'Z') {
+        a = (char)(a - 'A' + 'a');
+    }
+    if (b >= 'A' && b <= 'Z') {
+        b = (char)(b - 'A' + 'a');
+    }
+    if (c >= 'A' && c <= 'Z') {
+        c = (char)(c - 'A' + 'a');
+    }
+    return a == 's' && b == 's' && c == 'h';
 }
 
 static edge_e7_session_t *session_find_by_mac(edge_e7_callhome_t *ch,
@@ -592,6 +638,49 @@ static int lab_v1_state_key(const char *mac_colon, const char *xml, size_t len,
     return -1;
 }
 
+/**
+ * map.dynamic key for ont-event when lon/lat (or longitude/latitude) present.
+ * @return 0 if geo fields present and key built, -1 otherwise.
+ */
+static int lab_v1_map_key(const char *mac_colon, const char *xml, size_t len,
+                          char *key, size_t key_sz)
+{
+    char mac[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char ont_id[EDGE_E7_AID_MAX];
+    char ont_key[EDGE_E7_AID_MAX];
+    char lon_s[64];
+    char lat_s[64];
+    int n;
+
+    if (!mac_colon || !xml || !key || key_sz == 0 || len == 0) {
+        return -1;
+    }
+    if (!xml_has_tag(xml, len, "ont-event")) {
+        return -1;
+    }
+    lon_s[0] = lat_s[0] = '\0';
+    if (xml_tag_text(xml, len, "lon", lon_s, sizeof(lon_s)) != 0) {
+        (void)xml_tag_text(xml, len, "longitude", lon_s, sizeof(lon_s));
+    }
+    if (xml_tag_text(xml, len, "lat", lat_s, sizeof(lat_s)) != 0) {
+        (void)xml_tag_text(xml, len, "latitude", lat_s, sizeof(lat_s));
+    }
+    if (lon_s[0] == '\0' || lat_s[0] == '\0') {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac_colon, mac, sizeof(mac)) != 0 ||
+        edge_e7_mac_to_key_seg(mac, mac_key, sizeof(mac_key)) != 0) {
+        return -1;
+    }
+    if (xml_tag_text(xml, len, "ont-id", ont_id, sizeof(ont_id)) != 0 ||
+        edge_e7_aid_to_key_seg(ont_id, ont_key, sizeof(ont_key)) != 0) {
+        return -1;
+    }
+    n = snprintf(key, key_sz, "ont/%s/%s", mac_key, ont_key);
+    return (n > 0 && (size_t)n < key_sz) ? 0 : -1;
+}
+
 static void session_clear_nc(edge_e7_session_t *s)
 {
 #if EDGEHOST_HAVE_LIBNETCONF
@@ -767,6 +856,11 @@ static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (lab_v1_state_key(s->identity.mac, n->xml, n->xml_len, key,
                          sizeof(key)) == 0) {
         notify_coalesce(ch, "net.pon", key);
+    }
+    /* PR-9: coalesce map.dynamic ONT mirror when coords present (apply put both). */
+    if (lab_v1_map_key(s->identity.mac, n->xml, n->xml_len, key, sizeof(key)) ==
+        0) {
+        notify_coalesce(ch, "map.dynamic", key);
     }
 }
 
@@ -1163,6 +1257,15 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
     if (!opts || !opts->cfg || !opts->cfg->e7_enabled) {
         return NULL;
     }
+    /* PR-8 scaffold: SSH Call Home not implemented until libassh linked. */
+    if (e7_transport_is_ssh(opts->cfg->e7_transport)) {
+#if !EDGEHOST_E7_SSH_AVAILABLE
+        fprintf(stderr,
+                "edgehost: SSH Call Home requires libnetconf libassh "
+                "(PR-8 pending; EDGEHOST_E7_SSH_AVAILABLE=0)\n");
+        return NULL;
+#endif
+    }
     max_s = opts->cfg->e7_max_sessions;
     if (max_s == 0) {
         max_s = EDGE_E7_MAX_SESSIONS;
@@ -1192,6 +1295,9 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
     ch->state = opts->state;
     ch->hub = opts->hub;
     ch->listen_fd = -1;
+    ch->bound_host[0] = '\0';
+    ch->bound_port = 0;
+    ch->bound_enabled = 0;
     ch->max_sessions = max_s;
     ch->dirty_cap = dirty_cap;
     ch->sessions =
@@ -1237,6 +1343,57 @@ void edge_e7_callhome_destroy(edge_e7_callhome_t *ch)
     free(ch);
 }
 
+int edge_e7_callhome_apply_config(edge_e7_callhome_t *ch,
+                                  const edge_config_t *new_cfg)
+{
+    const char *policy;
+    int replace_all = 0;
+    const char *old_host;
+    uint16_t old_port;
+    int old_enabled;
+
+    if (!ch || !new_cfg) {
+        return -1;
+    }
+
+    old_host = ch->bound_host[0]
+                   ? ch->bound_host
+                   : (ch->cfg && ch->cfg->e7_listen_host[0]
+                          ? ch->cfg->e7_listen_host
+                          : "127.0.0.1");
+    old_port = ch->bound_port
+                   ? ch->bound_port
+                   : (ch->cfg && ch->cfg->e7_listen_port
+                          ? ch->cfg->e7_listen_port
+                          : 4334u);
+    old_enabled = ch->bound_enabled
+                      ? 1
+                      : (ch->cfg ? (ch->cfg->e7_enabled ? 1 : 0) : 0);
+
+    if (strcmp(old_host, new_cfg->e7_listen_host[0] ? new_cfg->e7_listen_host
+                                                    : "127.0.0.1") != 0 ||
+        old_port != (new_cfg->e7_listen_port ? new_cfg->e7_listen_port
+                                             : 4334u) ||
+        old_enabled != (new_cfg->e7_enabled ? 1 : 0)) {
+        fprintf(stderr,
+                "edgehost: e7_callhome listen host/port/enabled changed on "
+                "reload — restart required to rebind (allowlist still applied)\n");
+    }
+
+    ch->cfg = new_cfg;
+    policy = new_cfg->e7_reload_policy[0] ? new_cfg->e7_reload_policy : "merge";
+    if (strcmp(policy, "replace_all") == 0) {
+        replace_all = 1;
+    }
+
+    if (replace_all) {
+        runtime_clear_all(ch);
+    }
+    /* merge and replace_all: reseed/upsert YAML shelves (YAML MAC wins). */
+    seed_runtime_from_yaml(ch);
+    return 0;
+}
+
 void edge_e7_callhome_set_hub(edge_e7_callhome_t *ch, edge_ws_hub_t *hub)
 {
     if (!ch) {
@@ -1267,6 +1424,15 @@ int edge_e7_callhome_bind(edge_e7_callhome_t *ch)
 
     host = ch->cfg->e7_listen_host[0] ? ch->cfg->e7_listen_host : "127.0.0.1";
     port = ch->cfg->e7_listen_port ? ch->cfg->e7_listen_port : 4334u;
+
+    if (e7_transport_is_ssh(ch->cfg->e7_transport)) {
+#if !EDGEHOST_E7_SSH_AVAILABLE
+        fprintf(stderr,
+                "edgehost: e7_callhome bind: SSH Call Home requires "
+                "libnetconf libassh (PR-8 pending)\n");
+        return -1;
+#endif
+    }
 
     fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
@@ -1304,8 +1470,12 @@ int edge_e7_callhome_bind(edge_e7_callhome_t *ch)
         return -1;
     }
     ch->listen_fd = fd;
-    fprintf(stderr, "edgehost: e7_callhome listening on %s:%u (raw)\n", host,
-            (unsigned)port);
+    snprintf(ch->bound_host, sizeof(ch->bound_host), "%s", host);
+    ch->bound_port = port;
+    ch->bound_enabled = 1;
+    fprintf(stderr, "edgehost: e7_callhome listening on %s:%u (%s)\n", host,
+            (unsigned)port,
+            e7_transport_is_ssh(ch->cfg->e7_transport) ? "ssh" : "raw");
     return 0;
 }
 

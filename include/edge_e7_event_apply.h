@@ -94,6 +94,11 @@ int edge_e7_identity_parse(const char *xml, size_t len,
  *   ont-event:  ont-id, pon-id, oper-state → key e7/{mac_key}/ont/{ont_key}
  *   pon-alarm:  pon-id, alarm, severity    → key e7/{mac_key}/pon/{pon_key}
  *
+ * Optional ONT geometry (PR-9 partial): if both &lt;lon&gt;/&lt;lat&gt; (or
+ * longitude/latitude) are present and finite, also put map.dynamic key
+ * `ont/{mac_key}/{ont_key}` with dynamic_feed-shaped JSON. Map put failure
+ * (ns disabled) is ignored when net.pon put succeeded.
+ *
  * @p mac_colon is the shelf MAC (any accepted normalize form); stored in JSON
  * as lowercase colon MAC. eventTime from the notification is copied when present.
  * @return EDGE_E7_APPLY_OK or error; state put errors map to STATE_ERR

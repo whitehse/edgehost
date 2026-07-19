@@ -205,7 +205,8 @@ target_include_directories(edgehost_iouring PUBLIC
 )
 target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
 target_link_libraries(edgehost_iouring PUBLIC
-  edgecore edgehost_http edgehost_tls edgehost_e7 ${LIBURING_LIBRARY})
+  edgecore edgehost_config edgehost_http edgehost_tls edgehost_e7
+  ${LIBURING_LIBRARY})
 
 # --- Host: class-A sim_main ---
 if(Libsim_FOUND AND LIBSIM_LIBRARY)

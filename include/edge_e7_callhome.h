@@ -5,14 +5,16 @@
  * Host owns TCP accept + Calix identity parse (MAC primary). After identity,
  * libnetconf NETCONF_ROLE_CLIENT runs delimiter-framed hellos to SESSION_OPEN,
  * then create_subscription (allowlisted / auto_subscribe_unknown). Notifications
- * apply into net.pon; inventory/session uses put_and_notify. K16 dirty-set
- * coalesces high-rate ONT/PON STATE_CHANGED (flush ≤100 ms on tick).
+ * apply into net.pon (+ map.dynamic when lon/lat present); inventory/session
+ * uses put_and_notify. K16 dirty-set coalesces high-rate ONT/PON (and map)
+ * STATE_CHANGED (flush ≤100 ms on tick).
  *
  * REST host APIs (PR-5) expose status/shelves/commands for HTTP /api/v1/e7/.
  * Runtime allowlist upsert is non-durable (not written back to YAML).
+ * SIGHUP: edge_e7_callhome_apply_config with reload_policy merge|replace_all.
  *
  * Requires EDGEHOST_HAVE_LIBNETCONF (sibling libnetconf). Without it, create
- * returns NULL.
+ * returns NULL. transport=ssh requires EDGEHOST_E7_SSH_AVAILABLE (PR-8).
  */
 #ifndef EDGE_E7_CALLHOME_H
 #define EDGE_E7_CALLHOME_H
@@ -32,6 +34,15 @@ extern "C" {
 
 #ifndef EDGEHOST_HAVE_LIBNETCONF
 #define EDGEHOST_HAVE_LIBNETCONF 0
+#endif
+
+/**
+ * Production SSH Call Home (RFC 8071 + libassh) — gated until libnetconf
+ * HAVE_LIBASSH lands (PR-8). Host scaffolding accepts transport: ssh in YAML
+ * but create/bind fail until this is 1.
+ */
+#ifndef EDGEHOST_E7_SSH_AVAILABLE
+#define EDGEHOST_E7_SSH_AVAILABLE 0
 #endif
 
 /** Session table capacity (design: ~150, default max_sessions 160). */
@@ -110,11 +121,31 @@ typedef struct {
 
 /**
  * Create Call Home engine. Fails (NULL) if libnetconf missing, cfg NULL,
- * e7 disabled, max_sessions==0, or RSS budget exceeded by estimate.
+ * e7 disabled, max_sessions==0, RSS budget exceeded by estimate, or
+ * transport=ssh while EDGEHOST_E7_SSH_AVAILABLE is 0 (PR-8 pending).
  */
 edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts);
 
 void edge_e7_callhome_destroy(edge_e7_callhome_t *ch);
+
+/**
+ * Apply reloaded config allowlist (K15 / SIGHUP).
+ *
+ * Uses new_cfg->e7_reload_policy:
+ *   - merge (default): for each YAML shelf, upsert runtime (YAML MAC wins for
+ *     listed entries); runtime-only shelves not in YAML are retained.
+ *   - replace_all: clear runtime table and reseed from YAML.
+ *
+ * Does not tear down the listen socket. If host/port/enabled differ from the
+ * bound listen (or previously applied cfg), logs a warning that restart is
+ * required; allowlist is still applied.
+ *
+ * @p new_cfg is not copied — must outlive the instance (typically
+ * edgecore_config after shadow apply). Updates the internal cfg pointer.
+ * @return 0 ok, -1 bad args.
+ */
+int edge_e7_callhome_apply_config(edge_e7_callhome_t *ch,
+                                  const edge_config_t *new_cfg);
 
 /**
  * Attach or replace WS hub (not owned). Used by iouring after hub create so

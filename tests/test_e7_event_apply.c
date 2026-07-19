@@ -204,6 +204,59 @@ static void test_apply_pon_alarm(void)
     printf("  PASS: apply pon alarm\n");
 }
 
+static void test_apply_ont_geo_map_dynamic(void)
+{
+    edge_state_store_t *st = edge_state_create();
+    size_t len = 0, n = 0;
+    char *xml = load_file("tests/fixtures/e7/lab_v1_ont_up_geo.xml", &len);
+    char buf[768];
+    edge_e7_apply_err_t ae;
+    const char *pon_key = "e7/00-02-5d-d9-21-47/ont/1-1-3-12";
+    const char *map_key = "ont/00-02-5d-d9-21-47/1-1-3-12";
+
+    assert(st && xml);
+    assert(edge_state_ns_set_enabled(st, "net.pon", 1) == 0);
+    assert(edge_state_ns_set_enabled(st, "map.dynamic", 1) == 0);
+
+    ae = edge_e7_event_apply_lab_v1(st, "00:02:5d:d9:21:47", xml, len);
+    assert(ae == EDGE_E7_APPLY_OK);
+
+    assert(edge_state_get(st, "net.pon", pon_key, buf, sizeof(buf), &n) ==
+           EDGE_STATE_OK);
+    assert(strstr(buf, "\"oper_state\":\"up\"") != NULL);
+
+    assert(edge_state_get(st, "map.dynamic", map_key, buf, sizeof(buf), &n) ==
+           EDGE_STATE_OK);
+    assert(strstr(buf, "\"id\":\"00-02-5d-d9-21-47/1-1-3-12\"") != NULL);
+    assert(strstr(buf, "\"class\":\"alert\"") != NULL);
+    assert(strstr(buf, "\"status\":\"ok\"") != NULL);
+    assert(strstr(buf, "\"ont_id\":\"1/1/3/12\"") != NULL);
+    assert(strstr(buf, "\"oper_state\":\"up\"") != NULL);
+    assert(strstr(buf, "\"source\":\"lab.v1\"") != NULL);
+    assert(strstr(buf, "\"updated_at\":\"2026-07-19T12:15:00Z\"") != NULL);
+    assert(strstr(buf, "\"type\":\"Point\"") != NULL);
+    assert(strstr(buf, "-95.99") != NULL);
+    assert(strstr(buf, "36.15") != NULL);
+
+    /* map.dynamic disabled: net.pon still succeeds; no map key required */
+    {
+        edge_state_store_t *st2 = edge_state_create();
+        assert(st2);
+        assert(edge_state_ns_set_enabled(st2, "net.pon", 1) == 0);
+        /* map.dynamic stays default-enabled on create — disable it */
+        assert(edge_state_ns_set_enabled(st2, "map.dynamic", 0) == 0);
+        ae = edge_e7_event_apply_lab_v1(st2, "00:02:5d:d9:21:47", xml, len);
+        assert(ae == EDGE_E7_APPLY_OK);
+        assert(edge_state_get(st2, "net.pon", pon_key, buf, sizeof(buf), &n) ==
+               EDGE_STATE_OK);
+        edge_state_destroy(st2);
+    }
+
+    free(xml);
+    edge_state_destroy(st);
+    printf("  PASS: apply ont geo → net.pon + map.dynamic\n");
+}
+
 static void test_net_pon_must_be_enabled(void)
 {
     edge_state_store_t *st = edge_state_create();
@@ -251,6 +304,7 @@ int main(void)
     test_identity_parse();
     test_apply_ont_up_down();
     test_apply_pon_alarm();
+    test_apply_ont_geo_map_dynamic();
     test_net_pon_must_be_enabled();
     test_unknown_and_bad_args();
     printf("All e7_event_apply tests passed\n");
