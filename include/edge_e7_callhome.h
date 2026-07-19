@@ -1,12 +1,15 @@
 /**
  * @file edge_e7_callhome.h
- * @brief E7 NETCONF Call Home listen, identity, subscribe, lab.v1 apply (PR-4b).
+ * @brief E7 NETCONF Call Home listen, identity, subscribe, lab.v1 apply, REST (PR-5).
  *
  * Host owns TCP accept + Calix identity parse (MAC primary). After identity,
  * libnetconf NETCONF_ROLE_CLIENT runs delimiter-framed hellos to SESSION_OPEN,
  * then create_subscription (allowlisted / auto_subscribe_unknown). Notifications
  * apply into net.pon; inventory/session uses put_and_notify. K16 dirty-set
  * coalesces high-rate ONT/PON STATE_CHANGED (flush ≤100 ms on tick).
+ *
+ * REST host APIs (PR-5) expose status/shelves/commands for HTTP /api/v1/e7/.
+ * Runtime allowlist upsert is non-durable (not written back to YAML).
  *
  * Requires EDGEHOST_HAVE_LIBNETCONF (sibling libnetconf). Without it, create
  * returns NULL.
@@ -41,6 +44,14 @@ extern "C" {
 #define EDGE_E7_DIRTY_CAP_DEFAULT 8192
 /** Coalesce flush interval (ms) — design ≤100. */
 #define EDGE_E7_COALESCE_MS 100u
+/** Max in-flight placeholder commands per shelf (design). */
+#define EDGE_E7_CMD_MAX_PER_SHELF 4
+/** cmd_id buffer (e.g. "c00000001") + NUL. */
+#define EDGE_E7_CMD_ID_MAX 24
+/** Global pending command correlation slots. */
+#define EDGE_E7_CMD_TABLE_MAX 64
+/** Runtime allowlist capacity (YAML seed + REST upserts). */
+#define EDGE_E7_RUNTIME_SHELVES_MAX EDGE_CONFIG_E7_SHELVES_MAX
 
 typedef enum {
     EDGE_E7_SESS_EMPTY = 0,
@@ -67,7 +78,22 @@ typedef struct {
     uint64_t coalesce_flush;  /* dirty-set flush cycles */
     uint64_t coalesce_overflow; /* dirty table full → force notify */
     uint64_t subscriptions_ok; /* create-subscription rpc-ok */
+    uint64_t commands_ok;     /* command RPC completed ok */
+    uint64_t commands_err;    /* command submit/reply errors */
+    uint64_t ws_fanouts;      /* STATE_CHANGED enqueues from CH path */
 } edge_e7_callhome_stats_t;
+
+/**
+ * One runtime allowlist entry (YAML seed + REST). Non-durable across restart
+ * unless re-seeded from YAML.
+ */
+typedef struct {
+    int  used;
+    char mac[EDGE_E7_MAC_MAX]; /* normalized colon form */
+    char label[EDGE_CONFIG_E7_SHELF_ID_MAX];
+    int  enabled; /* 1 allow subscribe; 0 present but disabled */
+    int  from_yaml;
+} edge_e7_runtime_shelf_t;
 
 typedef struct edge_e7_callhome edge_e7_callhome_t;
 
@@ -154,6 +180,84 @@ void edge_e7_netconf_profile(void *cfg_out /* netconf_config_t * when linked */)
 
 /** Rough per-session RSS estimate used for budget check (bytes). */
 size_t edge_e7_session_rss_estimate(void);
+
+/* ---- REST host APIs (PR-5) ---- */
+
+/**
+ * Build GET /api/v1/e7/status JSON into @p buf (NUL-terminated).
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_e7_callhome_status_json(const edge_e7_callhome_t *ch, char *buf,
+                                 size_t buf_sz);
+
+/**
+ * Build GET /api/v1/e7/shelves JSON (config allowlist + live session).
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_e7_callhome_shelves_json(const edge_e7_callhome_t *ch, char *buf,
+                                  size_t buf_sz);
+
+/**
+ * Build GET /api/v1/e7/shelves/{mac} detail JSON.
+ * @return bytes written excl NUL, or -1 (bad mac / not found → -2).
+ */
+int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
+                                char *buf, size_t buf_sz);
+
+/**
+ * Runtime allowlist upsert (non-durable). Also writes
+ * inventory/e7/{mac_key}/config with a durability note.
+ * @p label may be NULL; @p enabled 0/1.
+ * @return 0 ok, -1 bad mac / full / error.
+ */
+int edge_e7_callhome_allowlist_upsert(edge_e7_callhome_t *ch, const char *mac,
+                                      const char *label, int enabled);
+
+/**
+ * Remove runtime allowlist entry + inventory config; disconnect live session.
+ * @return 0 ok, -1 not found / bad mac.
+ */
+int edge_e7_callhome_allowlist_delete(edge_e7_callhome_t *ch, const char *mac);
+
+/**
+ * Force-close session for MAC if any (no allowlist change).
+ * @return 0 closed or already absent, -1 bad mac.
+ */
+int edge_e7_callhome_disconnect(edge_e7_callhome_t *ch, const char *mac);
+
+/**
+ * Placeholder command: send inner rpc_xml (or op shortcut) on OPEN session.
+ * Tracks message_id → cmd_id; result lands under net.pon e7/{mac}/cmd/{cmd_id}.
+ *
+ * @p rpc_xml: inner NETCONF op body (not outer &lt;rpc&gt;). If NULL/empty and
+ * @p op is "get-config", sends netconf_get_config(running, NULL).
+ * @p cmd_id_out receives the cmd id on success.
+ * @p http_status set to suggested HTTP status (202/409/503/429/400).
+ * @return 0 accepted, -1 rejected (see http_status).
+ */
+int edge_e7_callhome_command_submit(edge_e7_callhome_t *ch, const char *mac,
+                                    const char *rpc_xml, size_t rpc_len,
+                                    const char *op, char *cmd_id_out,
+                                    size_t cmd_id_sz, int *http_status);
+
+/**
+ * Build GET command result JSON from net.pon (or pending in-memory).
+ * @return bytes written excl NUL, or -1 not found / bad args.
+ */
+int edge_e7_callhome_command_json(const edge_e7_callhome_t *ch, const char *mac,
+                                  const char *cmd_id, char *buf, size_t buf_sz);
+
+/**
+ * Paginated ONT list for shelf (keys under net.pon e7/{mac_key}/ont/).
+ * Optional cursor is a key prefix skip (exclusive); limit 0 → default 64.
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_e7_callhome_onts_json(const edge_e7_callhome_t *ch, const char *mac,
+                               const char *cursor, size_t limit, char *buf,
+                               size_t buf_sz);
+
+/** Session state name for JSON (static string). */
+const char *edge_e7_sess_state_name(edge_e7_sess_state_t st);
 
 #ifdef __cplusplus
 }

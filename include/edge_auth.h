@@ -62,7 +62,14 @@ typedef enum {
     EDGE_RES_STATE_LIST,
     EDGE_RES_WS_STREAM,
     EDGE_RES_PACKAGES,
-    EDGE_RES_OPENAI /* openai_proxy /v1 routes */
+    EDGE_RES_OPENAI, /* openai_proxy /v1 routes */
+    /** E7 Call Home REST: GET status/shelves/commands/onts (employee+). */
+    EDGE_RES_E7_GET,
+    /**
+     * E7 Call Home REST: PUT/DELETE shelves, disconnect, POST commands
+     * (employee_admin only).
+     */
+    EDGE_RES_E7_ADMIN
 } edge_auth_resource_t;
 
 typedef struct {

@@ -695,6 +695,91 @@ static void test_reject_unknown_mac(void)
     printf("  PASS: reject unknown MAC (not allowlisted)\n");
 }
 
+static void test_status_json_and_allowlist(void)
+{
+    edge_config_t cfg;
+    edge_e7_callhome_opts_t opts;
+    edge_e7_callhome_t *ch;
+    edge_state_store_t *st;
+    char buf[4096];
+    int n;
+    char val[512];
+    size_t vlen = 0;
+
+    edge_config_defaults(&cfg);
+    cfg.e7_enabled = 1;
+    cfg.e7_max_sessions = 4;
+    cfg.e7_rss_budget_bytes = 256u * 1024u * 1024u;
+    cfg.e7_listen_host[0] = '\0';
+    snprintf(cfg.e7_listen_host, sizeof(cfg.e7_listen_host), "127.0.0.1");
+    cfg.e7_listen_port = 0; /* bind not required for this test */
+    cfg.e7_shelf_count = 1;
+    snprintf(cfg.e7_shelves[0].mac, sizeof(cfg.e7_shelves[0].mac),
+             "00:02:5d:d9:21:47");
+    snprintf(cfg.e7_shelves[0].shelf_id, sizeof(cfg.e7_shelves[0].shelf_id),
+             "yaml-seed");
+    cfg.e7_shelves[0].enabled = 1;
+
+    st = edge_state_create();
+    assert(st);
+    (void)edge_state_ns_set_enabled(st, "inventory", 1);
+    (void)edge_state_ns_set_enabled(st, "net.pon", 1);
+
+    memset(&opts, 0, sizeof(opts));
+    opts.cfg = &cfg;
+    opts.state = st;
+    opts.hub = NULL;
+    ch = edge_e7_callhome_create(&opts);
+    assert(ch);
+
+    n = edge_e7_callhome_status_json(ch, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"e7_accepts\"") != NULL);
+    assert(strstr(buf, "\"e7_sessions_open\"") != NULL);
+    assert(strstr(buf, "\"e7_rss_estimate\"") != NULL);
+    assert(strstr(buf, "\"runtime_shelves\":1") != NULL);
+
+    n = edge_e7_callhome_shelves_json(ch, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "00:02:5d:d9:21:47") != NULL);
+    assert(strstr(buf, "non-durable") != NULL);
+
+    /* REST upsert another MAC (runtime-only) */
+    assert(edge_e7_callhome_allowlist_upsert(ch, "11-22-33-44-55-66", "lab-2",
+                                             1) == 0);
+    n = edge_e7_callhome_shelf_json(ch, "11:22:33:44:55:66", buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "lab-2") != NULL);
+    assert(strstr(buf, "\"configured\":true") != NULL);
+
+    assert(edge_state_get(st, "inventory", "e7/11-22-33-44-55-66/config", val,
+                          sizeof(val), &vlen) == EDGE_STATE_OK);
+    assert(strstr(val, "non-durable") != NULL);
+
+    assert(edge_e7_callhome_allowlist_delete(ch, "11:22:33:44:55:66") == 0);
+    assert(edge_e7_callhome_shelf_json(ch, "11:22:33:44:55:66", buf,
+                                       sizeof(buf)) == -2);
+
+    /* Command with no session → 409 */
+    {
+        char cmd_id[32];
+        int http_st = 0;
+        assert(edge_e7_callhome_command_submit(ch, "00:02:5d:d9:21:47",
+                                               "<get/>", 6, NULL, cmd_id,
+                                               sizeof(cmd_id), &http_st) != 0);
+        assert(http_st == 409);
+    }
+
+    n = edge_e7_callhome_onts_json(ch, "00:02:5d:d9:21:47", NULL, 0, buf,
+                                   sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"onts\":[") != NULL);
+
+    edge_e7_callhome_destroy(ch);
+    edge_state_destroy(st);
+    printf("  PASS: status JSON + runtime allowlist + empty onts\n");
+}
+
 #endif /* EDGEHOST_HAVE_LIBNETCONF */
 
 int main(void)
@@ -708,6 +793,7 @@ int main(void)
     test_identity_hello_open();
     test_subscribe_apply_ont_up();
     test_reject_unknown_mac();
+    test_status_json_and_allowlist();
     printf("All e7_callhome tests passed.\n");
     return 0;
 #endif

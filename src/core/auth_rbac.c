@@ -377,6 +377,8 @@ const char *edge_auth_resource_name(edge_auth_resource_t r)
     case EDGE_RES_WS_STREAM:    return "WS_STREAM";
     case EDGE_RES_PACKAGES:     return "PACKAGES";
     case EDGE_RES_OPENAI:       return "OPENAI";
+    case EDGE_RES_E7_GET:       return "E7_GET";
+    case EDGE_RES_E7_ADMIN:     return "E7_ADMIN";
     default:                    return "NONE";
     }
 }
@@ -416,8 +418,7 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
     if (!p || !p->authenticated) {
         return EDGE_AUTH_DENY;
     }
-    if (edge_auth_role_has(p->roles, EDGE_ROLE_EMPLOYEE) ||
-        edge_auth_role_has(p->roles, EDGE_ROLE_EMPLOYEE_ADMIN)) {
+    if (edge_auth_role_has(p->roles, EDGE_ROLE_EMPLOYEE_ADMIN)) {
         switch (res) {
         case EDGE_RES_STATE_GET:
         case EDGE_RES_STATE_PUT:
@@ -426,7 +427,26 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
         case EDGE_RES_WS_STREAM:
         case EDGE_RES_PACKAGES:
         case EDGE_RES_OPENAI:
+        case EDGE_RES_E7_GET:
+        case EDGE_RES_E7_ADMIN:
             return EDGE_AUTH_ALLOW;
+        default:
+            return EDGE_AUTH_DENY;
+        }
+    }
+    if (edge_auth_role_has(p->roles, EDGE_ROLE_EMPLOYEE)) {
+        switch (res) {
+        case EDGE_RES_STATE_GET:
+        case EDGE_RES_STATE_PUT:
+        case EDGE_RES_STATE_DELETE:
+        case EDGE_RES_STATE_LIST:
+        case EDGE_RES_WS_STREAM:
+        case EDGE_RES_PACKAGES:
+        case EDGE_RES_OPENAI:
+        case EDGE_RES_E7_GET:
+            return EDGE_AUTH_ALLOW;
+        case EDGE_RES_E7_ADMIN:
+            return EDGE_AUTH_DENY;
         default:
             return EDGE_AUTH_DENY;
         }
@@ -839,6 +859,17 @@ edge_auth_resource_t edge_auth_classify(const char *method, const char *path,
     }
     if (strncmp(path, "/v1/", 4) == 0 || strcmp(path, "/v1") == 0) {
         return EDGE_RES_OPENAI;
+    }
+    /* E7 Call Home REST: /api/v1/e7 and /api/v1/e7/... */
+    if (strncmp(path, "/api/v1/e7", 10) == 0 &&
+        (path[10] == '\0' || path[10] == '/' || path[10] == '?')) {
+        if (strcmp(method, "GET") == 0) {
+            return EDGE_RES_E7_GET;
+        }
+        if (strcmp(method, "PUT") == 0 || strcmp(method, "DELETE") == 0 ||
+            strcmp(method, "POST") == 0) {
+            return EDGE_RES_E7_ADMIN;
+        }
     }
     return EDGE_RES_NONE;
 }

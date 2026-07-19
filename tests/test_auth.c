@@ -487,6 +487,51 @@ static void test_http_proxy_headers(void)
     printf("  PASS: HTTP proxy headers\n");
 }
 
+static void test_e7_classify_and_rbac(void)
+{
+    edge_principal_t emp, admin;
+
+    assert(edge_auth_classify("GET", "/api/v1/e7/status", 0) == EDGE_RES_E7_GET);
+    assert(edge_auth_classify("GET", "/api/v1/e7/shelves", 0) ==
+           EDGE_RES_E7_GET);
+    assert(edge_auth_classify("GET", "/api/v1/e7/shelves/00:02:5d:d9:21:47",
+                              0) == EDGE_RES_E7_GET);
+    assert(edge_auth_classify("GET",
+                              "/api/v1/e7/shelves/00-02-5d-d9-21-47/commands/c1",
+                              0) == EDGE_RES_E7_GET);
+    assert(edge_auth_classify("GET", "/api/v1/e7/shelves/aa:bb:cc:dd:ee:ff/onts",
+                              0) == EDGE_RES_E7_GET);
+    assert(edge_auth_classify("PUT", "/api/v1/e7/shelves/00:02:5d:d9:21:47",
+                              0) == EDGE_RES_E7_ADMIN);
+    assert(edge_auth_classify("DELETE", "/api/v1/e7/shelves/00:02:5d:d9:21:47",
+                              0) == EDGE_RES_E7_ADMIN);
+    assert(edge_auth_classify("POST",
+                              "/api/v1/e7/shelves/00:02:5d:d9:21:47/disconnect",
+                              0) == EDGE_RES_E7_ADMIN);
+    assert(edge_auth_classify("POST",
+                              "/api/v1/e7/shelves/00:02:5d:d9:21:47/commands",
+                              0) == EDGE_RES_E7_ADMIN);
+    assert(edge_auth_classify("PATCH", "/api/v1/e7/status", 0) == EDGE_RES_NONE);
+
+    edge_principal_clear(&emp);
+    emp.authenticated = 1;
+    emp.roles = EDGE_ROLE_EMPLOYEE;
+    assert(edge_auth_rbac_check(&emp, EDGE_RES_E7_GET, NULL, NULL) ==
+           EDGE_AUTH_ALLOW);
+    assert(edge_auth_rbac_check(&emp, EDGE_RES_E7_ADMIN, NULL, NULL) ==
+           EDGE_AUTH_DENY);
+
+    edge_principal_clear(&admin);
+    admin.authenticated = 1;
+    admin.roles = EDGE_ROLE_EMPLOYEE_ADMIN;
+    assert(edge_auth_rbac_check(&admin, EDGE_RES_E7_GET, NULL, NULL) ==
+           EDGE_AUTH_ALLOW);
+    assert(edge_auth_rbac_check(&admin, EDGE_RES_E7_ADMIN, NULL, NULL) ==
+           EDGE_AUTH_ALLOW);
+
+    printf("  PASS: e7 classify + rbac employee vs admin\n");
+}
+
 int main(void)
 {
     printf("edgehost_auth_test:\n");
@@ -498,6 +543,7 @@ int main(void)
     test_auth_host_from_env();
     test_proxy_sign_verify();
     test_http_proxy_headers();
+    test_e7_classify_and_rbac();
     printf("All auth tests PASSED\n");
     return 0;
 }

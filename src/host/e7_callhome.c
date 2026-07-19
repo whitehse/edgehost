@@ -1,6 +1,6 @@
 /**
  * @file e7_callhome.c
- * @brief Call Home listen + identity + subscribe + lab.v1 apply + K16 coalesce.
+ * @brief Call Home listen + identity + subscribe + lab.v1 apply + K16 + REST.
  */
 
 #define _GNU_SOURCE
@@ -70,6 +70,16 @@ typedef struct {
     char key[EDGE_STATE_KEY_MAX];
 } edge_e7_dirty_slot_t;
 
+typedef struct {
+    int      used;
+    int      complete;
+    uint32_t message_id;
+    int      shelf_slot;
+    char     mac[EDGE_E7_MAC_MAX];
+    char     cmd_id[EDGE_E7_CMD_ID_MAX];
+    uint64_t deadline_ms;
+} edge_e7_cmd_slot_t;
+
 struct edge_e7_callhome {
     const edge_config_t *cfg;
     edge_state_store_t  *state;
@@ -85,6 +95,14 @@ struct edge_e7_callhome {
     uint32_t              dirty_cap;
     uint32_t              dirty_used;
     uint64_t              last_flush_ms;
+
+    /* Runtime allowlist (YAML seed + REST; non-durable) */
+    edge_e7_runtime_shelf_t runtime[EDGE_E7_RUNTIME_SHELVES_MAX];
+    uint32_t                runtime_count;
+
+    /* Command correlation (message_id → cmd_id) */
+    edge_e7_cmd_slot_t cmds[EDGE_E7_CMD_TABLE_MAX];
+    uint32_t           cmd_seq;
 };
 
 /* ---- utilities ---- */
@@ -152,30 +170,163 @@ static void peer_to_str(const struct sockaddr *peer, socklen_t peer_len,
 }
 
 /**
- * Match shelves[] by normalized MAC.
+ * Match runtime allowlist by normalized MAC.
  * @return 1 allowlisted+enabled, 0 present but disabled, -1 not found.
  */
-static int shelf_lookup(const edge_config_t *cfg, const char *mac_norm)
+static int shelf_lookup_runtime(const edge_e7_callhome_t *ch,
+                                const char *mac_norm)
 {
     uint32_t i;
-    char norm[EDGE_E7_MAC_MAX];
 
-    if (!cfg || !mac_norm) {
+    if (!ch || !mac_norm) {
         return -1;
     }
-    for (i = 0; i < cfg->e7_shelf_count; i++) {
-        if (cfg->e7_shelves[i].mac[0] == '\0') {
+    for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+        if (!ch->runtime[i].used) {
             continue;
         }
-        if (edge_e7_mac_normalize(cfg->e7_shelves[i].mac, norm, sizeof(norm)) !=
-            0) {
-            continue;
-        }
-        if (strcmp(norm, mac_norm) == 0) {
-            return cfg->e7_shelves[i].enabled ? 1 : 0;
+        if (strcmp(ch->runtime[i].mac, mac_norm) == 0) {
+            return ch->runtime[i].enabled ? 1 : 0;
         }
     }
     return -1;
+}
+
+static edge_e7_runtime_shelf_t *runtime_find(edge_e7_callhome_t *ch,
+                                             const char *mac_norm)
+{
+    uint32_t i;
+    if (!ch || !mac_norm) {
+        return NULL;
+    }
+    for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+        if (ch->runtime[i].used && strcmp(ch->runtime[i].mac, mac_norm) == 0) {
+            return &ch->runtime[i];
+        }
+    }
+    return NULL;
+}
+
+static edge_e7_runtime_shelf_t *runtime_alloc(edge_e7_callhome_t *ch)
+{
+    uint32_t i;
+    if (!ch) {
+        return NULL;
+    }
+    for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+        if (!ch->runtime[i].used) {
+            memset(&ch->runtime[i], 0, sizeof(ch->runtime[i]));
+            ch->runtime[i].used = 1;
+            ch->runtime_count++;
+            return &ch->runtime[i];
+        }
+    }
+    return NULL;
+}
+
+static void put_config_json(edge_e7_callhome_t *ch,
+                            const edge_e7_runtime_shelf_t *rs)
+{
+    char mac_key[EDGE_E7_MAC_MAX];
+    char key[EDGE_STATE_KEY_MAX];
+    char json[512];
+    int n;
+    edge_state_err_t e;
+
+    if (!ch || !ch->state || !rs || !rs->used) {
+        return;
+    }
+    if (edge_e7_mac_to_key_seg(rs->mac, mac_key, sizeof(mac_key)) != 0) {
+        return;
+    }
+    n = snprintf(key, sizeof(key), "e7/%s/config", mac_key);
+    if (n < 0 || (size_t)n >= sizeof(key)) {
+        return;
+    }
+    n = snprintf(
+        json, sizeof(json),
+        "{\"v\":1,\"mac\":\"%s\",\"label\":\"%s\",\"enabled\":%s,"
+        "\"note\":\"runtime allowlist is non-durable; not written back to YAML\"}",
+        rs->mac, rs->label[0] ? rs->label : "", rs->enabled ? "true" : "false");
+    if (n < 0 || (size_t)n >= sizeof(json)) {
+        return;
+    }
+    e = edge_state_put_and_notify(ch->state, ch->hub, "inventory", key, json,
+                                  (size_t)n, NULL, 0);
+    if (e == EDGE_STATE_OK) {
+        ch->stats.state_puts++;
+        ch->stats.ws_fanouts++;
+    }
+}
+
+static void seed_runtime_from_yaml(edge_e7_callhome_t *ch)
+{
+    uint32_t i;
+
+    if (!ch || !ch->cfg) {
+        return;
+    }
+    for (i = 0; i < ch->cfg->e7_shelf_count; i++) {
+        char norm[EDGE_E7_MAC_MAX];
+        edge_e7_runtime_shelf_t *rs;
+
+        if (ch->cfg->e7_shelves[i].mac[0] == '\0') {
+            continue;
+        }
+        if (edge_e7_mac_normalize(ch->cfg->e7_shelves[i].mac, norm,
+                                  sizeof(norm)) != 0) {
+            continue;
+        }
+        if (runtime_find(ch, norm)) {
+            continue;
+        }
+        rs = runtime_alloc(ch);
+        if (!rs) {
+            break;
+        }
+        memcpy(rs->mac, norm, sizeof(rs->mac));
+        if (ch->cfg->e7_shelves[i].shelf_id[0]) {
+            snprintf(rs->label, sizeof(rs->label), "%s",
+                     ch->cfg->e7_shelves[i].shelf_id);
+        }
+        rs->enabled = ch->cfg->e7_shelves[i].enabled ? 1 : 0;
+        rs->from_yaml = 1;
+        put_config_json(ch, rs);
+    }
+}
+
+static edge_e7_session_t *session_find_by_mac(edge_e7_callhome_t *ch,
+                                              const char *mac_norm)
+{
+    uint32_t i;
+    if (!ch || !mac_norm) {
+        return NULL;
+    }
+    for (i = 0; i < ch->max_sessions; i++) {
+        edge_e7_session_t *s = &ch->sessions[i];
+        if (s->state == EDGE_E7_SESS_EMPTY) {
+            continue;
+        }
+        if (s->identity.identity_ok && strcmp(s->identity.mac, mac_norm) == 0) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+const char *edge_e7_sess_state_name(edge_e7_sess_state_t st)
+{
+    switch (st) {
+    case EDGE_E7_SESS_EMPTY:     return "empty";
+    case EDGE_E7_SESS_ACCEPTED:  return "accepted";
+    case EDGE_E7_SESS_IDENTITY:  return "identity";
+    case EDGE_E7_SESS_SSH:       return "ssh";
+    case EDGE_E7_SESS_HELLO:     return "hello";
+    case EDGE_E7_SESS_OPEN:      return "open";
+    case EDGE_E7_SESS_ERROR:     return "error";
+    case EDGE_E7_SESS_CLOSING:   return "closing";
+    default:                     return "unknown";
+    }
 }
 
 /* ---- K16 dirty-set ---- */
@@ -210,8 +361,10 @@ static void dirty_broadcast_key(edge_e7_callhome_t *ch, const char *ns,
         return;
     }
     edge_ws_hub_mint_request_id(ch->hub, NULL, rid, sizeof(rid));
-    (void)edge_ws_hub_broadcast_state_changed(ch->hub, ns, key, "put", val, vlen,
-                                              rid);
+    if (edge_ws_hub_broadcast_state_changed(ch->hub, ns, key, "put", val, vlen,
+                                            rid) > 0) {
+        ch->stats.ws_fanouts++;
+    }
 }
 
 /**
@@ -617,6 +770,113 @@ static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     }
 }
 
+static void command_store_result(edge_e7_callhome_t *ch, edge_e7_cmd_slot_t *cmd,
+                                 const netconf_rpc_reply_t *reply)
+{
+    char mac_key[EDGE_E7_MAC_MAX];
+    char key[EDGE_STATE_KEY_MAX];
+    char json[EDGE_STATE_VALUE_DEFAULT];
+    int n;
+    int ok;
+    edge_state_err_t e;
+    size_t xml_copy;
+    size_t max_xml;
+
+    if (!ch || !cmd || !reply) {
+        return;
+    }
+    ok = reply->is_ok && !reply->has_errors;
+    if (edge_e7_mac_to_key_seg(cmd->mac, mac_key, sizeof(mac_key)) != 0) {
+        return;
+    }
+    n = snprintf(key, sizeof(key), "e7/%s/cmd/%s", mac_key, cmd->cmd_id);
+    if (n < 0 || (size_t)n >= sizeof(key)) {
+        return;
+    }
+    /* Compact result; truncate xml if needed for value budget. */
+    max_xml = sizeof(json) > 256 ? sizeof(json) - 200 : 64;
+    xml_copy = reply->xml_len < max_xml ? reply->xml_len : max_xml;
+    n = snprintf(json, sizeof(json),
+                 "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\",\"message_id\":%u,"
+                 "\"status\":\"%s\",\"is_ok\":%s,\"has_errors\":%s,"
+                 "\"xml_len\":%zu,\"xml\":",
+                 cmd->cmd_id, cmd->mac, (unsigned)cmd->message_id,
+                 ok ? "ok" : "error", ok ? "true" : "false",
+                 reply->has_errors ? "true" : "false", reply->xml_len);
+    if (n < 0 || (size_t)n + xml_copy + 4 >= sizeof(json)) {
+        n = snprintf(json, sizeof(json),
+                     "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\",\"message_id\":%u,"
+                     "\"status\":\"%s\",\"xml_truncated\":true}",
+                     cmd->cmd_id, cmd->mac, (unsigned)cmd->message_id,
+                     ok ? "ok" : "error");
+    } else {
+        /* Append JSON string of xml (escape minimal: no quotes expected often) */
+        size_t pos = (size_t)n;
+        size_t i;
+        json[pos++] = '"';
+        for (i = 0; i < xml_copy && pos + 2 < sizeof(json); i++) {
+            char c = reply->xml[i];
+            if (c == '"' || c == '\\') {
+                if (pos + 3 >= sizeof(json)) {
+                    break;
+                }
+                json[pos++] = '\\';
+            }
+            if ((unsigned char)c < 0x20) {
+                continue;
+            }
+            json[pos++] = c;
+        }
+        if (pos + 2 < sizeof(json)) {
+            json[pos++] = '"';
+            json[pos++] = '}';
+            json[pos] = '\0';
+            n = (int)pos;
+        }
+    }
+    if (n < 0) {
+        return;
+    }
+    e = edge_state_put_and_notify(ch->state, ch->hub, "net.pon", key, json,
+                                  (size_t)n, NULL, 0);
+    if (e == EDGE_STATE_OK) {
+        ch->stats.state_puts++;
+        ch->stats.ws_fanouts++;
+    }
+    cmd->complete = 1;
+    if (ok) {
+        ch->stats.commands_ok++;
+    } else {
+        ch->stats.commands_err++;
+    }
+}
+
+static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                         const netconf_rpc_reply_t *reply)
+{
+    uint32_t i;
+
+    if (!ch || !s || !reply) {
+        return;
+    }
+    if (s->sub_sent && !s->sub_ok && s->sub_msg_id > 0 &&
+        reply->message_id == (uint32_t)s->sub_msg_id) {
+        s->sub_ok = 1;
+        ch->stats.subscriptions_ok++;
+    }
+    for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
+        edge_e7_cmd_slot_t *cmd = &ch->cmds[i];
+        if (!cmd->used || cmd->complete) {
+            continue;
+        }
+        if (cmd->shelf_slot == s->slot &&
+            cmd->message_id == reply->message_id) {
+            command_store_result(ch, cmd, reply);
+            break;
+        }
+    }
+}
+
 static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     netconf_event_t ev;
@@ -625,11 +885,7 @@ static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
             on_notification(ch, s, &ev.data.notification);
         } else if (ev.type == NETCONF_EVENT_RPC_OK ||
                    ev.type == NETCONF_EVENT_RPC_REPLY) {
-            if (s->sub_sent && !s->sub_ok && s->sub_msg_id > 0 &&
-                ev.data.rpc_reply.message_id == (uint32_t)s->sub_msg_id) {
-                s->sub_ok = 1;
-                ch->stats.subscriptions_ok++;
-            }
+            on_rpc_reply(ch, s, &ev.data.rpc_reply);
         }
         /* QUEUE_OVERFLOW / ERROR: count optionally later */
     }
@@ -690,7 +946,7 @@ static int session_finish_identity(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     }
     s->identity = id;
 
-    look = shelf_lookup(ch->cfg, s->identity.mac);
+    look = shelf_lookup_runtime(ch, s->identity.mac);
     if (look == 0) {
         /* present but disabled */
         put_session_json(ch, s, "disabled");
@@ -965,6 +1221,7 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
         (void)edge_state_ns_set_enabled(ch->state, "inventory", 1);
         (void)edge_state_ns_set_enabled(ch->state, "net.pon", 1);
     }
+    seed_runtime_from_yaml(ch);
     return ch;
 #endif
 }
@@ -1164,4 +1421,617 @@ edge_e7_sess_state_t edge_e7_callhome_session_state_by_mac(
 uint32_t edge_e7_callhome_open_count(const edge_e7_callhome_t *ch)
 {
     return ch ? (uint32_t)ch->stats.sessions_open : 0;
+}
+
+/* ---- REST host APIs (PR-5) ---- */
+
+static uint64_t stats_rejects_sum(const edge_e7_callhome_stats_t *st)
+{
+    if (!st) {
+        return 0;
+    }
+    return st->rejects_bad_identity + st->rejects_not_allowlisted +
+           st->rejects_disabled + st->rejects_capacity + st->rejects_other;
+}
+
+static uint64_t count_sessions_error(const edge_e7_callhome_t *ch)
+{
+    uint32_t i;
+    uint64_t n = 0;
+    if (!ch) {
+        return 0;
+    }
+    for (i = 0; i < ch->max_sessions; i++) {
+        if (ch->sessions[i].state == EDGE_E7_SESS_ERROR) {
+            n++;
+        }
+    }
+    return n;
+}
+
+int edge_e7_callhome_status_json(const edge_e7_callhome_t *ch, char *buf,
+                                 size_t buf_sz)
+{
+    const edge_e7_callhome_stats_t *st;
+    uint64_t drop_oldest = 0;
+    uint64_t format_fail = 0;
+    size_t rss_est;
+    int n;
+
+    if (!buf || buf_sz < 64) {
+        return -1;
+    }
+    if (!ch) {
+        n = snprintf(buf, buf_sz,
+                     "{\"v\":1,\"enabled\":false,\"error\":\"E7_UNAVAILABLE\"}");
+        return (n < 0 || (size_t)n >= buf_sz) ? -1 : n;
+    }
+    st = &ch->stats;
+    if (ch->hub) {
+        drop_oldest = edge_ws_hub_drop_oldest_count(ch->hub);
+        format_fail = edge_ws_hub_format_fail_count(ch->hub);
+    }
+    rss_est = (size_t)ch->max_sessions * edge_e7_session_rss_estimate();
+    n = snprintf(
+        buf, buf_sz,
+        "{"
+        "\"v\":1,"
+        "\"enabled\":%s,"
+        "\"e7_accepts\":%llu,"
+        "\"e7_sessions_open\":%llu,"
+        "\"e7_sessions_error\":%llu,"
+        "\"e7_notifications\":%llu,"
+        "\"e7_state_puts\":%llu,"
+        "\"e7_ws_fanouts\":%llu,"
+        "\"e7_ws_coalesce_flush\":%llu,"
+        "\"e7_ws_drop_oldest\":%llu,"
+        "\"e7_ws_format_fail\":%llu,"
+        "\"e7_coalesce_overflow\":%llu,"
+        "\"e7_commands_ok\":%llu,"
+        "\"e7_commands_err\":%llu,"
+        "\"e7_rejects\":%llu,"
+        "\"e7_unconfigured\":%llu,"
+        "\"e7_rss_estimate\":%zu,"
+        "\"e7_subscriptions_ok\":%llu,"
+        "\"max_sessions\":%u,"
+        "\"runtime_shelves\":%u"
+        "}",
+        edge_e7_callhome_enabled(ch) ? "true" : "false",
+        (unsigned long long)st->accepts,
+        (unsigned long long)st->sessions_open,
+        (unsigned long long)count_sessions_error(ch),
+        (unsigned long long)st->notifications,
+        (unsigned long long)st->state_puts,
+        (unsigned long long)st->ws_fanouts,
+        (unsigned long long)st->coalesce_flush,
+        (unsigned long long)drop_oldest,
+        (unsigned long long)format_fail,
+        (unsigned long long)st->coalesce_overflow,
+        (unsigned long long)st->commands_ok,
+        (unsigned long long)st->commands_err,
+        (unsigned long long)stats_rejects_sum(st),
+        (unsigned long long)st->rejects_not_allowlisted,
+        rss_est,
+        (unsigned long long)st->subscriptions_ok,
+        ch->max_sessions, ch->runtime_count);
+    return (n < 0 || (size_t)n >= buf_sz) ? -1 : n;
+}
+
+static int append_shelf_obj(const edge_e7_callhome_t *ch,
+                            const edge_e7_runtime_shelf_t *rs, char *buf,
+                            size_t buf_sz, size_t *off)
+{
+    edge_e7_sess_state_t st;
+    const edge_e7_session_t *sess;
+    char peer[EDGE_E7_PEER_ADDR_MAX];
+    char serial[EDGE_E7_SERIAL_MAX];
+    char model[EDGE_E7_MODEL_MAX];
+    int w;
+
+    peer[0] = '\0';
+    serial[0] = '\0';
+    model[0] = '\0';
+    st = EDGE_E7_SESS_EMPTY;
+    sess = NULL;
+    if (ch) {
+        edge_e7_session_t *s =
+            session_find_by_mac((edge_e7_callhome_t *)ch, rs->mac);
+        if (s) {
+            sess = s;
+            st = s->state;
+            snprintf(peer, sizeof(peer), "%s", s->peer);
+            snprintf(serial, sizeof(serial), "%s", s->identity.serial);
+            snprintf(model, sizeof(model), "%s", s->identity.model);
+        }
+    }
+    (void)sess;
+    w = snprintf(buf + *off, buf_sz - *off,
+                 "{\"mac\":\"%s\",\"label\":\"%s\",\"enabled\":%s,"
+                 "\"from_yaml\":%s,\"session_state\":\"%s\","
+                 "\"serial\":\"%s\",\"model\":\"%s\",\"peer\":\"%s\"}",
+                 rs->mac, rs->label[0] ? rs->label : "",
+                 rs->enabled ? "true" : "false",
+                 rs->from_yaml ? "true" : "false", edge_e7_sess_state_name(st),
+                 serial, model, peer);
+    if (w < 0 || (size_t)w >= buf_sz - *off) {
+        return -1;
+    }
+    *off += (size_t)w;
+    return 0;
+}
+
+int edge_e7_callhome_shelves_json(const edge_e7_callhome_t *ch, char *buf,
+                                  size_t buf_sz)
+{
+    size_t off = 0;
+    uint32_t i;
+    int first = 1;
+    int w;
+
+    if (!ch || !buf || buf_sz < 16) {
+        return -1;
+    }
+    w = snprintf(buf, buf_sz,
+                 "{\"v\":1,\"note\":\"runtime allowlist is non-durable\","
+                 "\"shelves\":[");
+    if (w < 0 || (size_t)w >= buf_sz) {
+        return -1;
+    }
+    off = (size_t)w;
+    for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+        if (!ch->runtime[i].used) {
+            continue;
+        }
+        if (!first) {
+            if (off + 1 >= buf_sz) {
+                return -1;
+            }
+            buf[off++] = ',';
+            buf[off] = '\0';
+        }
+        first = 0;
+        if (append_shelf_obj(ch, &ch->runtime[i], buf, buf_sz, &off) != 0) {
+            return -1;
+        }
+    }
+    if (off + 3 >= buf_sz) {
+        return -1;
+    }
+    buf[off++] = ']';
+    buf[off++] = '}';
+    buf[off] = '\0';
+    return (int)off;
+}
+
+int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
+                                char *buf, size_t buf_sz)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    const edge_e7_runtime_shelf_t *rs;
+    edge_e7_session_t *sess;
+    size_t off = 0;
+    int w;
+
+    if (!ch || !mac || !buf || buf_sz < 32) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
+        return -1;
+    }
+    rs = NULL;
+    {
+        uint32_t i;
+        for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+            if (ch->runtime[i].used && strcmp(ch->runtime[i].mac, norm) == 0) {
+                rs = &ch->runtime[i];
+                break;
+            }
+        }
+    }
+    sess = session_find_by_mac((edge_e7_callhome_t *)ch, norm);
+    if (!rs && !sess) {
+        return -2; /* not found */
+    }
+    w = snprintf(buf, buf_sz, "{\"v\":1,\"mac\":\"%s\",", norm);
+    if (w < 0 || (size_t)w >= buf_sz) {
+        return -1;
+    }
+    off = (size_t)w;
+    if (rs) {
+        w = snprintf(buf + off, buf_sz - off,
+                     "\"configured\":true,\"label\":\"%s\",\"enabled\":%s,"
+                     "\"from_yaml\":%s,"
+                     "\"note\":\"runtime allowlist is non-durable\",",
+                     rs->label[0] ? rs->label : "",
+                     rs->enabled ? "true" : "false",
+                     rs->from_yaml ? "true" : "false");
+    } else {
+        w = snprintf(buf + off, buf_sz - off,
+                     "\"configured\":false,\"enabled\":false,");
+    }
+    if (w < 0 || (size_t)w >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)w;
+    if (sess) {
+        w = snprintf(buf + off, buf_sz - off,
+                     "\"session_state\":\"%s\",\"serial\":\"%s\","
+                     "\"model\":\"%s\",\"source_ip\":\"%s\",\"peer\":\"%s\","
+                     "\"allowlisted\":%s,\"subscribed\":%s}",
+                     edge_e7_sess_state_name(sess->state), sess->identity.serial,
+                     sess->identity.model,
+                     sess->identity.source_ip[0] ? sess->identity.source_ip
+                                                 : sess->peer,
+                     sess->peer, sess->allowlisted ? "true" : "false",
+                     sess->sub_ok ? "true" : "false");
+    } else {
+        w = snprintf(buf + off, buf_sz - off,
+                     "\"session_state\":\"empty\"}");
+    }
+    if (w < 0 || (size_t)w >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)w;
+    return (int)off;
+}
+
+int edge_e7_callhome_allowlist_upsert(edge_e7_callhome_t *ch, const char *mac,
+                                      const char *label, int enabled)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    edge_e7_runtime_shelf_t *rs;
+
+    if (!ch || !mac) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
+        return -1;
+    }
+    rs = runtime_find(ch, norm);
+    if (!rs) {
+        rs = runtime_alloc(ch);
+        if (!rs) {
+            return -1;
+        }
+        memcpy(rs->mac, norm, sizeof(rs->mac));
+        rs->from_yaml = 0;
+    }
+    if (label) {
+        snprintf(rs->label, sizeof(rs->label), "%s", label);
+    }
+    rs->enabled = enabled ? 1 : 0;
+    put_config_json(ch, rs);
+    return 0;
+}
+
+int edge_e7_callhome_allowlist_delete(edge_e7_callhome_t *ch, const char *mac)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char key[EDGE_STATE_KEY_MAX];
+    edge_e7_runtime_shelf_t *rs;
+    edge_e7_session_t *s;
+
+    if (!ch || !mac) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
+        return -1;
+    }
+    rs = runtime_find(ch, norm);
+    if (!rs) {
+        /* still disconnect if live */
+        s = session_find_by_mac(ch, norm);
+        if (s) {
+            session_close(ch, s);
+            return 0;
+        }
+        return -1;
+    }
+    if (edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) == 0) {
+        int n = snprintf(key, sizeof(key), "e7/%s/config", mac_key);
+        if (n > 0 && (size_t)n < sizeof(key) && ch->state) {
+            (void)edge_state_delete_and_notify(ch->state, ch->hub, "inventory",
+                                               key, NULL, 0);
+        }
+    }
+    memset(rs, 0, sizeof(*rs));
+    if (ch->runtime_count > 0) {
+        ch->runtime_count--;
+    }
+    s = session_find_by_mac(ch, norm);
+    if (s) {
+        session_close(ch, s);
+    }
+    return 0;
+}
+
+int edge_e7_callhome_disconnect(edge_e7_callhome_t *ch, const char *mac)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    edge_e7_session_t *s;
+
+    if (!ch || !mac) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
+        return -1;
+    }
+    s = session_find_by_mac(ch, norm);
+    if (s) {
+        session_close(ch, s);
+    }
+    return 0;
+}
+
+static int count_inflight_cmds(const edge_e7_callhome_t *ch, int shelf_slot)
+{
+    uint32_t i;
+    int n = 0;
+    for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
+        if (ch->cmds[i].used && !ch->cmds[i].complete &&
+            ch->cmds[i].shelf_slot == shelf_slot) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static edge_e7_cmd_slot_t *cmd_alloc(edge_e7_callhome_t *ch)
+{
+    uint32_t i;
+    for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
+        if (!ch->cmds[i].used || ch->cmds[i].complete) {
+            memset(&ch->cmds[i], 0, sizeof(ch->cmds[i]));
+            ch->cmds[i].used = 1;
+            return &ch->cmds[i];
+        }
+    }
+    return NULL;
+}
+
+int edge_e7_callhome_command_submit(edge_e7_callhome_t *ch, const char *mac,
+                                    const char *rpc_xml, size_t rpc_len,
+                                    const char *op, char *cmd_id_out,
+                                    size_t cmd_id_sz, int *http_status)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    edge_e7_session_t *s;
+    edge_e7_cmd_slot_t *cmd;
+    int mid = -1;
+
+    if (http_status) {
+        *http_status = 400;
+    }
+    if (!ch || !mac || !cmd_id_out || cmd_id_sz < 8) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
+        return -1;
+    }
+    s = session_find_by_mac(ch, norm);
+    if (!s) {
+        if (http_status) {
+            *http_status = 409;
+        }
+        return -1;
+    }
+    if (s->state != EDGE_E7_SESS_OPEN) {
+        if (http_status) {
+            *http_status = 503;
+        }
+        return -1;
+    }
+#if !EDGEHOST_HAVE_LIBNETCONF
+    (void)rpc_xml;
+    (void)rpc_len;
+    (void)op;
+    if (http_status) {
+        *http_status = 503;
+    }
+    return -1;
+#else
+    if (!s->nc) {
+        if (http_status) {
+            *http_status = 503;
+        }
+        return -1;
+    }
+    if (count_inflight_cmds(ch, s->slot) >= EDGE_E7_CMD_MAX_PER_SHELF) {
+        if (http_status) {
+            *http_status = 429;
+        }
+        ch->stats.commands_err++;
+        return -1;
+    }
+    cmd = cmd_alloc(ch);
+    if (!cmd) {
+        if (http_status) {
+            *http_status = 429;
+        }
+        ch->stats.commands_err++;
+        return -1;
+    }
+
+    if (rpc_xml && rpc_len > 0) {
+        mid = netconf_send_rpc(s->nc, rpc_xml, rpc_len);
+    } else if (op && strcmp(op, "get-config") == 0) {
+        mid = netconf_get_config(s->nc, "running", NULL);
+    } else if (op && strcmp(op, "get") == 0) {
+        mid = netconf_get(s->nc, NULL);
+    } else {
+        memset(cmd, 0, sizeof(*cmd));
+        if (http_status) {
+            *http_status = 400;
+        }
+        ch->stats.commands_err++;
+        return -1;
+    }
+    if (mid < 0) {
+        memset(cmd, 0, sizeof(*cmd));
+        if (http_status) {
+            *http_status = 503;
+        }
+        ch->stats.commands_err++;
+        return -1;
+    }
+    (void)session_drain_output(s);
+    ch->cmd_seq++;
+    snprintf(cmd->cmd_id, sizeof(cmd->cmd_id), "c%08u", ch->cmd_seq);
+    snprintf(cmd_id_out, cmd_id_sz, "%s", cmd->cmd_id);
+    cmd->message_id = (uint32_t)mid;
+    cmd->shelf_slot = s->slot;
+    memcpy(cmd->mac, norm, sizeof(cmd->mac));
+    cmd->deadline_ms = mono_now_ms() + 15000u;
+    cmd->complete = 0;
+    /* Pending stub in net.pon so GET can find it immediately. */
+    {
+        char mac_key[EDGE_E7_MAC_MAX];
+        char key[EDGE_STATE_KEY_MAX];
+        char json[256];
+        int n;
+        if (edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) == 0) {
+            n = snprintf(key, sizeof(key), "e7/%s/cmd/%s", mac_key, cmd->cmd_id);
+            if (n > 0 && (size_t)n < sizeof(key)) {
+                n = snprintf(json, sizeof(json),
+                             "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\","
+                             "\"message_id\":%u,\"status\":\"pending\"}",
+                             cmd->cmd_id, norm, (unsigned)mid);
+                if (n > 0 && ch->state) {
+                    (void)edge_state_put_and_notify(ch->state, ch->hub, "net.pon",
+                                                    key, json, (size_t)n, NULL,
+                                                    0);
+                }
+            }
+        }
+    }
+    if (http_status) {
+        *http_status = 202;
+    }
+    return 0;
+#endif
+}
+
+int edge_e7_callhome_command_json(const edge_e7_callhome_t *ch, const char *mac,
+                                  const char *cmd_id, char *buf, size_t buf_sz)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char key[EDGE_STATE_KEY_MAX];
+    size_t vlen = 0;
+    edge_state_err_t e;
+    int n;
+
+    if (!ch || !mac || !cmd_id || !buf || buf_sz < 16) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0 ||
+        edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) != 0) {
+        return -1;
+    }
+    n = snprintf(key, sizeof(key), "e7/%s/cmd/%s", mac_key, cmd_id);
+    if (n < 0 || (size_t)n >= sizeof(key)) {
+        return -1;
+    }
+    if (!ch->state) {
+        return -1;
+    }
+    e = edge_state_get(ch->state, "net.pon", key, buf, buf_sz, &vlen);
+    if (e != EDGE_STATE_OK) {
+        return -1;
+    }
+    if (vlen + 1 < buf_sz) {
+        buf[vlen] = '\0';
+    } else if (buf_sz > 0) {
+        buf[buf_sz - 1] = '\0';
+    }
+    return (int)vlen;
+}
+
+int edge_e7_callhome_onts_json(const edge_e7_callhome_t *ch, const char *mac,
+                               const char *cursor, size_t limit, char *buf,
+                               size_t buf_sz)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char prefix[EDGE_STATE_KEY_MAX];
+    char keys[64][EDGE_STATE_KEY_MAX];
+    int nkeys, i;
+    size_t off = 0;
+    int w;
+    int first = 1;
+    size_t take;
+
+    if (!ch || !mac || !buf || buf_sz < 32) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0 ||
+        edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) != 0) {
+        return -1;
+    }
+    if (!ch->state) {
+        return -1;
+    }
+    take = limit ? limit : 64;
+    if (take > 64) {
+        take = 64;
+    }
+    w = snprintf(prefix, sizeof(prefix), "e7/%s/ont/", mac_key);
+    if (w < 0 || (size_t)w >= sizeof(prefix)) {
+        return -1;
+    }
+    nkeys = edge_state_list(ch->state, "net.pon", prefix, keys, 64);
+    if (nkeys < 0) {
+        nkeys = 0;
+    }
+    w = snprintf(buf, buf_sz, "{\"v\":1,\"mac\":\"%s\",\"onts\":[", norm);
+    if (w < 0 || (size_t)w >= buf_sz) {
+        return -1;
+    }
+    off = (size_t)w;
+    for (i = 0; i < nkeys && (size_t)i < take; i++) {
+        const char *k = keys[i];
+        /* cursor: skip keys <= cursor (exclusive next page) */
+        if (cursor && cursor[0] && strcmp(k, cursor) <= 0) {
+            continue;
+        }
+        if (!first) {
+            if (off + 1 >= buf_sz) {
+                return -1;
+            }
+            buf[off++] = ',';
+        }
+        first = 0;
+        {
+            char val[EDGE_STATE_VALUE_DEFAULT];
+            size_t vlen = 0;
+            edge_state_err_t e =
+                edge_state_get(ch->state, "net.pon", k, val, sizeof(val), &vlen);
+            if (e == EDGE_STATE_OK && vlen > 0 && off + vlen + 16 < buf_sz) {
+                w = snprintf(buf + off, buf_sz - off,
+                             "{\"key\":\"%s\",\"value\":", k);
+                if (w < 0) {
+                    break;
+                }
+                off += (size_t)w;
+                memcpy(buf + off, val, vlen);
+                off += vlen;
+                buf[off++] = '}';
+                buf[off] = '\0';
+            } else {
+                w = snprintf(buf + off, buf_sz - off, "{\"key\":\"%s\"}", k);
+                if (w < 0 || (size_t)w >= buf_sz - off) {
+                    return -1;
+                }
+                off += (size_t)w;
+            }
+        }
+    }
+    if (off + 2 >= buf_sz) {
+        return -1;
+    }
+    buf[off++] = ']';
+    buf[off++] = '}';
+    buf[off] = '\0';
+    return (int)off;
 }

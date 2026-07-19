@@ -280,6 +280,7 @@ static conn_t *alloc_conn(server_t *srv)
             edge_http1_serve_set_ws_hub(c->http, srv->hub);
             edge_http1_serve_set_auth(c->http, srv->auth);
             edge_http1_serve_set_plugin_host(c->http, srv->plugins);
+            edge_http1_serve_set_e7(c->http, srv->e7);
             edge_http1_serve_set_outbound_policy(
                 c->http, srv->cfg->dns_allow_blocking,
                 srv->cfg->http_max_upstream_body_bytes);

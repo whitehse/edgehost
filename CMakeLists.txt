@@ -183,7 +183,8 @@ target_include_directories(edgehost_http PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(edgehost_http PUBLIC edgecore edgehost_plugins)
+# edgehost_e7: /api/v1/e7/* REST dispatch (PR-5)
+target_link_libraries(edgehost_http PUBLIC edgecore edgehost_plugins edgehost_e7)
 if(TARGET Shaggy::shaggy)
   target_link_libraries(edgehost_http PUBLIC Shaggy::shaggy)
 elseif(SHAGGY_LIBRARY)

@@ -1,6 +1,6 @@
 /**
  * @file edge_http1_serve.c
- * @brief HTTP/1 parse + routing: health, SPA, packages, state, WS, lab auth.
+ * @brief HTTP/1 parse + routing: health, SPA, packages, state, WS, E7, lab auth.
  */
 
 #include "edge_http1_serve.h"
@@ -16,6 +16,7 @@
 #include "protocol_events.h"
 
 #define EDGE_HTTP_ACC_MAX (EDGE_STATE_VALUE_MAX + 4096)
+#define EDGE_HTTP_E7_JSON_MAX 16384
 
 struct edge_http1_serve {
     http1_ctx_t         *h1;
@@ -29,6 +30,7 @@ struct edge_http1_serve {
     edge_auth_ctx_t     *auth;  /* not owned */
     edge_principal_t     principal;
     edge_plugin_host_t  *plugins; /* not owned */
+    edge_e7_callhome_t  *e7;      /* not owned; PR-5 */
     int                  allow_blocking_dns;
     size_t               max_upstream_body;
     const char          *service_api_key; /* not owned */
@@ -767,6 +769,571 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
     return 1;
 }
 
+/**
+ * Parse /api/v1/e7 path into components.
+ * @return 1 if e7 path, 0 otherwise.
+ * kinds: 0=status, 1=shelves list, 2=shelf, 3=disconnect, 4=commands,
+ *        5=command get, 6=onts
+ */
+static int path_is_e7(const char *path, int *kind, char *mac_out, size_t mac_sz,
+                      char *cmd_out, size_t cmd_sz, char *cursor_out,
+                      size_t cursor_sz)
+{
+    const char *p;
+    const char *q;
+    char tmp[512];
+    size_t plen;
+
+    if (kind) {
+        *kind = -1;
+    }
+    if (mac_out && mac_sz) {
+        mac_out[0] = '\0';
+    }
+    if (cmd_out && cmd_sz) {
+        cmd_out[0] = '\0';
+    }
+    if (cursor_out && cursor_sz) {
+        cursor_out[0] = '\0';
+    }
+    if (!path || strncmp(path, "/api/v1/e7", 10) != 0) {
+        return 0;
+    }
+    p = path + 10;
+    if (*p == '?') {
+        return 0;
+    }
+    if (*p == '\0') {
+        return 0;
+    }
+    if (*p != '/') {
+        return 0;
+    }
+    p++;
+    q = strchr(p, '?');
+    plen = q ? (size_t)(q - p) : strlen(p);
+    if (plen >= sizeof(tmp)) {
+        return 0;
+    }
+    memcpy(tmp, p, plen);
+    tmp[plen] = '\0';
+    p = tmp;
+
+    if (strcmp(p, "status") == 0) {
+        if (kind) {
+            *kind = 0;
+        }
+        return 1;
+    }
+    if (strcmp(p, "shelves") == 0) {
+        if (kind) {
+            *kind = 1;
+        }
+        return 1;
+    }
+    if (strncmp(p, "shelves/", 8) == 0) {
+        const char *rest = p + 8;
+        const char *slash;
+        size_t mlen;
+
+        if (!rest[0]) {
+            return 0;
+        }
+        slash = strchr(rest, '/');
+        mlen = slash ? (size_t)(slash - rest) : strlen(rest);
+        if (mlen == 0 || mlen >= mac_sz) {
+            return 0;
+        }
+        memcpy(mac_out, rest, mlen);
+        mac_out[mlen] = '\0';
+        if (!slash) {
+            if (kind) {
+                *kind = 2; /* shelf detail / put / delete */
+            }
+            return 1;
+        }
+        rest = slash + 1;
+        if (strcmp(rest, "disconnect") == 0) {
+            if (kind) {
+                *kind = 3;
+            }
+            return 1;
+        }
+        if (strcmp(rest, "commands") == 0) {
+            if (kind) {
+                *kind = 4;
+            }
+            return 1;
+        }
+        if (strncmp(rest, "commands/", 9) == 0) {
+            const char *cid = rest + 9;
+            size_t clen = strlen(cid);
+            if (clen == 0 || clen >= cmd_sz) {
+                return 0;
+            }
+            memcpy(cmd_out, cid, clen + 1);
+            if (kind) {
+                *kind = 5;
+            }
+            return 1;
+        }
+        if (strcmp(rest, "onts") == 0 || strncmp(rest, "onts?", 5) == 0) {
+            if (kind) {
+                *kind = 6;
+            }
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static void e7_parse_query(const char *path, char *cursor_out, size_t cursor_sz,
+                           size_t *limit_out)
+{
+    const char *q;
+    if (limit_out) {
+        *limit_out = 0;
+    }
+    if (cursor_out && cursor_sz) {
+        cursor_out[0] = '\0';
+    }
+    if (!path) {
+        return;
+    }
+    q = strchr(path, '?');
+    if (!q) {
+        return;
+    }
+    q++;
+    while (*q) {
+        if (strncmp(q, "cursor=", 7) == 0) {
+            size_t i = 0;
+            q += 7;
+            while (q[i] && q[i] != '&' && i + 1 < cursor_sz) {
+                cursor_out[i] = q[i];
+                i++;
+            }
+            cursor_out[i] = '\0';
+            q += i;
+        } else if (strncmp(q, "limit=", 6) == 0) {
+            q += 6;
+            if (limit_out) {
+                *limit_out = (size_t)strtoul(q, NULL, 10);
+            }
+            while (*q && *q != '&') {
+                q++;
+            }
+        } else {
+            while (*q && *q != '&') {
+                q++;
+            }
+        }
+        if (*q == '&') {
+            q++;
+        }
+    }
+}
+
+/** Extract "rpc_xml" or "op" string from small JSON body. */
+static int e7_parse_command_body(const char *body, size_t blen, char *rpc_out,
+                                 size_t rpc_sz, char *op_out, size_t op_sz)
+{
+    char tmp[EDGE_HTTP_ACC_MAX];
+    size_t n;
+    const char *p;
+    const char *key;
+
+    if (rpc_out && rpc_sz) {
+        rpc_out[0] = '\0';
+    }
+    if (op_out && op_sz) {
+        op_out[0] = '\0';
+    }
+    if (!body || blen == 0) {
+        return -1;
+    }
+    n = blen < sizeof(tmp) - 1 ? blen : sizeof(tmp) - 1;
+    memcpy(tmp, body, n);
+    tmp[n] = '\0';
+
+    key = strstr(tmp, "\"rpc_xml\"");
+    if (key) {
+        p = strchr(key + 9, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '\t') {
+                p++;
+            }
+            if (*p == '"') {
+                size_t i = 0;
+                p++;
+                while (*p && *p != '"' && i + 1 < rpc_sz) {
+                    if (*p == '\\' && p[1]) {
+                        p++;
+                    }
+                    rpc_out[i++] = *p++;
+                }
+                rpc_out[i] = '\0';
+                return 0;
+            }
+        }
+    }
+    key = strstr(tmp, "\"op\"");
+    if (key) {
+        p = strchr(key + 4, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '\t') {
+                p++;
+            }
+            if (*p == '"') {
+                size_t i = 0;
+                p++;
+                while (*p && *p != '"' && i + 1 < op_sz) {
+                    op_out[i++] = *p++;
+                }
+                op_out[i] = '\0';
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+/** Extract optional "label" and "enabled" from shelf PUT body. */
+static void e7_parse_shelf_body(const char *body, size_t blen, char *label_out,
+                                size_t label_sz, int *enabled_out)
+{
+    char tmp[1024];
+    size_t n;
+    const char *p;
+
+    if (label_out && label_sz) {
+        label_out[0] = '\0';
+    }
+    if (enabled_out) {
+        *enabled_out = 1;
+    }
+    if (!body || blen == 0) {
+        return;
+    }
+    n = blen < sizeof(tmp) - 1 ? blen : sizeof(tmp) - 1;
+    memcpy(tmp, body, n);
+    tmp[n] = '\0';
+    p = strstr(tmp, "\"label\"");
+    if (p) {
+        p = strchr(p + 7, ':');
+        if (p) {
+            p++;
+            while (*p == ' ' || *p == '\t') {
+                p++;
+            }
+            if (*p == '"') {
+                size_t i = 0;
+                p++;
+                while (*p && *p != '"' && i + 1 < label_sz) {
+                    label_out[i++] = *p++;
+                }
+                label_out[i] = '\0';
+            }
+        }
+    }
+    if (strstr(tmp, "\"enabled\":false") || strstr(tmp, "\"enabled\": false") ||
+        strstr(tmp, "\"enabled\":0") || strstr(tmp, "\"enabled\": 0")) {
+        if (enabled_out) {
+            *enabled_out = 0;
+        }
+    }
+}
+
+static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
+                       size_t out_cap, size_t *out_len)
+{
+    int kind = -1;
+    char mac[64];
+    char cmd_id[EDGE_E7_CMD_ID_MAX];
+    char cursor[EDGE_STATE_KEY_MAX];
+    size_t limit = 0;
+    edge_auth_resource_t res;
+    int gate;
+    char jbuf[EDGE_HTTP_E7_JSON_MAX];
+    int jn;
+    int status;
+    const char *reason;
+
+    if (!path_is_e7(s->path, &kind, mac, sizeof(mac), cmd_id, sizeof(cmd_id),
+                    cursor, sizeof(cursor))) {
+        return 0;
+    }
+    e7_parse_query(s->path, cursor, sizeof(cursor), &limit);
+
+    res = edge_auth_classify(s->method, s->path, 0);
+    gate = require_rbac(s, res, NULL, NULL, metrics, out, out_cap, out_len);
+    if (gate != 0) {
+        return gate;
+    }
+
+    if (!s->e7) {
+        static const char body[] = "{\"error\":\"E7_UNAVAILABLE\"}";
+        if (build_response(out, out_cap, 503, "Service Unavailable",
+                           "application/json", body, sizeof(body) - 1,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 503);
+        return 1;
+    }
+
+    /* GET status */
+    if (kind == 0 && strcmp(s->method, "GET") == 0) {
+        jn = edge_e7_callhome_status_json(s->e7, jbuf, sizeof(jbuf));
+        if (jn < 0) {
+            return -1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* GET shelves list */
+    if (kind == 1 && strcmp(s->method, "GET") == 0) {
+        jn = edge_e7_callhome_shelves_json(s->e7, jbuf, sizeof(jbuf));
+        if (jn < 0) {
+            return -1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* shelf detail GET / PUT / DELETE */
+    if (kind == 2) {
+        if (strcmp(s->method, "GET") == 0) {
+            jn = edge_e7_callhome_shelf_json(s->e7, mac, jbuf, sizeof(jbuf));
+            if (jn == -2) {
+                static const char body[] = "{\"error\":\"NOT_FOUND\"}";
+                if (build_response(out, out_cap, 404, "Not Found",
+                                   "application/json", body, sizeof(body) - 1,
+                                   out_len) != 0) {
+                    return -1;
+                }
+                note_response(metrics, 404);
+                return 1;
+            }
+            if (jn < 0) {
+                static const char body[] = "{\"error\":\"BAD_MAC\"}";
+                if (build_response(out, out_cap, 400, "Bad Request",
+                                   "application/json", body, sizeof(body) - 1,
+                                   out_len) != 0) {
+                    return -1;
+                }
+                note_response(metrics, 400);
+                return 1;
+            }
+            if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                               (size_t)jn, out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 200);
+            return 1;
+        }
+        if (strcmp(s->method, "PUT") == 0) {
+            const char *body;
+            size_t blen;
+            char label[EDGE_CONFIG_E7_SHELF_ID_MAX];
+            int enabled = 1;
+            if (!wait_full_body(s) && s->content_length > 0) {
+                return 0;
+            }
+            get_body(s, &body, &blen);
+            e7_parse_shelf_body(body, blen, label, sizeof(label), &enabled);
+            if (edge_e7_callhome_allowlist_upsert(s->e7, mac,
+                                                  label[0] ? label : NULL,
+                                                  enabled) != 0) {
+                static const char eb[] = "{\"error\":\"UPSERT_FAILED\"}";
+                if (build_response(out, out_cap, 400, "Bad Request",
+                                   "application/json", eb, sizeof(eb) - 1,
+                                   out_len) != 0) {
+                    return -1;
+                }
+                note_response(metrics, 400);
+                return 1;
+            }
+            jn = edge_e7_callhome_shelf_json(s->e7, mac, jbuf, sizeof(jbuf));
+            if (jn < 0) {
+                jn = snprintf(jbuf, sizeof(jbuf),
+                              "{\"v\":1,\"mac\":\"%s\",\"ok\":true,"
+                              "\"note\":\"runtime allowlist is non-durable\"}",
+                              mac);
+            }
+            if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                               (size_t)jn, out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 200);
+            return 1;
+        }
+        if (strcmp(s->method, "DELETE") == 0) {
+            if (edge_e7_callhome_allowlist_delete(s->e7, mac) != 0) {
+                static const char body[] = "{\"error\":\"NOT_FOUND\"}";
+                if (build_response(out, out_cap, 404, "Not Found",
+                                   "application/json", body, sizeof(body) - 1,
+                                   out_len) != 0) {
+                    return -1;
+                }
+                note_response(metrics, 404);
+                return 1;
+            }
+            if (build_response(out, out_cap, 204, "No Content",
+                               "application/json", "", 0, out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 204);
+            return 1;
+        }
+    }
+
+    /* POST disconnect */
+    if (kind == 3 && strcmp(s->method, "POST") == 0) {
+        if (edge_e7_callhome_disconnect(s->e7, mac) != 0) {
+            static const char body[] = "{\"error\":\"BAD_MAC\"}";
+            if (build_response(out, out_cap, 400, "Bad Request",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 400);
+            return 1;
+        }
+        jn = snprintf(jbuf, sizeof(jbuf),
+                      "{\"v\":1,\"mac\":\"%s\",\"disconnected\":true}", mac);
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* POST commands */
+    if (kind == 4 && strcmp(s->method, "POST") == 0) {
+        const char *body;
+        size_t blen;
+        char rpc_xml[EDGE_HTTP_ACC_MAX];
+        char op[64];
+        char out_cmd[EDGE_E7_CMD_ID_MAX];
+        int http_st = 400;
+
+        if (!wait_full_body(s) && s->content_length > 0) {
+            return 0;
+        }
+        get_body(s, &body, &blen);
+        rpc_xml[0] = '\0';
+        op[0] = '\0';
+        (void)e7_parse_command_body(body, blen, rpc_xml, sizeof(rpc_xml), op,
+                                    sizeof(op));
+        if (edge_e7_callhome_command_submit(
+                s->e7, mac, rpc_xml[0] ? rpc_xml : NULL,
+                rpc_xml[0] ? strlen(rpc_xml) : 0, op[0] ? op : NULL, out_cmd,
+                sizeof(out_cmd), &http_st) != 0) {
+            const char *eb;
+            if (http_st == 409) {
+                eb = "{\"error\":\"NO_SESSION\"}";
+                reason = "Conflict";
+            } else if (http_st == 503) {
+                eb = "{\"error\":\"SESSION_NOT_OPEN\"}";
+                reason = "Service Unavailable";
+            } else if (http_st == 429) {
+                eb = "{\"error\":\"TOO_MANY_COMMANDS\"}";
+                reason = "Too Many Requests";
+            } else {
+                eb = "{\"error\":\"BAD_COMMAND\"}";
+                reason = "Bad Request";
+                http_st = 400;
+            }
+            if (build_response(out, out_cap, http_st, reason, "application/json",
+                               eb, strlen(eb), out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, http_st);
+            return 1;
+        }
+        jn = snprintf(jbuf, sizeof(jbuf),
+                      "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\","
+                      "\"status\":\"pending\"}",
+                      out_cmd, mac);
+        if (build_response(out, out_cap, 202, "Accepted", "application/json",
+                           jbuf, (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 202);
+        return 1;
+    }
+
+    /* GET command result */
+    if (kind == 5 && strcmp(s->method, "GET") == 0) {
+        jn = edge_e7_callhome_command_json(s->e7, mac, cmd_id, jbuf,
+                                           sizeof(jbuf));
+        if (jn < 0) {
+            static const char body[] = "{\"error\":\"NOT_FOUND\"}";
+            if (build_response(out, out_cap, 404, "Not Found",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 404);
+            return 1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* GET onts */
+    if (kind == 6 && strcmp(s->method, "GET") == 0) {
+        jn = edge_e7_callhome_onts_json(s->e7, mac, cursor[0] ? cursor : NULL,
+                                        limit, jbuf, sizeof(jbuf));
+        if (jn < 0) {
+            static const char body[] = "{\"error\":\"BAD_MAC\"}";
+            if (build_response(out, out_cap, 400, "Bad Request",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 400);
+            return 1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    status = 405;
+    reason = "Method Not Allowed";
+    {
+        static const char body[] = "{\"error\":\"METHOD\"}";
+        if (build_response(out, out_cap, status, reason, "application/json",
+                           body, sizeof(body) - 1, out_len) != 0) {
+            return -1;
+        }
+    }
+    note_response(metrics, status);
+    return 1;
+}
+
 static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
                     size_t out_cap, size_t *out_len)
 {
@@ -884,6 +1451,15 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
     /* State API first (supports GET/PUT/DELETE) */
     if (strncmp(s->path, "/api/v1/state/", 14) == 0) {
         st = dispatch_state(s, metrics, out, out_cap, out_len);
+        if (st != 0) {
+            return st;
+        }
+    }
+
+    /* E7 Call Home REST (PR-5) */
+    if (strncmp(s->path, "/api/v1/e7", 10) == 0 &&
+        (s->path[10] == '\0' || s->path[10] == '/' || s->path[10] == '?')) {
+        st = dispatch_e7(s, metrics, out, out_cap, out_len);
         if (st != 0) {
             return st;
         }
@@ -1059,6 +1635,13 @@ void edge_http1_serve_set_plugin_host(edge_http1_serve_t *s,
 {
     if (s) {
         s->plugins = ph;
+    }
+}
+
+void edge_http1_serve_set_e7(edge_http1_serve_t *s, edge_e7_callhome_t *e7)
+{
+    if (s) {
+        s->e7 = e7;
     }
 }
 
