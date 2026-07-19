@@ -2,9 +2,8 @@
 # Format: <repo>  <git-sha-or-tag>  [# comment]
 # Layout: develop against sibling checkouts under $HOME (or SIBLING_ROOT).
 # Update with: deps/update_pins.sh
-# libsim is Track 0 and not created yet — leave unpinned until P0.1.
-
 # name       git-sha                                          notes
+libsim       3506f14ec4fd34cbf605a91ec4cc277eaa051a09          # Track 0 complete (P0.1–P0.4)
 shaggy       72aef5cffef946fbeb3dab173951ce876db05960          # HTTP/1+2+WS SM
 librest      81dbead63ba0c2ad04b48d9004869eb7397d1e21          # REST/WS helpers on shaggy
 libyaml      bc78f853213efdd70e470fbb3f12b9a6437dc172          # YAML SM (config + HUP)
@@ -14,5 +13,3 @@ libslack     bde8327f5e63197e7404eed00a43fbbbdbd7b702          # Slack protocol 
 libteams     2b3b92a15ffa3ed2f5058792e0b064a3e579d8a6          # Teams protocol (stub plugin)
 libwebmap    17f46d23b3c301fb4391f6c76655c8891bf4c9bb          # SPA map package consumer only
 libnetdiag   5d14ee12025c5b4a1cb88548580ba9888155dda1          # optional net tools later
-
-# libsim     <pending P0.1>                                   # sim_uring / sim_net for fuzz
