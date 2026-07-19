@@ -17,6 +17,8 @@
 | **Shadow config** | Newly loaded YAML not yet applied; discarded on validate failure |
 | **CONFIG_APPLIED** | Event after successful `edgecore_apply_config` |
 | **CONFIG_REJECTED** | Event when load/validate fails; previous config kept |
+| **/health** | `GET` JSON liveness + basic counters (`edge_metrics`) |
+| **Metrics** | Host process counters (accepts, requests, 2xx/4xx, bytes, …) |
 
-Public API: `edgecore.h`, `edge_config.h`, `edge_config_hup.h`, `host_alloc.h`.
-Example: `config/edgehost.example.yaml`.
+Public API: `edgecore.h`, `edge_config.h`, `edge_config_hup.h`, `edge_iouring.h`,
+`edge_metrics.h`, `host_alloc.h`. Example: `config/edgehost.example.yaml`.

@@ -1,8 +1,8 @@
 # edgehost — multi-plugin io_uring webserver (program design Track 1)
-# P1.4b: io_uring + shaggy HTTP/1 parse bridge (static simple body).
+# P1.4c: GET /health JSON + basic metrics counters.
 
 cmake_minimum_required(VERSION 3.20)
-project(edgehost LANGUAGES C VERSION 0.4.1)
+project(edgehost LANGUAGES C VERSION 0.4.2)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -108,7 +108,10 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-add_library(edgehost_iouring STATIC src/host/iouring_loop.c)
+add_library(edgehost_iouring STATIC
+  src/host/iouring_loop.c
+  src/host/edge_metrics.c
+)
 target_include_directories(edgehost_iouring PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>

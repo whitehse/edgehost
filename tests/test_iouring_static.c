@@ -1,8 +1,9 @@
 /**
- * P1.4b: shaggy HTTP/1 bridge — valid GET → 200; malformed → 400.
+ * P1.4c: /health JSON + metrics; routing and parse errors.
  */
 #include "edge_config.h"
 #include "edge_iouring.h"
+#include "edge_metrics.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
@@ -18,7 +19,7 @@
 
 static uint16_t pick_port(void)
 {
-    return (uint16_t)(19100 + (getpid() % 900));
+    return (uint16_t)(19200 + (getpid() % 800));
 }
 
 static int client_exchange(uint16_t port, const char *req, char *out,
@@ -100,12 +101,30 @@ static int wait_ready(uint16_t port, const char *req, char *buf, size_t buflen)
     return n;
 }
 
-static int test_valid_get(void)
+static void test_metrics_json_unit(void)
+{
+    edge_metrics_t m;
+    char buf[256];
+    int n;
+
+    edge_metrics_init(&m);
+    m.accepts = 3;
+    m.requests = 2;
+    m.responses_2xx = 2;
+    n = edge_metrics_format_health_json(&m, buf, sizeof(buf));
+    assert(n > 0);
+    assert(strstr(buf, "\"status\":\"ok\"") != NULL);
+    assert(strstr(buf, "\"accepts\":3") != NULL);
+    assert(strstr(buf, "\"requests\":2") != NULL);
+    printf("  PASS: metrics JSON unit format\n");
+}
+
+static int test_health_json(void)
 {
     uint16_t port = pick_port();
     pid_t pid;
     int status;
-    char buf[1024];
+    char buf[2048];
     int n;
     const char *req =
         "GET /health HTTP/1.1\r\n"
@@ -119,28 +138,87 @@ static int test_valid_get(void)
     if (n <= 0) {
         kill(pid, SIGTERM);
         waitpid(pid, &status, 0);
-        fprintf(stderr, "valid GET: no response\n");
+        fprintf(stderr, "health: no response\n");
         return 1;
     }
     assert(strstr(buf, "HTTP/1.1 200 OK") != NULL);
-    assert(strstr(buf, "ok") != NULL);
+    assert(strstr(buf, "application/json") != NULL);
+    assert(strstr(buf, "\"status\":\"ok\"") != NULL);
+    assert(strstr(buf, "\"accepts\":") != NULL);
+    assert(strstr(buf, "\"requests\":") != NULL);
+    assert(strstr(buf, "\"uptime_s\":") != NULL);
     waitpid(pid, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "valid GET: child status %d\n", status);
+        fprintf(stderr, "health: child status %d\n", status);
         return 1;
     }
-    printf("  PASS: valid GET → 200 via shaggy parse\n");
+    printf("  PASS: GET /health → JSON metrics\n");
+    return 0;
+}
+
+static int test_root_ok(void)
+{
+    uint16_t port = (uint16_t)(pick_port() + 2);
+    pid_t pid;
+    int status;
+    char buf[1024];
+    int n;
+    const char *req =
+        "GET / HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n";
+
+    if (start_server(port, 1, &pid) != 0) {
+        return 1;
+    }
+    n = wait_ready(port, req, buf, sizeof(buf));
+    if (n <= 0) {
+        kill(pid, SIGTERM);
+        waitpid(pid, &status, 0);
+        return 1;
+    }
+    assert(strstr(buf, "HTTP/1.1 200 OK") != NULL);
+    assert(strstr(buf, "text/plain") != NULL);
+    assert(strstr(buf, "ok") != NULL);
+    waitpid(pid, &status, 0);
+    printf("  PASS: GET / → plain ok\n");
+    return 0;
+}
+
+static int test_not_found(void)
+{
+    uint16_t port = (uint16_t)(pick_port() + 4);
+    pid_t pid;
+    int status;
+    char buf[1024];
+    int n;
+    const char *req =
+        "GET /nope HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "\r\n";
+
+    if (start_server(port, 1, &pid) != 0) {
+        return 1;
+    }
+    n = wait_ready(port, req, buf, sizeof(buf));
+    if (n <= 0) {
+        kill(pid, SIGTERM);
+        waitpid(pid, &status, 0);
+        return 1;
+    }
+    assert(strstr(buf, "HTTP/1.1 404") != NULL);
+    waitpid(pid, &status, 0);
+    printf("  PASS: GET /nope → 404\n");
     return 0;
 }
 
 static int test_malformed(void)
 {
-    uint16_t port = (uint16_t)(pick_port() + 3);
+    uint16_t port = (uint16_t)(pick_port() + 6);
     pid_t pid;
     int status;
     char buf[1024];
     int n;
-    /* Missing version / spaces — shaggy emits PROTOCOL_EVENT_ERROR */
     const char *req = "GET\r\n\r\n";
 
     if (start_server(port, 1, &pid) != 0) {
@@ -150,7 +228,6 @@ static int test_malformed(void)
     if (n <= 0) {
         kill(pid, SIGTERM);
         waitpid(pid, &status, 0);
-        fprintf(stderr, "malformed: no response\n");
         return 1;
     }
     assert(strstr(buf, "HTTP/1.1 400") != NULL);
@@ -159,9 +236,9 @@ static int test_malformed(void)
     return 0;
 }
 
-static int test_partial_then_complete(void)
+static int test_partial_root(void)
 {
-    uint16_t port = (uint16_t)(pick_port() + 7);
+    uint16_t port = (uint16_t)(pick_port() + 8);
     pid_t pid;
     int status;
     int fd;
@@ -175,7 +252,6 @@ static int test_partial_then_complete(void)
         return 1;
     }
 
-    /* Wait for listen */
     for (attempt = 0; attempt < 50; attempt++) {
         fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -195,12 +271,10 @@ static int test_partial_then_complete(void)
     if (fd < 0) {
         kill(pid, SIGTERM);
         waitpid(pid, &status, 0);
-        fprintf(stderr, "partial: connect failed\n");
         return 1;
     }
 
-    /* Split request across writes */
-    (void)write(fd, "GET /x HTTP/1.1\r\n", 17);
+    (void)write(fd, "GET / HTTP/1.1\r\n", 16);
     usleep(5 * 1000);
     (void)write(fd, "Host: t\r\n\r\n", 11);
 
@@ -216,20 +290,27 @@ static int test_partial_then_complete(void)
 
     assert(strstr(buf, "HTTP/1.1 200 OK") != NULL);
     waitpid(pid, &status, 0);
-    printf("  PASS: partial feed → 200\n");
+    printf("  PASS: partial feed GET / → 200\n");
     return 0;
 }
 
 int main(void)
 {
-    printf("iouring_http1:\n");
-    if (test_valid_get() != 0) {
+    printf("iouring_health:\n");
+    test_metrics_json_unit();
+    if (test_health_json() != 0) {
+        return 1;
+    }
+    if (test_root_ok() != 0) {
+        return 1;
+    }
+    if (test_not_found() != 0) {
         return 1;
     }
     if (test_malformed() != 0) {
         return 1;
     }
-    if (test_partial_then_complete() != 0) {
+    if (test_partial_root() != 0) {
         return 1;
     }
     printf("all passed\n");

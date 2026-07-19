@@ -1,6 +1,6 @@
 /**
  * @file main.c
- * @brief edgehost process entry — config load + io_uring plain static serve (P1.4a).
+ * @brief edgehost process entry — config load + io_uring HTTP/1 + /health (P1.4c).
  */
 
 #include "edge_config.h"

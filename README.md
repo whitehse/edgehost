@@ -4,9 +4,9 @@ Multi-plugin **io_uring** webserver for the Edge Platform: syscall-free
 **edgecore** + Linux host, composing pure-C sibling libraries (shaggy, libyaml,
 librest, …).
 
-**Status:** P1.4b — plain TCP **io_uring** + **shaggy HTTP/1** parse;
-static `ok` body until `/health` JSON (P1.4c). TLS later: **OpenSSL
-non-blocking**; CPE agent uses **mbedTLS**.
+**Status:** P1.4c — plain TCP **io_uring** + **shaggy HTTP/1**;
+`GET /health` returns JSON metrics. TLS later: **OpenSSL non-blocking**;
+CPE agent uses **mbedTLS**.
 
 ## Build
 
@@ -17,7 +17,8 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 
 ./build/edgehost --host 127.0.0.1 --port 8080
-# curl -v http://127.0.0.1:8080/
+# curl -s http://127.0.0.1:8080/health
+# curl -s http://127.0.0.1:8080/
 ```
 
 ## Dependency pins

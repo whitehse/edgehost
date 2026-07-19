@@ -1,14 +1,19 @@
 /**
  * @file edge_iouring.h
- * @brief Class-A io_uring accept loop with shaggy HTTP/1 parse (P1.4b).
+ * @brief Class-A io_uring accept loop + shaggy HTTP/1 (P1.4c).
  *
- * Plain TCP: accept → recv → http1_feed_input → static simple response.
- * TLS (OpenSSL non-blocking) lands in P1.13. Real /health JSON is P1.4c.
+ * Routes:
+ *   GET /health  → application/json metrics (edge_metrics)
+ *   other GET    → text/plain "ok\n" (compat)
+ *   parse error  → 400
+ *
+ * TLS (OpenSSL non-blocking) lands in P1.13.
  */
 #ifndef EDGE_IOURING_H
 #define EDGE_IOURING_H
 
 #include "edge_config.h"
+#include "edge_metrics.h"
 
 #include <signal.h>
 #include <stddef.h>
@@ -29,13 +34,17 @@ typedef struct {
     /** Optional external stop flag (SIGINT handler may set it). */
     volatile sig_atomic_t *stop;
     /**
-     * Optional override for the successful (parsed) response body payload.
-     * If NULL, built-in "ok\n" is used. Status line / headers still built
-     * by the host after shaggy HEADERS_COMPLETE.
+     * Optional override for non-/health successful body (default "ok\n").
      * Not copied — must remain valid for the duration of edge_iouring_run.
      */
     const char *static_body;
     size_t      static_body_len;
+    /**
+     * Optional metrics sink. If NULL, an internal counter set is used for
+     * /health only. If non-NULL, the same counters are updated in place
+     * (caller may read after run returns, e.g. max_accepts tests).
+     */
+    edge_metrics_t *metrics;
 } edge_iouring_opts_t;
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o);

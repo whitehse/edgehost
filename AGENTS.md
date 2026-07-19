@@ -7,7 +7,7 @@ malloc. Composes sibling protocol libraries (shaggy, libyaml, librest, …) —
 does not reimplement them. **CPE agent** uses **mbedTLS** (separate tree).
 
 **Program track**: Track 1 (`edge-platform-program-design.md`).  
-**Current milestone**: **P1.4b** — shaggy HTTP/1 parse bridge.
+**Current milestone**: **P1.4c** — GET /health JSON + metrics counters.
 
 ## Key commands
 
@@ -95,5 +95,5 @@ Do **not** vendor sibling sources into this repo. Link against pins or local roo
 
 ## Current status
 
-**P1.4b complete**: shaggy HTTP/1 parse bridge; static simple body until P1.4c.  
-**Next**: **P1.4c** — `GET /health` JSON + metrics counters.
+**P1.4c complete**: `GET /health` JSON + basic host metrics counters.  
+**Next**: **P1.5** — sim_main fuzz (class A, libsim).
