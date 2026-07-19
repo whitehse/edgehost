@@ -68,3 +68,16 @@ plugins:
     enabled: false
     metrics_url: "http://127.0.0.1:9108/metrics"
     scrape_interval_ms: 5000
+  # E7 Call Home skeleton (disabled). See config/edgehost.e7-lab.yaml for lab seed.
+  e7_callhome:
+    enabled: false
+    listen_host: 127.0.0.1
+    listen_port: 4334
+    transport: raw
+    lab_insecure_raw: false
+    reload_policy: merge
+    auto_subscribe_unknown: false
+    dirty_cap: 8192
+    rss_budget_bytes: 268435456
+    max_sessions: 160
+    shelves: []

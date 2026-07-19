@@ -42,6 +42,18 @@ static void test_defaults_validate(void)
     assert(c.state_net_home_enabled == 0);
     assert(c.state_electric_enabled == 0);
     assert(c.state_inventory_enabled == 0);
+    /* E7 Call Home lab-safe defaults (PR-2) */
+    assert(c.e7_enabled == 0);
+    assert(c.e7_listen_port == 4334);
+    assert(strcmp(c.e7_listen_host, "127.0.0.1") == 0);
+    assert(strcmp(c.e7_transport, "raw") == 0);
+    assert(c.e7_lab_insecure_raw == 0);
+    assert(strcmp(c.e7_reload_policy, "merge") == 0);
+    assert(c.e7_auto_subscribe_unknown == 0);
+    assert(c.e7_dirty_cap == 8192);
+    assert(c.e7_rss_budget_bytes == 268435456u);
+    assert(c.e7_max_sessions == 160);
+    assert(c.e7_shelf_count == 0);
 
     c.listen_port = 0;
     assert(edge_config_validate(&c, err, sizeof(err)) == -1);
@@ -204,6 +216,114 @@ static void test_reload_and_hup(void)
     printf("  PASS: reload + SIGHUP flag\n");
 }
 
+static void test_e7_callhome_yaml(void)
+{
+    const char *yaml =
+        "plugins:\n"
+        "  e7_callhome:\n"
+        "    enabled: false\n"
+        "    listen_host: 127.0.0.1\n"
+        "    listen_port: 4334\n"
+        "    transport: raw\n"
+        "    lab_insecure_raw: false\n"
+        "    reload_policy: merge\n"
+        "    auto_subscribe_unknown: false\n"
+        "    dirty_cap: 4096\n"
+        "    rss_budget_bytes: 134217728\n"
+        "    max_sessions: 32\n"
+        "    shelves:\n"
+        "      - mac: \"00:02:5d:d9:21:47\"\n"
+        "        shelf_id: lab-e7-1\n"
+        "        enabled: true\n"
+        "      - mac: \"aa:bb:cc:dd:ee:ff\"\n"
+        "        label: spare\n"
+        "        enabled: false\n";
+    edge_config_t cfg;
+    char err[160];
+
+    assert(edge_config_load_yaml_buf(yaml, strlen(yaml), &cfg, err,
+                                     sizeof(err)) == 0);
+    assert(cfg.e7_enabled == 0);
+    assert(strcmp(cfg.e7_listen_host, "127.0.0.1") == 0);
+    assert(cfg.e7_listen_port == 4334);
+    assert(strcmp(cfg.e7_transport, "raw") == 0);
+    assert(cfg.e7_lab_insecure_raw == 0);
+    assert(strcmp(cfg.e7_reload_policy, "merge") == 0);
+    assert(cfg.e7_auto_subscribe_unknown == 0);
+    assert(cfg.e7_dirty_cap == 4096);
+    assert(cfg.e7_rss_budget_bytes == 134217728u);
+    assert(cfg.e7_max_sessions == 32);
+    assert(cfg.e7_shelf_count == 2);
+    assert(strcmp(cfg.e7_shelves[0].mac, "00:02:5d:d9:21:47") == 0);
+    assert(strcmp(cfg.e7_shelves[0].shelf_id, "lab-e7-1") == 0);
+    assert(cfg.e7_shelves[0].enabled == 1);
+    assert(strcmp(cfg.e7_shelves[1].mac, "aa:bb:cc:dd:ee:ff") == 0);
+    assert(strcmp(cfg.e7_shelves[1].shelf_id, "spare") == 0);
+    assert(cfg.e7_shelves[1].enabled == 0);
+    assert(edge_config_validate(&cfg, err, sizeof(err)) == 0);
+    printf("  PASS: e7_callhome yaml parse + validate\n");
+}
+
+static void test_e7_raw_non_loopback_requires_lab_flag(void)
+{
+    edge_config_t c;
+    char err[160];
+
+    edge_config_defaults(&c);
+    snprintf(c.e7_listen_host, sizeof(c.e7_listen_host), "0.0.0.0");
+    snprintf(c.e7_transport, sizeof(c.e7_transport), "raw");
+    c.e7_lab_insecure_raw = 0;
+    assert(edge_config_validate(&c, err, sizeof(err)) == -1);
+    assert(strstr(err, "lab_insecure_raw") != NULL);
+
+    c.e7_lab_insecure_raw = 1;
+    assert(edge_config_validate(&c, err, sizeof(err)) == 0);
+
+    /* loopback raw ok without flag */
+    edge_config_defaults(&c);
+    snprintf(c.e7_listen_host, sizeof(c.e7_listen_host), "127.0.0.1");
+    c.e7_lab_insecure_raw = 0;
+    assert(edge_config_validate(&c, err, sizeof(err)) == 0);
+
+    /* ssh on non-loopback does not require lab_insecure_raw */
+    snprintf(c.e7_listen_host, sizeof(c.e7_listen_host), "0.0.0.0");
+    snprintf(c.e7_transport, sizeof(c.e7_transport), "ssh");
+    c.e7_lab_insecure_raw = 0;
+    assert(edge_config_validate(&c, err, sizeof(err)) == 0);
+    printf("  PASS: e7 raw non-loopback requires lab_insecure_raw\n");
+}
+
+static void test_load_e7_lab_path(void)
+{
+    static const char *candidates[] = {
+        "config/edgehost.e7-lab.yaml",
+        "../config/edgehost.e7-lab.yaml",
+        NULL
+    };
+    const char *path = NULL;
+    edge_config_t cfg;
+    char err[160];
+    size_t i;
+
+    for (i = 0; candidates[i]; i++) {
+        if (access(candidates[i], R_OK) == 0) {
+            path = candidates[i];
+            break;
+        }
+    }
+    if (!path) {
+        printf("  SKIP: e7-lab yaml not found from cwd\n");
+        return;
+    }
+    assert(edge_config_load_yaml_path(path, &cfg, err, sizeof(err)) == 0);
+    assert(cfg.e7_enabled == 0);
+    assert(cfg.e7_listen_port == 4334);
+    assert(cfg.e7_shelf_count >= 1);
+    assert(cfg.e7_shelves[0].mac[0] != '\0');
+    assert(edge_config_validate(&cfg, err, sizeof(err)) == 0);
+    printf("  PASS: load e7-lab path (%s)\n", path);
+}
+
 int main(void)
 {
     printf("edgecore_config:\n");
@@ -212,6 +332,9 @@ int main(void)
     test_reject_keeps_previous();
     test_load_example_path();
     test_reload_and_hup();
+    test_e7_callhome_yaml();
+    test_e7_raw_non_loopback_requires_lab_flag();
+    test_load_e7_lab_path();
     printf("all passed\n");
     return 0;
 }

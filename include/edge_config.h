@@ -18,6 +18,25 @@ extern "C" {
 #define EDGE_CONFIG_HOST_MAX 256
 #define EDGE_CONFIG_PATH_MAX 512
 
+/** Bootstrap allowlist capacity for plugins.e7_callhome.shelves[] (K15/K17). */
+#define EDGE_CONFIG_E7_SHELVES_MAX 160
+/** MAC string (e.g. 00:02:5d:d9:21:47) + NUL. */
+#define EDGE_CONFIG_E7_MAC_MAX 32
+/** Optional human shelf_id / label. */
+#define EDGE_CONFIG_E7_SHELF_ID_MAX 64
+/** transport / reload_policy short enums as strings. */
+#define EDGE_CONFIG_E7_ENUM_MAX 16
+
+/**
+ * One YAML allowlist seed entry (MAC primary key — K17).
+ * shelf_id is optional human label; enabled defaults true when mac set.
+ */
+typedef struct {
+    char mac[EDGE_CONFIG_E7_MAC_MAX];
+    char shelf_id[EDGE_CONFIG_E7_SHELF_ID_MAX];
+    int  enabled;
+} edge_e7_shelf_config_t;
+
 typedef struct {
     char     listen_host[EDGE_CONFIG_HOST_MAX];
     uint16_t listen_port;
@@ -96,6 +115,25 @@ typedef struct {
     /** Postgres NOTIFY apply (P1.12). Channels listed for future LISTEN. */
     int  postgres_notify_enabled;
     char postgres_listen_channel[64]; /* default map_overlay */
+
+    /**
+     * E7 NETCONF Call Home (PR-2 skeleton — config only; no listen yet).
+     * YAML path: plugins.e7_callhome.*
+     * If transport=raw and listen_host is not loopback, lab_insecure_raw
+     * must be true (validate fails otherwise).
+     */
+    int      e7_enabled; /* default 0 */
+    char     e7_listen_host[EDGE_CONFIG_HOST_MAX]; /* default 127.0.0.1 */
+    uint16_t e7_listen_port;                       /* default 4334 */
+    char     e7_transport[EDGE_CONFIG_E7_ENUM_MAX]; /* raw | ssh */
+    int      e7_lab_insecure_raw; /* required true for non-loopback raw */
+    char     e7_reload_policy[EDGE_CONFIG_E7_ENUM_MAX]; /* merge | replace_all */
+    int      e7_auto_subscribe_unknown; /* default 0 */
+    uint32_t e7_dirty_cap;              /* default 8192 */
+    size_t   e7_rss_budget_bytes;       /* default 256 MiB */
+    uint32_t e7_max_sessions;           /* default 160 */
+    edge_e7_shelf_config_t e7_shelves[EDGE_CONFIG_E7_SHELVES_MAX];
+    uint32_t e7_shelf_count; /* number of populated shelves[] entries */
 
     /**
      * Set by edgecore_apply_config on success (not loaded from YAML).

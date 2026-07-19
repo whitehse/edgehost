@@ -13,6 +13,9 @@
 #if defined(EDGEHOST_HAVE_LIBREST)
 #include "rest.h"
 #endif
+#if defined(EDGEHOST_HAVE_LIBNETCONF)
+#include "netconf.h"
+#endif
 
 int main(void)
 {
@@ -28,6 +31,10 @@ int main(void)
 #if defined(EDGEHOST_HAVE_LIBREST)
     n++;
     (void)sizeof(rest_config_t);
+#endif
+#if defined(EDGEHOST_HAVE_LIBNETCONF)
+    n++;
+    (void)sizeof(netconf_config_t);
 #endif
     printf("edgehost_deps_smoke: %d phase-1 header package(s) visible\n", n);
     if (n < 1) {

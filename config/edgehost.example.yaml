@@ -78,6 +78,23 @@ plugins:
     enabled: false              # P1.11 scrape side-car /metrics
     metrics_url: "http://127.0.0.1:9108/metrics"
     scrape_interval_ms: 5000
+  # E7 NETCONF Call Home (PR-2 config skeleton — no listen until PR-4).
+  # transport=raw on non-loopback requires lab_insecure_raw: true.
+  e7_callhome:
+    enabled: false
+    listen_host: 127.0.0.1
+    listen_port: 4334
+    transport: raw              # raw | ssh
+    lab_insecure_raw: false
+    reload_policy: merge        # merge | replace_all (K15)
+    auto_subscribe_unknown: false
+    dirty_cap: 8192
+    rss_budget_bytes: 268435456 # 256 MiB
+    max_sessions: 160
+    shelves: []                 # bootstrap seed — keyed by MAC (K17)
+    # - mac: "00:02:5d:d9:21:47"
+    #   shelf_id: "west-hut"    # optional label
+    #   enabled: true
 
 # Postgres NOTIFY → state (P1.12). Payload schema enforced in edge_notify_apply.
 # Full LISTEN connection is host-driven; apply API is available for inject.

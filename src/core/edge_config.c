@@ -60,7 +60,36 @@ void edge_config_defaults(edge_config_t *c)
     c->postgres_notify_enabled = 0;
     snprintf(c->postgres_listen_channel, sizeof(c->postgres_listen_channel),
              "map_overlay");
+    /* E7 Call Home — disabled; lab-safe defaults (PR-2). */
+    c->e7_enabled = 0;
+    snprintf(c->e7_listen_host, sizeof(c->e7_listen_host), "127.0.0.1");
+    c->e7_listen_port = 4334;
+    snprintf(c->e7_transport, sizeof(c->e7_transport), "raw");
+    c->e7_lab_insecure_raw = 0;
+    snprintf(c->e7_reload_policy, sizeof(c->e7_reload_policy), "merge");
+    c->e7_auto_subscribe_unknown = 0;
+    c->e7_dirty_cap = 8192;
+    c->e7_rss_budget_bytes = 268435456u; /* 256 MiB */
+    c->e7_max_sessions = 160;
+    c->e7_shelf_count = 0;
     c->generation = 0;
+}
+
+/** True if host is a loopback name/address (IPv4/IPv6 localhost). */
+static int e7_host_is_loopback(const char *host)
+{
+    if (!host || host[0] == '\0') {
+        return 0;
+    }
+    if (strcmp(host, "127.0.0.1") == 0 || strcmp(host, "::1") == 0 ||
+        strcmp(host, "localhost") == 0) {
+        return 1;
+    }
+    /* 127.0.0.0/8 */
+    if (strncmp(host, "127.", 4) == 0) {
+        return 1;
+    }
+    return 0;
 }
 
 int edge_config_validate(const edge_config_t *c, char *err, size_t err_len)
@@ -119,6 +148,85 @@ int edge_config_validate(const edge_config_t *c, char *err, size_t err_len)
     if (c->auth_proxy_max_skew_s == 0) {
         if (err && err_len) {
             snprintf(err, err_len, "auth.proxy_max_skew_s must be > 0");
+        }
+        return -1;
+    }
+    /* E7 Call Home structural + safety checks (even when disabled). */
+    if (c->e7_listen_host[0] == '\0') {
+        if (err && err_len) {
+            snprintf(err, err_len, "plugins.e7_callhome.listen_host empty");
+        }
+        return -1;
+    }
+    if (c->e7_listen_port == 0) {
+        if (err && err_len) {
+            snprintf(err, err_len, "plugins.e7_callhome.listen_port invalid");
+        }
+        return -1;
+    }
+    if (strcmp(c->e7_transport, "raw") != 0 &&
+        strcmp(c->e7_transport, "ssh") != 0) {
+        if (err && err_len) {
+            snprintf(err, err_len,
+                     "plugins.e7_callhome.transport invalid (raw|ssh)");
+        }
+        return -1;
+    }
+    if (strcmp(c->e7_reload_policy, "merge") != 0 &&
+        strcmp(c->e7_reload_policy, "replace_all") != 0) {
+        if (err && err_len) {
+            snprintf(err, err_len,
+                     "plugins.e7_callhome.reload_policy invalid "
+                     "(merge|replace_all)");
+        }
+        return -1;
+    }
+    if (c->e7_max_sessions == 0) {
+        if (err && err_len) {
+            snprintf(err, err_len,
+                     "plugins.e7_callhome.max_sessions must be > 0");
+        }
+        return -1;
+    }
+    if (c->e7_rss_budget_bytes == 0) {
+        if (err && err_len) {
+            snprintf(err, err_len,
+                     "plugins.e7_callhome.rss_budget_bytes must be > 0");
+        }
+        return -1;
+    }
+    if (c->e7_dirty_cap == 0) {
+        if (err && err_len) {
+            snprintf(err, err_len, "plugins.e7_callhome.dirty_cap must be > 0");
+        }
+        return -1;
+    }
+    if (c->e7_shelf_count > EDGE_CONFIG_E7_SHELVES_MAX) {
+        if (err && err_len) {
+            snprintf(err, err_len, "plugins.e7_callhome.shelves overflow");
+        }
+        return -1;
+    }
+    {
+        uint32_t i;
+        for (i = 0; i < c->e7_shelf_count; i++) {
+            if (c->e7_shelves[i].mac[0] == '\0') {
+                if (err && err_len) {
+                    snprintf(err, err_len,
+                             "plugins.e7_callhome.shelves[%u].mac required",
+                             (unsigned)i);
+                }
+                return -1;
+            }
+        }
+    }
+    /* raw + non-loopback requires explicit lab_insecure_raw: true */
+    if (strcmp(c->e7_transport, "raw") == 0 &&
+        !e7_host_is_loopback(c->e7_listen_host) && !c->e7_lab_insecure_raw) {
+        if (err && err_len) {
+            snprintf(err, err_len,
+                     "plugins.e7_callhome: transport=raw on non-loopback "
+                     "requires lab_insecure_raw: true");
         }
         return -1;
     }

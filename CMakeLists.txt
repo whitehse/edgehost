@@ -39,6 +39,8 @@ find_package(Libharness QUIET)
 find_package(Libslack QUIET)
 find_package(Libteams QUIET)
 find_package(Libwebmap QUIET)
+# Optional: E7 Call Home NETCONF SM (PR-2 skeleton; session pump later).
+find_package(Libnetconf QUIET)
 if(EDGEHOST_REQUIRE_LIBSIM)
   find_package(Libsim REQUIRED)
 else()
@@ -60,6 +62,11 @@ message(STATUS "  shaggy     FOUND=${Shaggy_FOUND} ROOT=${SHAGGY_ROOT} LIB=${SHA
 message(STATUS "  libyaml    FOUND=${Libyaml_FOUND} ROOT=${LIBYAML_ROOT}")
 message(STATUS "  librest    FOUND=${Librest_FOUND} ROOT=${LIBREST_ROOT}")
 message(STATUS "  libsim     FOUND=${Libsim_FOUND} ROOT=${LIBSIM_ROOT} LIB=${LIBSIM_LIBRARY}")
+if(Libnetconf_FOUND)
+  message(STATUS "  libnetconf FOUND=${Libnetconf_FOUND} ROOT=${LIBNETCONF_ROOT} LIB=${LIBNETCONF_LIBRARY}")
+else()
+  message(STATUS "  libnetconf FOUND=0 (optional; E7 Call Home session pump needs sibling + build/libnetconf.a)")
+endif()
 message(STATUS "  liburing   ${LIBURING_LIBRARY}")
 
 if(EDGEHOST_REQUIRE_SIBLINGS AND Shaggy_FOUND AND NOT SHAGGY_LIBRARY)
@@ -212,6 +219,18 @@ endif()
 if(Librest_FOUND)
   target_link_libraries(edgehost_deps INTERFACE Librest::headers)
 endif()
+if(Libnetconf_FOUND AND TARGET Libnetconf::headers)
+  target_link_libraries(edgehost_deps INTERFACE Libnetconf::headers)
+endif()
+# Optional libnetconf link for later e7_callhome (no host sources link yet).
+if(Libnetconf_FOUND)
+  add_library(edgehost_libnetconf INTERFACE)
+  if(TARGET Libnetconf::netconf)
+    target_link_libraries(edgehost_libnetconf INTERFACE Libnetconf::netconf)
+  elseif(TARGET Libnetconf::headers)
+    target_link_libraries(edgehost_libnetconf INTERFACE Libnetconf::headers)
+  endif()
+endif()
 
 add_executable(edgehost_deps_smoke tests/deps_smoke.c)
 target_link_libraries(edgehost_deps_smoke PRIVATE edgehost_deps)
@@ -223,6 +242,9 @@ if(Libyaml_FOUND)
 endif()
 if(Librest_FOUND)
   target_compile_definitions(edgehost_deps_smoke PRIVATE EDGEHOST_HAVE_LIBREST=1)
+endif()
+if(Libnetconf_FOUND)
+  target_compile_definitions(edgehost_deps_smoke PRIVATE EDGEHOST_HAVE_LIBNETCONF=1)
 endif()
 
 add_executable(edgecore_smoke tests/test_edgecore_smoke.c)
@@ -326,4 +348,8 @@ install(DIRECTORY cmake/
   FILES_MATCHING PATTERN "Find*.cmake" PATTERN "Edge*.cmake"
 )
 install(FILES deps/pins.txt DESTINATION share/edgehost)
-install(FILES config/edgehost.example.yaml DESTINATION share/edgehost/config)
+install(FILES
+  config/edgehost.example.yaml
+  config/edgehost.lab.yaml
+  config/edgehost.e7-lab.yaml
+  DESTINATION share/edgehost/config)

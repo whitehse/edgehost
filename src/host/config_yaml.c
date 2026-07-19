@@ -403,6 +403,78 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         }
         return 0;
     }
+    /* plugins.e7_callhome (PR-2) */
+    if (strcmp(key, "plugins.e7_callhome.enabled") == 0 ||
+        strcmp(key, "e7_callhome.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->e7_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.listen_host") == 0 ||
+        strcmp(key, "plugins.e7_callhome.listen.host") == 0) {
+        if (copy_str(c->e7_listen_host, sizeof(c->e7_listen_host), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.listen_port") == 0 ||
+        strcmp(key, "plugins.e7_callhome.listen.port") == 0) {
+        if (parse_u16(val, &u16) != 0 || u16 == 0) {
+            FAIL("invalid port");
+        }
+        c->e7_listen_port = u16;
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.transport") == 0) {
+        if (copy_str(c->e7_transport, sizeof(c->e7_transport), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.lab_insecure_raw") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->e7_lab_insecure_raw = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.reload_policy") == 0) {
+        if (copy_str(c->e7_reload_policy, sizeof(c->e7_reload_policy), val) !=
+            0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.auto_subscribe_unknown") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->e7_auto_subscribe_unknown = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.dirty_cap") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->e7_dirty_cap = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.rss_budget_bytes") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid size");
+        }
+        c->e7_rss_budget_bytes = sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.e7_callhome.max_sessions") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->e7_max_sessions = (uint32_t)sz;
+        return 0;
+    }
 #undef FAIL
     return 0; /* unknown keys ignored */
 }
@@ -473,8 +545,130 @@ static const char *const g_paths[] = {
     "postgres.enabled",
     "postgres.listen_channels",
     "postgres.listen_channel",
+    "plugins.e7_callhome.enabled",
+    "e7_callhome.enabled",
+    "plugins.e7_callhome.listen_host",
+    "plugins.e7_callhome.listen.host",
+    "plugins.e7_callhome.listen_port",
+    "plugins.e7_callhome.listen.port",
+    "plugins.e7_callhome.transport",
+    "plugins.e7_callhome.lab_insecure_raw",
+    "plugins.e7_callhome.reload_policy",
+    "plugins.e7_callhome.auto_subscribe_unknown",
+    "plugins.e7_callhome.dirty_cap",
+    "plugins.e7_callhome.rss_budget_bytes",
+    "plugins.e7_callhome.max_sessions",
     NULL
 };
+
+/**
+ * Load plugins.e7_callhome.shelves[] sequence (mac primary; optional
+ * shelf_id/label; enabled default true). Paths: shelves.N.mac etc.
+ */
+static int load_e7_shelves(yaml_ctx_t *ctx, edge_config_t *c, char *err,
+                           size_t err_len)
+{
+    size_t i;
+    char path[96];
+    const char *val;
+    int iv;
+
+    c->e7_shelf_count = 0;
+    for (i = 0; i < EDGE_CONFIG_E7_SHELVES_MAX; i++) {
+        edge_e7_shelf_config_t *s = &c->e7_shelves[i];
+
+        snprintf(path, sizeof(path), "plugins.e7_callhome.shelves.%zu.mac", i);
+        val = lookup(ctx, path);
+        if (!val) {
+            /* also accept top-level e7_callhome.shelves */
+            snprintf(path, sizeof(path), "e7_callhome.shelves.%zu.mac", i);
+            val = lookup(ctx, path);
+        }
+        if (!val) {
+            break; /* end of dense sequence */
+        }
+        if (copy_str(s->mac, sizeof(s->mac), val) != 0) {
+            if (err && err_len) {
+                snprintf(err, err_len,
+                         "plugins.e7_callhome.shelves[%zu].mac: too long", i);
+            }
+            return -1;
+        }
+        s->shelf_id[0] = '\0';
+        s->enabled = 1;
+
+        snprintf(path, sizeof(path),
+                 "plugins.e7_callhome.shelves.%zu.shelf_id", i);
+        val = lookup(ctx, path);
+        if (!val) {
+            snprintf(path, sizeof(path),
+                     "plugins.e7_callhome.shelves.%zu.label", i);
+            val = lookup(ctx, path);
+        }
+        if (!val) {
+            snprintf(path, sizeof(path), "e7_callhome.shelves.%zu.shelf_id", i);
+            val = lookup(ctx, path);
+        }
+        if (!val) {
+            snprintf(path, sizeof(path), "e7_callhome.shelves.%zu.label", i);
+            val = lookup(ctx, path);
+        }
+        if (val) {
+            if (copy_str(s->shelf_id, sizeof(s->shelf_id), val) != 0) {
+                if (err && err_len) {
+                    snprintf(err, err_len,
+                             "plugins.e7_callhome.shelves[%zu].shelf_id: "
+                             "too long",
+                             i);
+                }
+                return -1;
+            }
+        }
+
+        snprintf(path, sizeof(path),
+                 "plugins.e7_callhome.shelves.%zu.enabled", i);
+        val = lookup(ctx, path);
+        if (!val) {
+            snprintf(path, sizeof(path), "e7_callhome.shelves.%zu.enabled", i);
+            val = lookup(ctx, path);
+        }
+        if (val) {
+            if (parse_bool(val, &iv) != 0) {
+                if (err && err_len) {
+                    snprintf(err, err_len,
+                             "plugins.e7_callhome.shelves[%zu].enabled: "
+                             "invalid bool",
+                             i);
+                }
+                return -1;
+            }
+            s->enabled = iv;
+        }
+
+        c->e7_shelf_count = (uint32_t)(i + 1);
+    }
+    /* If denser than max, surface overflow when next index has mac */
+    {
+        snprintf(path, sizeof(path),
+                 "plugins.e7_callhome.shelves.%zu.mac",
+                 (size_t)EDGE_CONFIG_E7_SHELVES_MAX);
+        val = lookup(ctx, path);
+        if (!val) {
+            snprintf(path, sizeof(path), "e7_callhome.shelves.%zu.mac",
+                     (size_t)EDGE_CONFIG_E7_SHELVES_MAX);
+            val = lookup(ctx, path);
+        }
+        if (val) {
+            if (err && err_len) {
+                snprintf(err, err_len,
+                         "plugins.e7_callhome.shelves: exceeds max %d",
+                         EDGE_CONFIG_E7_SHELVES_MAX);
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
 
 static int load_from_ctx(yaml_ctx_t *ctx, edge_config_t *c, char *err,
                          size_t err_len)
@@ -501,6 +695,9 @@ static int load_from_ctx(yaml_ctx_t *ctx, edge_config_t *c, char *err,
         if (apply_scalar(c, g_paths[i], val, err, err_len) != 0) {
             return -1;
         }
+    }
+    if (load_e7_shelves(ctx, c, err, err_len) != 0) {
+        return -1;
     }
     return 0;
 }
