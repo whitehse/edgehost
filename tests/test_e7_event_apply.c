@@ -296,6 +296,39 @@ static void test_unknown_and_bad_args(void)
     printf("  PASS: unknown event / bad args\n");
 }
 
+static void test_apply_calix_exa_user_login(void)
+{
+    edge_state_store_t *st = make_pon_store();
+    size_t len = 0;
+    char *xml =
+        load_file("tests/fixtures/e7/calix_exa_user_login.xml", &len);
+    char key[128];
+    char source[16];
+    char buf[1024];
+    size_t n = 0;
+    edge_e7_apply_err_t ae;
+
+    assert(st && xml && len > 0);
+    ae = edge_e7_event_apply(st, "00:02:5d:d8:f3:18", xml, len, key,
+                             sizeof(key), source, sizeof(source));
+    assert(ae == EDGE_E7_APPLY_OK);
+    assert(strcmp(source, "calix.exa") == 0);
+    assert(strcmp(key, "e7/00-02-5d-d8-f3-18/event/latest") == 0);
+    assert(edge_state_get(st, "net.pon", key, buf, sizeof(buf), &n) ==
+           EDGE_STATE_OK);
+    assert(strstr(buf, "\"name\":\"user-login\"") != NULL);
+    assert(strstr(buf, "\"category\":\"SECURITY\"") != NULL);
+    assert(strstr(buf, "\"device_sequence_number\":\"101313\"") != NULL);
+    assert(strstr(buf, "\"source\":\"calix.exa\"") != NULL);
+    /* seq history key */
+    assert(edge_state_get(st, "net.pon", "e7/00-02-5d-d8-f3-18/event/101313",
+                          buf, sizeof(buf), &n) == EDGE_STATE_OK);
+
+    free(xml);
+    edge_state_destroy(st);
+    printf("  PASS: calix.exa user-login → net.pon event keys\n");
+}
+
 int main(void)
 {
     printf("test_e7_event_apply\n");
@@ -307,6 +340,7 @@ int main(void)
     test_apply_ont_geo_map_dynamic();
     test_net_pon_must_be_enabled();
     test_unknown_and_bad_args();
+    test_apply_calix_exa_user_login();
     printf("All e7_event_apply tests passed\n");
     return 0;
 }

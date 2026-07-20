@@ -76,6 +76,9 @@ void edge_config_defaults(edge_config_t *c)
     c->e7_lab_insecure_raw = 0;
     snprintf(c->e7_reload_policy, sizeof(c->e7_reload_policy), "merge");
     c->e7_auto_subscribe_unknown = 0;
+    /* Calix field gear: <stream>exa-events</stream> on create-subscription. */
+    snprintf(c->e7_subscription_stream, sizeof(c->e7_subscription_stream),
+             "exa-events");
     c->e7_dirty_cap = 8192;
     c->e7_rss_budget_bytes = 268435456u; /* 256 MiB */
     c->e7_max_sessions = 160;

@@ -30,6 +30,8 @@ extern "C" {
 #define EDGE_CONFIG_E7_SSH_PASSWORD_MAX 128
 /** Optional expected SSH username (plugins.e7_callhome.ssh_username). */
 #define EDGE_CONFIG_E7_SSH_USERNAME_MAX 64
+/** create-subscription <stream> name (Calix: exa-events). */
+#define EDGE_CONFIG_E7_STREAM_MAX 64
 
 /**
  * One YAML allowlist seed entry (MAC primary key — K17).
@@ -145,6 +147,11 @@ typedef struct {
     int      e7_lab_insecure_raw; /* required true for non-loopback raw */
     char     e7_reload_policy[EDGE_CONFIG_E7_ENUM_MAX]; /* merge | replace_all */
     int      e7_auto_subscribe_unknown; /* default 0 */
+    /**
+     * Notification stream for create-subscription after SESSION_OPEN.
+     * Calix E7 uses "exa-events" (default). Lab peers may use "NETCONF".
+     */
+    char     e7_subscription_stream[EDGE_CONFIG_E7_STREAM_MAX];
     uint32_t e7_dirty_cap;              /* default 8192 */
     size_t   e7_rss_budget_bytes;       /* default 256 MiB */
     uint32_t e7_max_sessions;           /* default 160 */

@@ -109,6 +109,36 @@ edge_e7_apply_err_t edge_e7_event_apply_lab_v1(edge_state_store_t *store,
                                                const char *notification_xml,
                                                size_t xml_len);
 
+/**
+ * Apply a Calix EXA notification (xmlns http://www.calix.com/ns/exa/...).
+ *
+ * Keys under net.pon:
+ *   e7/{mac_key}/event/latest
+ *   e7/{mac_key}/event/{device-sequence-number}  (when seq present)
+ *
+ * JSON includes name, id, category, description, event_time, alarm, and
+ * common session fields when present (source "calix.exa").
+ *
+ * @return EDGE_E7_APPLY_OK, UNKNOWN_EVENT if not a Calix EXA body, or STATE_ERR.
+ */
+edge_e7_apply_err_t edge_e7_event_apply_calix_exa(edge_state_store_t *store,
+                                                  const char *mac_colon,
+                                                  const char *notification_xml,
+                                                  size_t xml_len);
+
+/**
+ * Unified apply: try lab.v1 first, then Calix EXA.
+ * On success, if @p out_key non-NULL, writes the primary net.pon key for
+ * WebSocket notify (event/latest for Calix; ont/pon key for lab.v1).
+ * If @p out_source non-NULL, writes "lab.v1" or "calix.exa".
+ */
+edge_e7_apply_err_t edge_e7_event_apply(edge_state_store_t *store,
+                                        const char *mac_colon,
+                                        const char *notification_xml,
+                                        size_t xml_len, char *out_key,
+                                        size_t out_key_sz, char *out_source,
+                                        size_t out_source_sz);
+
 #ifdef __cplusplus
 }
 #endif

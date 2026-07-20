@@ -62,6 +62,7 @@ This is the **documented lab profile** for E7 Call Home. Highlights:
 | `lab_insecure_raw` | `false` | OK because listen is loopback |
 | `reload_policy` | `merge` | YAML MAC wins; runtime-only retained |
 | `auto_subscribe_unknown` | `false` | Unknown MAC does not auto-sub |
+| `subscription_stream` | `exa-events` | `<stream>` for create-subscription (Calix field) |
 | `rss_budget_bytes` | `268435456` (256 MiB) | Create fails if estimate exceeds |
 | `max_sessions` | `160` | ~150 design + headroom |
 | `dirty_cap` | `8192` | K16 coalesce table |

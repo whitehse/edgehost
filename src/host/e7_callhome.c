@@ -32,6 +32,13 @@
 #define EDGE_E7_TX_CAP           (64 * 1024)
 #define EDGE_E7_IDENTITY_TIMEOUT_MS 10000u
 #define EDGE_E7_HELLO_TIMEOUT_MS    30000u
+/**
+ * SSH ClientAlive keepalive once SESSION_OPEN (libchssh path).
+ * OpenSSH on the E7 tracks *client→server* silence (ClientAliveInterval),
+ * not RX of notifications. Field dials close ~90s without our TX; send
+ * every 15s wall-clock from last keepalive TX (not last RX).
+ */
+#define EDGE_E7_KEEPALIVE_MS        15000u
 /** After identity (auto): wait this long for peer bytes before speaking. */
 #define EDGE_E7_POST_ID_WAIT_MS     400u
 /** Silent listen after identity before we speak (raw probe). */
@@ -140,6 +147,8 @@ typedef struct {
     uint64_t             accepted_ms;
     uint64_t             identity_ms;
     uint64_t             open_ms;
+    uint64_t             last_keepalive_ms; /* last SSH keepalive TX (open) */
+    uint64_t             last_activity_ms;  /* last app RX/TX while open */
 
 #if EDGEHOST_HAVE_LIBNETCONF
     netconf_ctx_t       *nc;
@@ -1462,6 +1471,7 @@ static int session_drain_output(edge_e7_session_t *s)
 static void session_try_subscribe(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     int mid;
+    const char *stream = "exa-events";
 
     if (!s || !s->nc || s->sub_sent || s->state != EDGE_E7_SESS_OPEN) {
         return;
@@ -1470,19 +1480,68 @@ static void session_try_subscribe(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     if (!s->allowlisted && !s->auto_unknown) {
         return;
     }
-    mid = netconf_create_subscription(s->nc, "NETCONF", NULL);
+    /*
+     * Calix field create-subscription (compact form on wire after wrap):
+     *   <create-subscription xmlns="...notification:1.0">
+     *     <stream>exa-events</stream>
+     *   </create-subscription>
+     * Override via plugins.e7_callhome.subscription_stream if needed.
+     */
+    if (ch && ch->cfg && ch->cfg->e7_subscription_stream[0]) {
+        stream = ch->cfg->e7_subscription_stream;
+    }
+    mid = netconf_create_subscription(s->nc, stream, NULL);
     if (mid < 0) {
         e7_trace(ch, "subscribe_fail",
                  s->identity.identity_ok ? s->identity.mac : "", s->peer,
-                 "create_subscription returned error");
+                 "create_subscription stream=%s failed", stream);
         return;
     }
     s->sub_sent = 1;
     s->sub_msg_id = mid;
     e7_trace(ch, "subscribe", s->identity.identity_ok ? s->identity.mac : "",
-             s->peer, "create-subscription sent msg_id=%d", mid);
+             s->peer, "create-subscription stream=%s msg_id=%d", stream, mid);
+    fprintf(stderr,
+            "edgehost: e7_subscribe mac=%s peer=%s stream=%s msg_id=%d\n",
+            s->identity.identity_ok ? s->identity.mac : "-",
+            s->peer[0] ? s->peer : "-", stream, mid);
     (void)session_drain_output(s);
-    (void)ch;
+}
+
+/**
+ * One-line printable peek of notification XML for process / SPA logs.
+ * Newlines → space; non-printables → '.'; truncates with "...".
+ */
+static void e7_event_xml_peek(const char *xml, size_t xml_len, char *out,
+                              size_t out_sz)
+{
+    size_t i, o = 0;
+    size_t max_body;
+
+    if (!out || out_sz < 5) {
+        return;
+    }
+    out[0] = '\0';
+    if (!xml || xml_len == 0) {
+        return;
+    }
+    /* Reserve 3 for "..." + NUL when truncating. */
+    max_body = out_sz - 4;
+    for (i = 0; i < xml_len && o < max_body; i++) {
+        unsigned char c = (unsigned char)xml[i];
+        if (c == '\n' || c == '\r' || c == '\t') {
+            c = ' ';
+        } else if (c < 32 || c >= 127) {
+            c = '.';
+        }
+        out[o++] = (char)c;
+    }
+    if (i < xml_len) {
+        out[o++] = '.';
+        out[o++] = '.';
+        out[o++] = '.';
+    }
+    out[o] = '\0';
 }
 
 static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
@@ -1490,28 +1549,73 @@ static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
 {
     edge_e7_apply_err_t ae;
     char key[EDGE_STATE_KEY_MAX];
+    char peek[160];
+    const char *mac;
+    const char *peer;
+    const char *etime;
 
     if (!ch || !s || !n || n->xml_len == 0) {
         return;
     }
     ch->stats.notifications++;
+    mac = s->identity.identity_ok ? s->identity.mac : "";
+    peer = s->peer[0] ? s->peer : "";
+    etime = (n->event_time_len > 0 && n->event_time[0]) ? n->event_time : "-";
+    e7_event_xml_peek(n->xml, n->xml_len, peek, sizeof(peek));
+
+    /* SPA ring + process log: every notification, before apply. */
+    e7_trace(ch, "event", mac, peer, "notification %zuB eventTime=%s %s",
+             n->xml_len, etime, peek);
+    fprintf(stderr,
+            "edgehost: e7_event mac=%s peer=%s eventTime=%s len=%zu xml=%s\n",
+            mac[0] ? mac : "-", peer[0] ? peer : "-", etime, n->xml_len, peek);
+
+    /* Full body in host stream text capture when enabled. */
+    if (ch->pcap_text_fp) {
+        fprintf(ch->pcap_text_fp,
+                "# EVENT mac=%s peer=%s eventTime=%s len=%zu\n",
+                mac[0] ? mac : "-", peer[0] ? peer : "-", etime, n->xml_len);
+        fwrite(n->xml, 1, n->xml_len, ch->pcap_text_fp);
+        if (n->xml_len == 0 || n->xml[n->xml_len - 1] != '\n') {
+            fputc('\n', ch->pcap_text_fp);
+        }
+        fflush(ch->pcap_text_fp);
+    }
+
     if (!ch->state || !s->identity.identity_ok) {
         return;
     }
-    ae = edge_e7_event_apply_lab_v1(ch->state, s->identity.mac, n->xml,
-                                    n->xml_len);
-    if (ae != EDGE_E7_APPLY_OK) {
-        return;
-    }
-    ch->stats.state_puts++;
-    if (lab_v1_state_key(s->identity.mac, n->xml, n->xml_len, key,
-                         sizeof(key)) == 0) {
-        notify_coalesce(ch, "net.pon", key);
-    }
-    /* PR-9: coalesce map.dynamic ONT mirror when coords present (apply put both). */
-    if (lab_v1_map_key(s->identity.mac, n->xml, n->xml_len, key, sizeof(key)) ==
-        0) {
-        notify_coalesce(ch, "map.dynamic", key);
+    {
+        char source[16];
+        source[0] = '\0';
+        ae = edge_e7_event_apply(ch->state, s->identity.mac, n->xml, n->xml_len,
+                                 key, sizeof(key), source, sizeof(source));
+        if (ae != EDGE_E7_APPLY_OK) {
+            e7_trace(ch, "event_apply", mac, peer,
+                     "apply fail %s (%d) — raw event logged; no state put",
+                     edge_e7_apply_err_name(ae), (int)ae);
+            fprintf(stderr,
+                    "edgehost: e7_event_apply mac=%s fail=%s code=%d\n",
+                    mac[0] ? mac : "-", edge_e7_apply_err_name(ae), (int)ae);
+            return;
+        }
+        ch->stats.state_puts++;
+        e7_trace(ch, "event_apply", mac, peer, "applied source=%s key=%s",
+                 source[0] ? source : "?", key[0] ? key : "-");
+        fprintf(stderr, "edgehost: e7_event_apply mac=%s source=%s key=%s\n",
+                mac[0] ? mac : "-", source[0] ? source : "?",
+                key[0] ? key : "-");
+        if (key[0]) {
+            notify_coalesce(ch, "net.pon", key);
+        } else if (lab_v1_state_key(s->identity.mac, n->xml, n->xml_len, key,
+                                    sizeof(key)) == 0) {
+            notify_coalesce(ch, "net.pon", key);
+        }
+        /* PR-9: map.dynamic ONT mirror when lab.v1 geo present. */
+        if (lab_v1_map_key(s->identity.mac, n->xml, n->xml_len, key,
+                           sizeof(key)) == 0) {
+            notify_coalesce(ch, "map.dynamic", key);
+        }
     }
 }
 
@@ -2125,6 +2229,8 @@ static void session_check_open(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         s->state != EDGE_E7_SESS_OPEN) {
         s->state = EDGE_E7_SESS_OPEN;
         s->open_ms = mono_now_ms();
+        s->last_activity_ms = s->open_ms;
+        s->last_keepalive_ms = s->open_ms;
         ch->stats.sessions_open++;
         ch->stats.sessions_opened++;
         put_session_json(ch, s, "open");
@@ -3022,6 +3128,8 @@ static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         }
         if (n > 0) {
             e7_pcap_write(ch, s, 0, s->rx, (size_t)n);
+            /* Any peer bytes reset the idle clock used for keepalives. */
+            s->last_activity_ms = mono_now_ms();
         }
         if (n == 0) {
             if (s->state == EDGE_E7_SESS_HELLO) {
@@ -3213,6 +3321,47 @@ static void session_on_timeout(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     }
 }
 
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+/**
+ * Send SSH ClientAlive traffic every EDGE_E7_KEEPALIVE_MS of *our* TX silence.
+ * Must NOT key off RX: E7 notifications do not reset OpenSSH ClientAlive.
+ */
+static void session_maybe_keepalive(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                                    uint64_t mono_ms)
+{
+    uint64_t base;
+
+    if (!s || !s->use_chssh || !s->chssh || !s->chssh_ready) {
+        return;
+    }
+    if (s->state != EDGE_E7_SESS_OPEN && s->state != EDGE_E7_SESS_HELLO) {
+        return;
+    }
+    base = s->last_keepalive_ms ? s->last_keepalive_ms : s->open_ms;
+    if (base == 0) {
+        s->last_keepalive_ms = mono_ms;
+        return;
+    }
+    if (mono_ms < base + EDGE_E7_KEEPALIVE_MS) {
+        return;
+    }
+    if (chssh_send_keepalive(s->chssh) != 0) {
+        e7_trace(ch, "keepalive_fail", s->identity.mac, s->peer,
+                 "chssh_send_keepalive failed");
+        return;
+    }
+    if (session_drain_chssh(ch, s) != 0) {
+        e7_trace(ch, "keepalive_fail", s->identity.mac, s->peer,
+                 "drain after keepalive failed");
+        return;
+    }
+    s->last_keepalive_ms = mono_ms;
+    e7_trace(ch, "keepalive", s->identity.mac, s->peer,
+             "SSH ClientAlive TX interval=%ums (rx does not count)",
+             (unsigned)EDGE_E7_KEEPALIVE_MS);
+}
+#endif
+
 static void session_pump(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                          uint64_t mono_ms)
 {
@@ -3235,6 +3384,12 @@ static void session_pump(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (s->state == EDGE_E7_SESS_EMPTY) {
         return;
     }
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+    session_maybe_keepalive(ch, s, mono_ms);
+    if (s->state == EDGE_E7_SESS_EMPTY) {
+        return;
+    }
+#endif
     if (session_flush_tx(ch, s) != 0) {
         e7_trace(ch, "write_err",
                  s->identity.identity_ok ? s->identity.mac : "", s->peer,

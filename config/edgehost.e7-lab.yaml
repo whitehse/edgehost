@@ -79,6 +79,7 @@ plugins:
     lab_insecure_raw: false
     reload_policy: merge
     auto_subscribe_unknown: false
+    subscription_stream: exa-events
     dirty_cap: 8192
     rss_budget_bytes: 268435456
     max_sessions: 160

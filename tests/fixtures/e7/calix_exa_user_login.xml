@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0"><eventTime>2026-07-19T20:26:20-05:00</eventTime>
+<user-login xmlns='http://www.calix.com/ns/exa/base'>
+  <description>User login from CLI/Netconf/EWI</description>
+  <probable-cause>User login from CLI/Netconf/EWI</probable-cause>
+  <details>This event is generated when a user logs into CLI/Netconf/EWI</details>
+  <device-sequence-number>101313</device-sequence-number>
+  <instance-id>12.65878</instance-id>
+  <id>101</id>
+  <name>user-login</name>
+  <alarm>false</alarm>
+  <category>SECURITY</category>
+  <address>/config/system/aaa/user[name='sysadmin']</address>
+  <session-id>9730</session-id>
+  <session-login>sysadmin</session-login>
+  <session-manager>netconf</session-manager>
+  <session-ip>192.168.32.49</session-ip>
+  <is-maskable>false</is-maskable>
+  <user-name>sysadmin</user-name>
+</user-login>
+</notification>

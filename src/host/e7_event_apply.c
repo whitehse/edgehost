@@ -1,9 +1,10 @@
 /**
  * @file e7_event_apply.c
- * @brief lab.v1 ONT/PON apply + MAC/identity helpers (PR-3).
+ * @brief lab.v1 ONT/PON apply + Calix EXA event apply + MAC/identity helpers.
  *
- * lab.v1 is not a Calix wire format — synthetic fixtures only until field
- * samples exist (see docs/designs/e7-netconf-callhome.md).
+ * lab.v1 remains the synthetic fixture format (urn:edgehost:lab:e7:1.0).
+ * Field gear (exa-events stream) uses Calix xmlns
+ * http://www.calix.com/ns/exa/... (e.g. user-login / user-logout).
  */
 
 #include "edge_e7_event_apply.h"
@@ -489,4 +490,263 @@ edge_e7_apply_err_t edge_e7_event_apply_lab_v1(edge_state_store_t *store,
     }
 
     return EDGE_E7_APPLY_UNKNOWN_EVENT;
+}
+
+/** Escape for JSON string content (no surrounding quotes). */
+static int json_esc(const char *in, char *out, size_t out_sz)
+{
+    size_t o = 0;
+    if (!out || out_sz == 0) {
+        return -1;
+    }
+    if (!in) {
+        out[0] = '\0';
+        return 0;
+    }
+    for (; *in; in++) {
+        unsigned char c = (unsigned char)*in;
+        if (c == '"' || c == '\\') {
+            if (o + 2 >= out_sz) {
+                return -1;
+            }
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            if (o + 1 >= out_sz) {
+                return -1;
+            }
+            out[o++] = ' ';
+        } else if (c < 32) {
+            if (o + 1 >= out_sz) {
+                return -1;
+            }
+            out[o++] = '.';
+        } else {
+            if (o + 1 >= out_sz) {
+                return -1;
+            }
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+    return 0;
+}
+
+static int looks_like_calix_exa(const char *xml, size_t len)
+{
+    static const char needle[] = "calix.com/ns/exa";
+    size_t nlen = sizeof(needle) - 1;
+    size_t i;
+    if (!xml || len < nlen) {
+        return 0;
+    }
+    for (i = 0; i + nlen <= len; i++) {
+        if (memcmp(xml + i, needle, nlen) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+edge_e7_apply_err_t edge_e7_event_apply_calix_exa(edge_state_store_t *store,
+                                                  const char *mac_colon,
+                                                  const char *notification_xml,
+                                                  size_t xml_len)
+{
+    char mac[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char event_time[EDGE_E7_EVENT_TIME_MAX];
+    char name[64];
+    char id[32];
+    char category[48];
+    char description[192];
+    char seq[32];
+    char instance_id[48];
+    char alarm[16];
+    char session_mgr[32];
+    char session_ip[64];
+    char user_name[64];
+    char esc_name[80], esc_id[40], esc_cat[64], esc_desc[220];
+    char esc_seq[40], esc_inst[56], esc_alarm[20], esc_sm[40], esc_sip[72];
+    char esc_user[72], esc_etime[EDGE_E7_EVENT_TIME_MAX + 8];
+    char key_latest[EDGE_STATE_KEY_MAX];
+    char key_seq[EDGE_STATE_KEY_MAX];
+    char json[768];
+    int n;
+    edge_e7_apply_err_t ae;
+
+    if (!store || !mac_colon || !notification_xml || xml_len == 0) {
+        return EDGE_E7_APPLY_BAD_ARG;
+    }
+    if (!looks_like_calix_exa(notification_xml, xml_len)) {
+        return EDGE_E7_APPLY_UNKNOWN_EVENT;
+    }
+    if (edge_e7_mac_normalize(mac_colon, mac, sizeof(mac)) != 0 ||
+        edge_e7_mac_to_key_seg(mac, mac_key, sizeof(mac_key)) != 0) {
+        return EDGE_E7_APPLY_BAD_MAC;
+    }
+
+    event_time[0] = name[0] = id[0] = category[0] = description[0] = '\0';
+    seq[0] = instance_id[0] = alarm[0] = session_mgr[0] = session_ip[0] =
+        user_name[0] = '\0';
+
+    (void)xml_elem_text(notification_xml, xml_len, "eventTime", event_time,
+                        sizeof(event_time));
+    (void)xml_elem_text(notification_xml, xml_len, "name", name, sizeof(name));
+    (void)xml_elem_text(notification_xml, xml_len, "id", id, sizeof(id));
+    (void)xml_elem_text(notification_xml, xml_len, "category", category,
+                        sizeof(category));
+    (void)xml_elem_text(notification_xml, xml_len, "description", description,
+                        sizeof(description));
+    (void)xml_elem_text(notification_xml, xml_len, "device-sequence-number",
+                        seq, sizeof(seq));
+    (void)xml_elem_text(notification_xml, xml_len, "instance-id", instance_id,
+                        sizeof(instance_id));
+    (void)xml_elem_text(notification_xml, xml_len, "alarm", alarm,
+                        sizeof(alarm));
+    (void)xml_elem_text(notification_xml, xml_len, "session-manager",
+                        session_mgr, sizeof(session_mgr));
+    (void)xml_elem_text(notification_xml, xml_len, "session-ip", session_ip,
+                        sizeof(session_ip));
+    (void)xml_elem_text(notification_xml, xml_len, "user-name", user_name,
+                        sizeof(user_name));
+
+    /* Require at least a Calix event name (or fall back to category/id). */
+    if (!name[0] && !id[0] && !category[0]) {
+        return EDGE_E7_APPLY_BAD_XML;
+    }
+    if (!name[0]) {
+        snprintf(name, sizeof(name), "exa-event");
+    }
+
+    if (json_esc(name, esc_name, sizeof(esc_name)) != 0 ||
+        json_esc(id, esc_id, sizeof(esc_id)) != 0 ||
+        json_esc(category, esc_cat, sizeof(esc_cat)) != 0 ||
+        json_esc(description, esc_desc, sizeof(esc_desc)) != 0 ||
+        json_esc(seq, esc_seq, sizeof(esc_seq)) != 0 ||
+        json_esc(instance_id, esc_inst, sizeof(esc_inst)) != 0 ||
+        json_esc(alarm, esc_alarm, sizeof(esc_alarm)) != 0 ||
+        json_esc(session_mgr, esc_sm, sizeof(esc_sm)) != 0 ||
+        json_esc(session_ip, esc_sip, sizeof(esc_sip)) != 0 ||
+        json_esc(user_name, esc_user, sizeof(esc_user)) != 0 ||
+        json_esc(event_time, esc_etime, sizeof(esc_etime)) != 0) {
+        return EDGE_E7_APPLY_BAD_XML;
+    }
+
+    n = snprintf(key_latest, sizeof(key_latest), "e7/%s/event/latest", mac_key);
+    if (n < 0 || (size_t)n >= sizeof(key_latest)) {
+        return EDGE_E7_APPLY_BAD_XML;
+    }
+
+    n = snprintf(
+        json, sizeof(json),
+        "{\"source\":\"calix.exa\",\"mac\":\"%s\",\"event_time\":\"%s\","
+        "\"name\":\"%s\",\"id\":\"%s\",\"category\":\"%s\","
+        "\"description\":\"%s\",\"device_sequence_number\":\"%s\","
+        "\"instance_id\":\"%s\",\"alarm\":\"%s\","
+        "\"session_manager\":\"%s\",\"session_ip\":\"%s\","
+        "\"user_name\":\"%s\"}",
+        mac, esc_etime, esc_name, esc_id, esc_cat, esc_desc, esc_seq, esc_inst,
+        esc_alarm, esc_sm, esc_sip, esc_user);
+    if (n < 0 || (size_t)n >= sizeof(json)) {
+        return EDGE_E7_APPLY_BAD_XML;
+    }
+
+    ae = apply_state(store, key_latest, json);
+    if (ae != EDGE_E7_APPLY_OK) {
+        return ae;
+    }
+
+    /* History key when device sequence is present (digits / safe chars only). */
+    if (seq[0]) {
+        size_t i;
+        int ok = 1;
+        for (i = 0; seq[i]; i++) {
+            char c = seq[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') || c == '-' || c == '_')) {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok) {
+            n = snprintf(key_seq, sizeof(key_seq), "e7/%s/event/%s", mac_key,
+                         seq);
+            if (n > 0 && (size_t)n < sizeof(key_seq)) {
+                (void)apply_state(store, key_seq, json);
+            }
+        }
+    }
+    return EDGE_E7_APPLY_OK;
+}
+
+edge_e7_apply_err_t edge_e7_event_apply(edge_state_store_t *store,
+                                        const char *mac_colon,
+                                        const char *notification_xml,
+                                        size_t xml_len, char *out_key,
+                                        size_t out_key_sz, char *out_source,
+                                        size_t out_source_sz)
+{
+    edge_e7_apply_err_t ae;
+    char mac[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+
+    if (out_key && out_key_sz) {
+        out_key[0] = '\0';
+    }
+    if (out_source && out_source_sz) {
+        out_source[0] = '\0';
+    }
+
+    ae = edge_e7_event_apply_lab_v1(store, mac_colon, notification_xml,
+                                    xml_len);
+    if (ae == EDGE_E7_APPLY_OK) {
+        if (out_source && out_source_sz) {
+            snprintf(out_source, out_source_sz, "lab.v1");
+        }
+        /* Best-effort primary key for notify (ont/pon). */
+        if (out_key && out_key_sz &&
+            edge_e7_mac_normalize(mac_colon, mac, sizeof(mac)) == 0 &&
+            edge_e7_mac_to_key_seg(mac, mac_key, sizeof(mac_key)) == 0) {
+            if (xml_has_elem(notification_xml, xml_len, "ont-event")) {
+                char ont_id[EDGE_E7_AID_MAX];
+                char ont_key[EDGE_E7_AID_MAX];
+                if (xml_elem_text(notification_xml, xml_len, "ont-id", ont_id,
+                                  sizeof(ont_id)) == 0 &&
+                    edge_e7_aid_to_key_seg(ont_id, ont_key, sizeof(ont_key)) ==
+                        0) {
+                    snprintf(out_key, out_key_sz, "e7/%s/ont/%s", mac_key,
+                             ont_key);
+                }
+            } else if (xml_has_elem(notification_xml, xml_len, "pon-alarm")) {
+                char pon_id[EDGE_E7_AID_MAX];
+                char pon_key[EDGE_E7_AID_MAX];
+                if (xml_elem_text(notification_xml, xml_len, "pon-id", pon_id,
+                                  sizeof(pon_id)) == 0 &&
+                    edge_e7_aid_to_key_seg(pon_id, pon_key, sizeof(pon_key)) ==
+                        0) {
+                    snprintf(out_key, out_key_sz, "e7/%s/pon/%s", mac_key,
+                             pon_key);
+                }
+            }
+        }
+        return EDGE_E7_APPLY_OK;
+    }
+    if (ae != EDGE_E7_APPLY_UNKNOWN_EVENT) {
+        return ae; /* BAD_XML / STATE_ERR for recognized lab bodies */
+    }
+
+    ae = edge_e7_event_apply_calix_exa(store, mac_colon, notification_xml,
+                                       xml_len);
+    if (ae == EDGE_E7_APPLY_OK) {
+        if (out_source && out_source_sz) {
+            snprintf(out_source, out_source_sz, "calix.exa");
+        }
+        if (out_key && out_key_sz &&
+            edge_e7_mac_normalize(mac_colon, mac, sizeof(mac)) == 0 &&
+            edge_e7_mac_to_key_seg(mac, mac_key, sizeof(mac_key)) == 0) {
+            snprintf(out_key, out_key_sz, "e7/%s/event/latest", mac_key);
+        }
+    }
+    return ae;
 }

@@ -539,6 +539,13 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         c->e7_auto_subscribe_unknown = iv;
         return 0;
     }
+    if (strcmp(key, "plugins.e7_callhome.subscription_stream") == 0) {
+        if (copy_str(c->e7_subscription_stream, sizeof(c->e7_subscription_stream),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
     if (strcmp(key, "plugins.e7_callhome.dirty_cap") == 0) {
         if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
             FAIL("invalid");
@@ -660,6 +667,7 @@ static const char *const g_paths[] = {
     "plugins.e7_callhome.lab_insecure_raw",
     "plugins.e7_callhome.reload_policy",
     "plugins.e7_callhome.auto_subscribe_unknown",
+    "plugins.e7_callhome.subscription_stream",
     "plugins.e7_callhome.dirty_cap",
     "plugins.e7_callhome.rss_budget_bytes",
     "plugins.e7_callhome.max_sessions",
