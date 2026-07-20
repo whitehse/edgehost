@@ -77,8 +77,10 @@
       <section class="card">
         <h2>2-port optical tap</h2>
         <p class="hint">
-          Interactive lesson (libanim). Play through downstream split, insertion loss,
+          Interactive lesson (libanim) with optional <strong>voice narration</strong>
+          (browser text-to-speech). Play through downstream split, insertion loss,
           ONT receive window, upstream aggregation, and rural design motivations.
+          Prefer Chrome/Edge; click Play once so the browser allows speech.
         </p>
         <div class="stage-stack">
           <canvas id="stage" width="960" height="540" aria-label="Tap lesson animation"></canvas>
@@ -94,7 +96,23 @@
           </label>
           <span id="timeLabel" class="time">0 / 0 ms</span>
         </div>
+        <div class="transport voice-bar" style="margin-top:0.5rem;flex-wrap:wrap;gap:0.75rem">
+          <label title="Browser text-to-speech reads each narration cue">
+            <input type="checkbox" id="voiceEnabled" checked/>
+            Voice narration
+          </label>
+          <label title="Hold the animation while the current line is spoken">
+            <input type="checkbox" id="voiceHold" checked/>
+            Pause while speaking
+          </label>
+          <label>
+            Rate
+            <input type="range" id="voiceRate" min="0.7" max="1.4" step="0.05" value="1"/>
+          </label>
+          <button type="button" id="btnStopVoice" class="ghost">Stop voice</button>
+        </div>
         <p id="modeLabel" class="mode">Engine: …</p>
+        <p id="voiceStatus" class="mode">Voice: …</p>
         <div id="narration" class="narration" role="status" aria-live="polite">
           Loading lesson…
         </div>

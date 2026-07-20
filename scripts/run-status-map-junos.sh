@@ -242,6 +242,11 @@ link_libanim_assets() {
   link_or_refresh "$ANIM/demo/webgpu_renderer.js" "$EXPLAIN_DIR/player/webgpu_renderer.js"
   link_or_refresh "$ANIM/demo/anim.wasm" "$EXPLAIN_DIR/player/anim.wasm"
   link_or_refresh "$ANIM/demo/index.html" "$EXPLAIN_DIR/player/index.html"
+  # Voice narrator is first-party SPA code under spa/explain/player/narrator.js
+  # (not from libanim demo). Ensure file is present for documentation imports.
+  if [[ ! -f "$EXPLAIN_DIR/player/narrator.js" ]]; then
+    echo "  note: spa/explain/player/narrator.js ships in-tree (Web Speech TTS)"
+  fi
 
   if [[ -d "$ANIM/fixtures/templates" ]]; then
     for f in "$ANIM/fixtures/templates"/*.tmpl; do
