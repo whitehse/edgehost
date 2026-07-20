@@ -298,19 +298,36 @@ static void peer_to_str(const struct sockaddr *peer, socklen_t peer_len,
  * Match runtime allowlist by normalized MAC.
  * @return 1 allowlisted+enabled, 0 present but disabled, -1 not found.
  */
+/** Primary display/log key for a session identity. */
+static const char *sess_id_key(const edge_e7_session_t *s)
+{
+    if (!s || !s->identity.identity_ok) {
+        return "";
+    }
+    if (s->identity.mac[0]) {
+        return s->identity.mac;
+    }
+    return s->identity.device_id;
+}
+
 static int shelf_lookup_runtime(const edge_e7_callhome_t *ch,
                                 const char *mac_norm)
 {
     uint32_t i;
 
-    if (!ch || !mac_norm) {
+    if (!ch || !mac_norm || !mac_norm[0]) {
         return -1;
     }
     for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
         if (!ch->runtime[i].used) {
             continue;
         }
-        if (strcmp(ch->runtime[i].mac, mac_norm) == 0) {
+        if (ch->runtime[i].mac[0] &&
+            strcmp(ch->runtime[i].mac, mac_norm) == 0) {
+            return ch->runtime[i].enabled ? 1 : 0;
+        }
+        if (ch->runtime[i].device_id[0] &&
+            strcmp(ch->runtime[i].device_id, mac_norm) == 0) {
             return ch->runtime[i].enabled ? 1 : 0;
         }
     }
@@ -321,15 +338,29 @@ static edge_e7_runtime_shelf_t *runtime_find(edge_e7_callhome_t *ch,
                                              const char *mac_norm)
 {
     uint32_t i;
-    if (!ch || !mac_norm) {
+    if (!ch || !mac_norm || !mac_norm[0]) {
         return NULL;
     }
     for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
-        if (ch->runtime[i].used && strcmp(ch->runtime[i].mac, mac_norm) == 0) {
+        if (!ch->runtime[i].used) {
+            continue;
+        }
+        if (ch->runtime[i].mac[0] &&
+            strcmp(ch->runtime[i].mac, mac_norm) == 0) {
+            return &ch->runtime[i];
+        }
+        if (ch->runtime[i].device_id[0] &&
+            strcmp(ch->runtime[i].device_id, mac_norm) == 0) {
             return &ch->runtime[i];
         }
     }
     return NULL;
+}
+
+static edge_e7_runtime_shelf_t *runtime_find_device(edge_e7_callhome_t *ch,
+                                                    const char *device_id)
+{
+    return runtime_find(ch, device_id);
 }
 
 static edge_e7_runtime_shelf_t *runtime_alloc(edge_e7_callhome_t *ch)
@@ -352,31 +383,43 @@ static edge_e7_runtime_shelf_t *runtime_alloc(edge_e7_callhome_t *ch)
 static void put_config_json(edge_e7_callhome_t *ch,
                             const edge_e7_runtime_shelf_t *rs)
 {
-    char mac_key[EDGE_E7_MAC_MAX];
+    char sk[128];
     char key[EDGE_STATE_KEY_MAX];
-    char json[512];
+    char json[768];
     int n;
     edge_state_err_t e;
+    const char *id;
 
     if (!ch || !ch->state || !rs || !rs->used) {
         return;
     }
-    if (edge_e7_mac_to_key_seg(rs->mac, mac_key, sizeof(mac_key)) != 0) {
+    sk[0] = '\0';
+    if (rs->mac[0]) {
+        (void)edge_e7_mac_to_key_seg(rs->mac, sk, sizeof(sk));
+    } else if (rs->device_id[0]) {
+        (void)edge_e7_device_key_seg(rs->device_id, sk, sizeof(sk));
+    }
+    if (!sk[0]) {
         return;
     }
-    n = snprintf(key, sizeof(key), "e7/%s/config", mac_key);
+    n = snprintf(key, sizeof(key), "e7/%s/config", sk);
     if (n < 0 || (size_t)n >= sizeof(key)) {
         return;
     }
+    id = rs->mac[0] ? rs->mac : rs->device_id;
     n = snprintf(
         json, sizeof(json),
-        "{\"v\":1,\"mac\":\"%s\",\"label\":\"%s\",\"enabled\":%s,"
+        "{\"v\":1,\"mac\":\"%s\",\"device_id\":\"%s\",\"vendor\":\"%s\","
+        "\"label\":\"%s\",\"enabled\":%s,\"has_secret\":%s,"
         "\"note\":\"not written to YAML; set plugins.e7_callhome.allowlist_path "
         "for file durability\"}",
-        rs->mac, rs->label[0] ? rs->label : "", rs->enabled ? "true" : "false");
+        rs->mac[0] ? rs->mac : "", rs->device_id[0] ? rs->device_id : "",
+        rs->vendor[0] ? rs->vendor : "", rs->label[0] ? rs->label : "",
+        rs->enabled ? "true" : "false", rs->secret[0] ? "true" : "false");
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return;
     }
+    (void)id;
     e = edge_state_put_and_notify(ch->state, ch->hub, "inventory", key, json,
                                   (size_t)n, NULL, 0);
     if (e == EDGE_STATE_OK) {
@@ -462,9 +505,11 @@ static void load_runtime_from_file(edge_e7_callhome_t *ch)
         char mac_raw[EDGE_CONFIG_E7_MAC_MAX];
         char norm[EDGE_E7_MAC_MAX];
         char label[EDGE_CONFIG_E7_SHELF_ID_MAX];
+        char vendor[16];
+        char device_id[EDGE_E7_DEVICE_ID_MAX];
+        char secret[EDGE_E7_SECRET_MAX];
         int enabled = 1;
-        edge_e7_runtime_shelf_t *rs;
-        char *tok;
+        int has_secret = 0;
 
         while (*p == ' ' || *p == '\t') {
             p++;
@@ -472,31 +517,30 @@ static void load_runtime_from_file(edge_e7_callhome_t *ch)
         if (*p == '\0' || *p == '#' || *p == '\n' || *p == '\r') {
             continue;
         }
-        mac_raw[0] = '\0';
-        label[0] = '\0';
-        /* tokenize space-separated key=value; label may contain spaces after = */
-        while (*p) {
+        mac_raw[0] = label[0] = vendor[0] = device_id[0] = secret[0] = '\0';
+        while (*p && *p != '\n' && *p != '\r') {
+            char *tok;
+            size_t k;
             while (*p == ' ' || *p == '\t') {
                 p++;
             }
             if (*p == '\0' || *p == '\n' || *p == '\r') {
                 break;
             }
+            if (strncmp(p, "label=", 6) == 0) {
+                char *src = p + 6;
+                k = 0;
+                while (src[k] && src[k] != '\n' && src[k] != '\r' &&
+                       k + 1 < sizeof(label)) {
+                    label[k] = src[k];
+                    k++;
+                }
+                label[k] = '\0';
+                break;
+            }
             tok = p;
             while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
                 p++;
-            }
-            if (strncmp(tok, "label=", 6) == 0) {
-                /* rest of line after label= */
-                char *src = tok + 6;
-                size_t n = 0;
-                while (src[n] && src[n] != '\n' && src[n] != '\r' &&
-                       n + 1 < sizeof(label)) {
-                    label[n] = src[n];
-                    n++;
-                }
-                label[n] = '\0';
-                break;
             }
             if (*p) {
                 *p++ = '\0';
@@ -505,28 +549,32 @@ static void load_runtime_from_file(edge_e7_callhome_t *ch)
                 snprintf(mac_raw, sizeof(mac_raw), "%s", tok + 4);
             } else if (strncmp(tok, "enabled=", 8) == 0) {
                 enabled = (tok[8] == '0') ? 0 : 1;
+            } else if (strncmp(tok, "vendor=", 7) == 0) {
+                snprintf(vendor, sizeof(vendor), "%s", tok + 7);
+            } else if (strncmp(tok, "device_id=", 10) == 0) {
+                snprintf(device_id, sizeof(device_id), "%s", tok + 10);
+            } else if (strncmp(tok, "secret=", 7) == 0) {
+                snprintf(secret, sizeof(secret), "%s", tok + 7);
+                has_secret = 1;
             }
         }
-        if (mac_raw[0] == '\0' ||
-            edge_e7_mac_normalize(mac_raw, norm, sizeof(norm)) != 0) {
+        if (mac_raw[0] == '\0' && device_id[0] == '\0') {
             continue;
         }
-        rs = runtime_find(ch, norm);
-        if (!rs) {
-            rs = runtime_alloc(ch);
-            if (!rs) {
-                break;
-            }
-            memcpy(rs->mac, norm, sizeof(rs->mac));
-            rs->from_yaml = 0;
-            /* Field allowlist: start with silent listen probe. */
-            rs->probe_mode = EDGE_E7_PROBE_SILENT;
+        if (mac_raw[0] &&
+            edge_e7_mac_normalize(mac_raw, norm, sizeof(norm)) == 0) {
+            (void)edge_e7_callhome_allowlist_upsert_ex(
+                ch, norm, label[0] ? label : NULL, enabled,
+                vendor[0] ? vendor : NULL, device_id[0] ? device_id : NULL,
+                has_secret ? secret : NULL);
+        } else {
+            (void)edge_e7_callhome_allowlist_upsert_ex(
+                ch, device_id[0] ? device_id : mac_raw,
+                label[0] ? label : NULL, enabled,
+                vendor[0] ? vendor : "junos",
+                device_id[0] ? device_id : mac_raw,
+                has_secret ? secret : NULL);
         }
-        rs->enabled = enabled ? 1 : 0;
-        if (label[0]) {
-            snprintf(rs->label, sizeof(rs->label), "%s", label);
-        }
-        put_config_json(ch, rs);
     }
     fclose(fp);
 }
@@ -556,7 +604,23 @@ static void save_runtime_to_file(edge_e7_callhome_t *ch)
         if (!rs->used || rs->mac[0] == '\0') {
             continue;
         }
-        fprintf(fp, "mac=%s enabled=%d", rs->mac, rs->enabled ? 1 : 0);
+        if (rs->mac[0]) {
+            fprintf(fp, "mac=%s", rs->mac);
+        } else if (rs->device_id[0]) {
+            fprintf(fp, "device_id=%s", rs->device_id);
+        } else {
+            continue;
+        }
+        fprintf(fp, " enabled=%d", rs->enabled ? 1 : 0);
+        if (rs->vendor[0]) {
+            fprintf(fp, " vendor=%s", rs->vendor);
+        }
+        if (rs->device_id[0] && rs->mac[0]) {
+            fprintf(fp, " device_id=%s", rs->device_id);
+        }
+        if (rs->secret[0]) {
+            fprintf(fp, " secret=%s", rs->secret);
+        }
         if (rs->label[0]) {
             fprintf(fp, " label=%s", rs->label);
         }
@@ -645,7 +709,14 @@ static edge_e7_session_t *session_find_by_mac(edge_e7_callhome_t *ch,
         if (s->state == EDGE_E7_SESS_EMPTY) {
             continue;
         }
-        if (s->identity.identity_ok && strcmp(s->identity.mac, mac_norm) == 0) {
+        if (!s->identity.identity_ok) {
+            continue;
+        }
+        if (s->identity.mac[0] && strcmp(s->identity.mac, mac_norm) == 0) {
+            return s;
+        }
+        if (s->identity.device_id[0] &&
+            strcmp(s->identity.device_id, mac_norm) == 0) {
             return s;
         }
     }
@@ -926,32 +997,48 @@ static void notify_coalesce(edge_e7_callhome_t *ch, const char *ns,
 static void put_session_json(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                              const char *status)
 {
-    char mac_key[EDGE_E7_MAC_MAX];
+    char sk[128];
     char key[EDGE_STATE_KEY_MAX];
-    char json[512];
+    char json[640];
     int n;
     edge_state_err_t e;
+    const char *id;
 
     if (!ch || !ch->state || !s || !s->identity.identity_ok || !status) {
         return;
     }
-    if (edge_e7_mac_to_key_seg(s->identity.mac, mac_key, sizeof(mac_key)) != 0) {
+    sk[0] = '\0';
+    if (s->identity.mac[0]) {
+        if (edge_e7_mac_to_key_seg(s->identity.mac, sk, sizeof(sk)) != 0) {
+            return;
+        }
+    } else if (s->identity.device_id[0]) {
+        if (edge_e7_device_key_seg(s->identity.device_id, sk, sizeof(sk)) != 0) {
+            return;
+        }
+    } else {
         return;
     }
-    n = snprintf(key, sizeof(key), "e7/%s/session", mac_key);
+    n = snprintf(key, sizeof(key), "e7/%s/session", sk);
     if (n < 0 || (size_t)n >= sizeof(key)) {
         return;
     }
+    id = sess_id_key(s);
     n = snprintf(json, sizeof(json),
-                 "{\"v\":1,\"mac\":\"%s\",\"serial\":\"%s\",\"model\":\"%s\","
+                 "{\"v\":1,\"mac\":\"%s\",\"device_id\":\"%s\",\"vendor\":\"%s\","
+                 "\"serial\":\"%s\",\"model\":\"%s\","
                  "\"source_ip\":\"%s\",\"peer\":\"%s\",\"state\":\"%s\","
                  "\"status\":\"%s\"}",
-                 s->identity.mac, s->identity.serial, s->identity.model,
+                 s->identity.mac[0] ? s->identity.mac : "",
+                 s->identity.device_id[0] ? s->identity.device_id : "",
+                 s->identity.vendor[0] ? s->identity.vendor : "",
+                 s->identity.serial, s->identity.model,
                  s->identity.source_ip[0] ? s->identity.source_ip : s->peer,
                  s->peer, status, status);
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return;
     }
+    (void)id;
     /* Low-rate path: immediate STATE_CHANGED (coalesce=0). */
     e = edge_state_put_and_notify(ch->state, ch->hub, "inventory", key, json,
                                   (size_t)n, NULL, 0);
@@ -1420,6 +1507,145 @@ static int find_identity_end(const char *buf, size_t len)
         }
     }
     return -1;
+}
+
+/**
+ * Junos Call Home after DEVICE-CONN-INFO: NMS is SSH client (no Calix ack).
+ * Optional shared secret verifies HOST-KEY HMAC when present.
+ */
+static int session_finish_junos_identity(edge_e7_callhome_t *ch,
+                                         edge_e7_session_t *s,
+                                         edge_e7_identity_t *id)
+{
+    edge_e7_runtime_shelf_t *rs;
+    int look;
+    size_t id_end;
+
+    if (!ch || !s || !id || !id->identity_ok || !id->device_id[0]) {
+        return -1;
+    }
+    id_end = id->consumed ? id->consumed : s->id_len;
+    s->identity = *id;
+
+    e7_trace(ch, "identity_ok", id->device_id, s->peer,
+             "vendor=junos device_id=%s host_key=%s hmac=%s",
+             id->device_id, id->has_host_key ? "yes" : "no",
+             id->has_hmac ? "yes" : "no");
+
+    rs = runtime_find_device(ch, id->device_id);
+    if (!rs) {
+        /* Also try path-key match (allowlist path uses device-id as mac) */
+        look = shelf_lookup_runtime(ch, id->device_id);
+    } else {
+        look = rs->enabled ? 1 : 0;
+    }
+
+    if (rs && rs->secret[0]) {
+        if (!id->has_host_key || !id->has_hmac) {
+            ch->stats.rejects_other++;
+            e7_trace(ch, "junos_hmac_missing", id->device_id, s->peer,
+                     "allowlist has secret but peer sent no HOST-KEY/HMAC");
+            session_close(ch, s);
+            return -1;
+        }
+        if (edge_e7_junos_hmac_verify(id->host_key, id->hmac, rs->secret) !=
+            0) {
+            ch->stats.rejects_other++;
+            e7_trace(ch, "junos_hmac_fail", id->device_id, s->peer,
+                     "HOST-KEY HMAC does not match shared secret");
+            session_close(ch, s);
+            return -1;
+        }
+        e7_trace(ch, "junos_hmac_ok", id->device_id, s->peer,
+                 "HOST-KEY HMAC verified");
+    } else if (id->has_hmac && rs && !rs->secret[0]) {
+        e7_trace(ch, "junos_hmac_skip", id->device_id, s->peer,
+                 "peer sent HMAC but no secret on allowlist — not verified");
+    }
+
+    if (look == 0) {
+        put_session_json(ch, s, "disabled");
+        ch->stats.rejects_disabled++;
+        e7_trace(ch, "reject_disabled", id->device_id, s->peer,
+                 "Junos device on allowlist but enabled=false");
+        session_close(ch, s);
+        return -1;
+    }
+    if (look < 0) {
+        if (!ch->cfg->e7_auto_subscribe_unknown) {
+            put_session_json(ch, s, "unconfigured");
+            ch->stats.rejects_not_allowlisted++;
+            e7_trace(ch, "reject_unconfigured", id->device_id, s->peer,
+                     "DEVICE-ID not on allowlist — add Junos shelf on /e7/");
+            session_close(ch, s);
+            return -1;
+        }
+        s->auto_unknown = 1;
+        s->allowlisted = 0;
+        e7_trace(ch, "auto_unknown", id->device_id, s->peer,
+                 "DEVICE-ID not allowlisted; auto_subscribe_unknown=true");
+    } else {
+        s->allowlisted = 1;
+        s->auto_unknown = 0;
+        e7_trace(ch, "allowlist_ok", id->device_id, s->peer,
+                 "DEVICE-ID matched runtime allowlist");
+    }
+
+    e7_trace_bytes(ch, "identity_hex", id->device_id, s->peer, "junos_preamble",
+                   s->id_buf, id_end);
+
+    /* Leftover after DEVICE-CONN-INFO is SSH server banner stream. */
+    {
+        size_t rem = s->id_len > id_end ? s->id_len - id_end : 0;
+        size_t off = 0;
+        if (rem > 0) {
+            memmove(s->id_buf, s->id_buf + id_end, rem);
+        }
+        s->id_len = rem;
+        while (off < s->id_len &&
+               (s->id_buf[off] == ' ' || s->id_buf[off] == '\t' ||
+                s->id_buf[off] == '\r' || s->id_buf[off] == '\n')) {
+            off++;
+        }
+        if (off > 0) {
+            if (off < s->id_len) {
+                memmove(s->id_buf, s->id_buf + off, s->id_len - off);
+                s->id_len -= off;
+            } else {
+                s->id_len = 0;
+            }
+        }
+    }
+
+#if EDGEHOST_HAVE_LIBNETCONF
+    /*
+     * Junos NETCONF Call Home (docs.juniper.net): after TCP + DEVICE-CONN-INFO,
+     * NMS is SSH client and NETCONF client — same inverted roles as Calix after
+     * <ack>ok</ack>, but no XML ack step.
+     */
+    s->state = EDGE_E7_SESS_POST_ID;
+    s->identity_ms = mono_now_ms();
+    s->probe_mode = EDGE_E7_PROBE_SILENT;
+    s->ssh_phase = EDGE_E7_SSH_PHASE_HOLD;
+    s->ssh_resume = EDGE_E7_SSH_PHASE_SSH;
+    e7_trace(ch, "post_identity", id->device_id, s->peer,
+             "junos DEVICE-CONN-INFO complete — waiting for SSH- (NMS=SSH client)");
+
+    if (s->id_len >= 4 && s->id_buf[0] == 'S' && s->id_buf[1] == 'S' &&
+        s->id_buf[2] == 'H' && s->id_buf[3] == '-') {
+        e7_trace(ch, "detect_ssh_server", id->device_id, s->peer,
+                 "Junos SSH server banner in leftover — starting SSH client");
+        if (session_begin_after_identity(ch, s, 1) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+    /* Quiet wait for SSH banner (POST_ID timeout path starts client). */
+    return 0;
+#else
+    session_close(ch, s);
+    return -1;
+#endif
 }
 
 #if EDGEHOST_HAVE_LIBNETCONF
@@ -2226,21 +2452,21 @@ static int session_chssh_process(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         switch (ev.type) {
         case CHSSH_EVENT_IDENT_SENT:
             s->ssh_banner_flushed = 1;
-            e7_trace(ch, "ssh_banner_sent", s->identity.mac, s->peer,
-                     "libchssh server identification flushed");
+            e7_trace(ch, "ssh_banner_sent", sess_id_key(s), s->peer,
+                     "libchssh local SSH identification flushed");
             break;
         case CHSSH_EVENT_IDENT_RECEIVED:
             s->saw_ssh_rx = 1;
-            e7_trace(ch, "ssh_rx", s->identity.mac, s->peer,
+            e7_trace(ch, "ssh_rx", sess_id_key(s), s->peer,
                      "peer SSH ident \"%s\"", ev.u.ident.banner);
             break;
         case CHSSH_EVENT_AUTHENTICATED:
-            e7_trace(ch, "ssh_auth", s->identity.mac, s->peer,
+            e7_trace(ch, "ssh_auth", sess_id_key(s), s->peer,
                      "SSH user authenticated (libchssh)");
             break;
         case CHSSH_EVENT_READY:
             s->chssh_ready = 1;
-            e7_trace(ch, "ssh_ready", s->identity.mac, s->peer,
+            e7_trace(ch, "ssh_ready", sess_id_key(s), s->peer,
                      "libchssh subsystem=netconf READY — starting NETCONF client");
             if (session_start_nc_over_chssh(ch, s) != 0) {
                 return -1;
@@ -2331,10 +2557,10 @@ static int session_start_chssh(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     s->saw_ssh_rx = 0;
     s->identity_ms = mono_now_ms();
 
-    e7_trace(ch, "ssh_client", s->identity.mac, s->peer,
-             "libchssh SSH client after calix ack (E7 is SSH server); "
+    e7_trace(ch, "ssh_client", sess_id_key(s), s->peer,
+             "libchssh SSH client (device is SSH server; vendor=%s); "
              "user=%s subsystem=netconf",
-             user);
+             s->identity.vendor[0] ? s->identity.vendor : "?", user);
 
     if (s->id_len > 0) {
         size_t used = chssh_feed_input(s->chssh, (const uint8_t *)s->id_buf,
@@ -3205,7 +3431,7 @@ static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (s->state == EDGE_E7_SESS_ACCEPTED || s->state == EDGE_E7_SESS_IDENTITY) {
         if (s->state == EDGE_E7_SESS_ACCEPTED) {
             e7_trace(ch, "identity", "", s->peer,
-                     "receiving Calix identity preamble");
+                     "receiving Call Home identity preamble (Calix or Junos)");
         }
         s->state = EDGE_E7_SESS_IDENTITY;
         if (s->id_len + n > EDGE_E7_IDENTITY_BUF_MAX) {
@@ -3218,6 +3444,33 @@ static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         }
         memcpy(s->id_buf + s->id_len, s->rx, n);
         s->id_len += n;
+        /* Junos DEVICE-CONN-INFO (MSG-ID: …) before Calix XML. */
+        if (edge_e7_junos_identity_looks_like(s->id_buf, s->id_len)) {
+            edge_e7_identity_t jid;
+            int jr = edge_e7_junos_identity_parse(s->id_buf, s->id_len, &jid);
+            if (jr == 0 && jid.identity_ok) {
+                if (session_finish_junos_identity(ch, s, &jid) != 0) {
+                    return -1;
+                }
+                if (session_flush_tx(ch, s) != 0) {
+                    e7_trace(ch, "write_err", sess_id_key(s), s->peer,
+                             "flush after junos identity errno=%d", errno);
+                    session_close(ch, s);
+                    return -1;
+                }
+                return 0;
+            }
+            if (jr < 0) {
+                ch->stats.rejects_bad_identity++;
+                e7_trace(ch, "identity_bad", "", s->peer,
+                         "invalid Junos DEVICE-CONN-INFO (%zu bytes)",
+                         s->id_len);
+                session_close(ch, s);
+                return -1;
+            }
+            /* jr == 1 incomplete — wait for more */
+            return 0;
+        }
         {
             int end = find_identity_end(s->id_buf, s->id_len);
             if (end >= 0) {
@@ -3241,8 +3494,8 @@ static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (s->state == EDGE_E7_SESS_POST_ID) {
         int use_ssh = 1;
 
-        e7_trace_bytes(ch, "post_identity_rx", s->identity.mac, s->peer,
-                       "peer", s->rx, n);
+        e7_trace_bytes(ch, "post_identity_rx", sess_id_key(s), s->peer, "peer",
+                       s->rx, n);
 
         if (n >= 1 && s->rx[0] == '<') {
             if (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport)) {
@@ -3257,14 +3510,14 @@ static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                  * For pure XML: if transport=ssh treat as unexpected and
                  * still attempt SSH server (prior raw hello path).
                  */
-                e7_trace(ch, "unexpected_xml", s->identity.mac, s->peer,
+                e7_trace(ch, "unexpected_xml", sess_id_key(s), s->peer,
                          "XML after identity (phase=%u spoke=%u) — "
-                         "starting SSH server and feeding if leftover SSH only",
+                         "starting SSH and feeding if leftover SSH only",
                          (unsigned)s->ssh_phase, (unsigned)s->probe_spoke);
                 /* Buffer; do not feed XML into SSH. Stay in POST_ID if we
                  * have not finished hold — actually peer spoke so end hold. */
                 if (s->id_len + n > EDGE_E7_IDENTITY_BUF_MAX) {
-                    e7_trace(ch, "post_identity_overflow", s->identity.mac,
+                    e7_trace(ch, "post_identity_overflow", sess_id_key(s),
                              s->peer, "buffer full");
                     session_close(ch, s);
                     return -1;
@@ -3281,20 +3534,20 @@ static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
             }
             if (ch->cfg && e7_transport_is_auto(ch->cfg->e7_transport)) {
                 use_ssh = 0;
-                e7_trace(ch, "detect_raw_hello", s->identity.mac, s->peer,
+                e7_trace(ch, "detect_raw_hello", sess_id_key(s), s->peer,
                          "XML after identity — raw NETCONF (auto)");
             } else {
-                e7_trace(ch, "unexpected_xml", s->identity.mac, s->peer,
+                e7_trace(ch, "unexpected_xml", sess_id_key(s), s->peer,
                          "XML after identity — still trying SSH");
             }
         } else if (n >= 4 && s->rx[0] == 'S' && s->rx[1] == 'S' &&
                    s->rx[2] == 'H' && s->rx[3] == '-') {
-            e7_trace(ch, "detect_ssh_server", s->identity.mac, s->peer,
-                     "peer SSH identification — E7 is SSH server; "
-                     "NMS will be SSH client (Calix CMS roles)");
+            e7_trace(ch, "detect_ssh_server", sess_id_key(s), s->peer,
+                     "peer SSH identification — device is SSH server; "
+                     "NMS will be SSH client (Call Home inverted roles)");
             use_ssh = 1;
         } else if (n >= 1 && s->rx[0] == 0x16) {
-            e7_trace(ch, "detect_tls", s->identity.mac, s->peer,
+            e7_trace(ch, "detect_tls", sess_id_key(s), s->peer,
                      "TLS record (0x16) — TLS Call Home not supported");
             session_close(ch, s);
             return -1;
@@ -3302,7 +3555,7 @@ static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
 
         /* Buffer peer bytes then start transport and feed. */
         if (s->id_len + n > EDGE_E7_IDENTITY_BUF_MAX) {
-            e7_trace(ch, "post_identity_overflow", s->identity.mac, s->peer,
+            e7_trace(ch, "post_identity_overflow", sess_id_key(s), s->peer,
                      "buffer full");
             session_close(ch, s);
             return -1;
@@ -3418,9 +3671,7 @@ static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
                          (unsigned)s->probe_spoke);
                 probe_advance_on_fail(ch, s);
             } else if (s->state == EDGE_E7_SESS_POST_ID) {
-                e7_trace(ch, "peer_eof",
-                         s->identity.identity_ok ? s->identity.mac : "",
-                         s->peer,
+                e7_trace(ch, "peer_eof", sess_id_key(s), s->peer,
                          "peer closed during probe=%s phase=%u spoke=%u%s",
                          e7_probe_mode_name(s->probe_mode),
                          (unsigned)s->ssh_phase, (unsigned)s->probe_spoke,
@@ -3431,7 +3682,7 @@ static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
                 if (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport) &&
                     s->identity.identity_ok) {
                     edge_e7_runtime_shelf_t *rs =
-                        runtime_find(ch, s->identity.mac);
+                        runtime_find(ch, sess_id_key(s));
                     if (rs) {
                         /*
                          * Identity ACK killed the dial → next redial: hold then
@@ -3452,24 +3703,22 @@ static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
                     probe_advance_on_fail(ch, s);
                 }
             } else if (s->state == EDGE_E7_SESS_SSH) {
-                e7_trace(ch, "peer_eof",
-                         s->identity.identity_ok ? s->identity.mac : "",
-                         s->peer,
+                e7_trace(ch, "peer_eof", sess_id_key(s), s->peer,
                          "peer closed during same-socket SSH "
-                         "(nms_is_server banner_sent=%d saw_peer_ssh=%d)",
-                         s->ssh_banner_flushed, s->saw_ssh_rx);
+                         "(banner_sent=%d saw_peer_ssh=%d vendor=%s)",
+                         s->ssh_banner_flushed, s->saw_ssh_rx,
+                         s->identity.vendor[0] ? s->identity.vendor : "?");
                 if (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport) &&
                     s->identity.identity_ok) {
                     edge_e7_runtime_shelf_t *rs =
-                        runtime_find(ch, s->identity.mac);
+                        runtime_find(ch, sess_id_key(s));
                     if (rs) {
                         /* Stay on delayed-SSH after hold for further redials. */
                         rs->ssh_field_next = EDGE_E7_SSH_PHASE_SSH;
                     }
                 }
             } else {
-                e7_trace(ch, "peer_eof",
-                         s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                e7_trace(ch, "peer_eof", sess_id_key(s), s->peer,
                          "peer closed TCP during %s",
                          edge_e7_sess_state_name(s->state));
             }
@@ -3623,19 +3872,13 @@ static void session_maybe_keepalive(edge_e7_callhome_t *ch, edge_e7_session_t *s
         return;
     }
     if (chssh_send_keepalive(s->chssh) != 0) {
-        e7_trace(ch, "keepalive_fail", s->identity.mac, s->peer,
-                 "chssh_send_keepalive failed");
         return;
     }
     if (session_drain_chssh(ch, s) != 0) {
-        e7_trace(ch, "keepalive_fail", s->identity.mac, s->peer,
-                 "drain after keepalive failed");
         return;
     }
+    /* Silent: do not log keepalives into SPA / capture event ring. */
     s->last_keepalive_ms = mono_ms;
-    e7_trace(ch, "keepalive", s->identity.mac, s->peer,
-             "SSH ClientAlive TX interval=%ums (rx does not count)",
-             (unsigned)EDGE_E7_KEEPALIVE_MS);
 }
 #endif
 
@@ -4362,8 +4605,20 @@ static int append_shelf_obj(const edge_e7_callhome_t *ch,
     st = EDGE_E7_SESS_EMPTY;
     sess = NULL;
     if (ch) {
+        const char *lk = rs->mac[0] ? rs->mac : rs->device_id;
         edge_e7_session_t *s =
-            session_find_by_mac((edge_e7_callhome_t *)ch, rs->mac);
+            session_find_by_mac((edge_e7_callhome_t *)ch, lk);
+        if (!s && rs->device_id[0]) {
+            uint32_t i;
+            for (i = 0; i < ch->max_sessions; i++) {
+                edge_e7_session_t *x = &ch->sessions[i];
+                if (x->state != EDGE_E7_SESS_EMPTY && x->identity.identity_ok &&
+                    strcmp(x->identity.device_id, rs->device_id) == 0) {
+                    s = x;
+                    break;
+                }
+            }
+        }
         if (s) {
             sess = s;
             st = s->state;
@@ -4373,16 +4628,19 @@ static int append_shelf_obj(const edge_e7_callhome_t *ch,
         }
     }
     (void)sess;
-    w = snprintf(buf + *off, buf_sz - *off,
-                 "{\"mac\":\"%s\",\"label\":\"%s\",\"enabled\":%s,"
-                 "\"from_yaml\":%s,\"session_state\":\"%s\","
-                 "\"serial\":\"%s\",\"model\":\"%s\",\"peer\":\"%s\","
-                 "\"probe_mode\":%u,\"probe\":\"%s\"}",
-                 rs->mac, rs->label[0] ? rs->label : "",
-                 rs->enabled ? "true" : "false",
-                 rs->from_yaml ? "true" : "false", edge_e7_sess_state_name(st),
-                 serial, model, peer, (unsigned)rs->probe_mode,
-                 e7_probe_mode_name(rs->probe_mode));
+    w = snprintf(
+        buf + *off, buf_sz - *off,
+        "{\"mac\":\"%s\",\"device_id\":\"%s\",\"vendor\":\"%s\","
+        "\"label\":\"%s\",\"enabled\":%s,\"from_yaml\":%s,"
+        "\"has_secret\":%s,\"session_state\":\"%s\","
+        "\"serial\":\"%s\",\"model\":\"%s\",\"peer\":\"%s\","
+        "\"probe_mode\":%u,\"probe\":\"%s\"}",
+        rs->mac[0] ? rs->mac : (rs->device_id[0] ? rs->device_id : ""),
+        rs->device_id[0] ? rs->device_id : "",
+        rs->vendor[0] ? rs->vendor : "", rs->label[0] ? rs->label : "",
+        rs->enabled ? "true" : "false", rs->from_yaml ? "true" : "false",
+        rs->secret[0] ? "true" : "false", edge_e7_sess_state_name(st), serial,
+        model, peer, (unsigned)rs->probe_mode, e7_probe_mode_name(rs->probe_mode));
     if (w < 0 || (size_t)w >= buf_sz - *off) {
         return -1;
     }
@@ -4438,6 +4696,7 @@ int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
                                 char *buf, size_t buf_sz)
 {
     char norm[EDGE_E7_MAC_MAX];
+    const char *lookup = mac;
     const edge_e7_runtime_shelf_t *rs;
     edge_e7_session_t *sess;
     size_t off = 0;
@@ -4446,24 +4705,33 @@ int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
     if (!ch || !mac || !buf || buf_sz < 32) {
         return -1;
     }
-    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
-        return -1;
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) == 0) {
+        lookup = norm;
     }
     rs = NULL;
     {
         uint32_t i;
         for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
-            if (ch->runtime[i].used && strcmp(ch->runtime[i].mac, norm) == 0) {
+            if (!ch->runtime[i].used) {
+                continue;
+            }
+            if ((ch->runtime[i].mac[0] &&
+                 strcmp(ch->runtime[i].mac, lookup) == 0) ||
+                (ch->runtime[i].device_id[0] &&
+                 strcmp(ch->runtime[i].device_id, lookup) == 0) ||
+                (ch->runtime[i].device_id[0] &&
+                 strcmp(ch->runtime[i].device_id, mac) == 0)) {
                 rs = &ch->runtime[i];
                 break;
             }
         }
     }
-    sess = session_find_by_mac((edge_e7_callhome_t *)ch, norm);
+    sess = session_find_by_mac((edge_e7_callhome_t *)ch, lookup);
     if (!rs && !sess) {
         return -2; /* not found */
     }
-    w = snprintf(buf, buf_sz, "{\"v\":1,\"mac\":\"%s\",", norm);
+    w = snprintf(buf, buf_sz, "{\"v\":1,\"mac\":\"%s\",",
+                 rs && rs->mac[0] ? rs->mac : lookup);
     if (w < 0 || (size_t)w >= buf_sz) {
         return -1;
     }
@@ -4471,11 +4739,15 @@ int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
     if (rs) {
         w = snprintf(buf + off, buf_sz - off,
                      "\"configured\":true,\"label\":\"%s\",\"enabled\":%s,"
-                     "\"from_yaml\":%s,"
+                     "\"from_yaml\":%s,\"vendor\":\"%s\",\"device_id\":\"%s\","
+                     "\"has_secret\":%s,"
                      "\"note\":\"allowlist_path for file durability\",",
                      rs->label[0] ? rs->label : "",
                      rs->enabled ? "true" : "false",
-                     rs->from_yaml ? "true" : "false");
+                     rs->from_yaml ? "true" : "false",
+                     rs->vendor[0] ? rs->vendor : "",
+                     rs->device_id[0] ? rs->device_id : "",
+                     rs->secret[0] ? "true" : "false");
     } else {
         w = snprintf(buf + off, buf_sz - off,
                      "\"configured\":false,\"enabled\":false,");
@@ -4506,63 +4778,122 @@ int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
     return (int)off;
 }
 
-int edge_e7_callhome_allowlist_upsert(edge_e7_callhome_t *ch, const char *mac,
-                                      const char *label, int enabled)
+int edge_e7_callhome_allowlist_upsert_ex(edge_e7_callhome_t *ch,
+                                         const char *mac, const char *label,
+                                         int enabled, const char *vendor,
+                                         const char *device_id,
+                                         const char *secret)
 {
     char norm[EDGE_E7_MAC_MAX];
+    char key[EDGE_E7_DEVICE_ID_MAX];
     edge_e7_runtime_shelf_t *rs;
+    int is_junos = 0;
+    int has_mac = 0;
 
-    if (!ch || !mac) {
+    if (!ch || !mac || !mac[0]) {
         return -1;
     }
-    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
-        return -1;
+    if (vendor && vendor[0]) {
+        if (strcmp(vendor, "junos") == 0 || strcmp(vendor, "juniper") == 0) {
+            is_junos = 1;
+        }
     }
-    rs = runtime_find(ch, norm);
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) == 0) {
+        has_mac = 1;
+        snprintf(key, sizeof(key), "%s", norm);
+    } else {
+        /* Non-MAC path key (Junos DEVICE-ID). */
+        is_junos = 1;
+        snprintf(key, sizeof(key), "%s", mac);
+    }
+    if (device_id && device_id[0]) {
+        snprintf(key, sizeof(key), "%s", device_id);
+        is_junos = 1;
+    }
+
+    rs = runtime_find(ch, key);
+    if (!rs && has_mac) {
+        rs = runtime_find(ch, norm);
+    }
     if (!rs) {
         rs = runtime_alloc(ch);
         if (!rs) {
             return -1;
         }
-        memcpy(rs->mac, norm, sizeof(rs->mac));
         rs->from_yaml = 0;
         rs->probe_mode = EDGE_E7_PROBE_SILENT;
+    }
+    if (has_mac) {
+        memcpy(rs->mac, norm, sizeof(rs->mac));
+    }
+    if (is_junos) {
+        snprintf(rs->vendor, sizeof(rs->vendor), "junos");
+        if (device_id && device_id[0]) {
+            snprintf(rs->device_id, sizeof(rs->device_id), "%s", device_id);
+        } else if (!has_mac) {
+            snprintf(rs->device_id, sizeof(rs->device_id), "%s", mac);
+        } else if (!rs->device_id[0]) {
+            /* path was MAC but vendor junos — device_id may be separate */
+            snprintf(rs->device_id, sizeof(rs->device_id), "%s",
+                     device_id && device_id[0] ? device_id : mac);
+        }
+    } else {
+        if (!rs->vendor[0]) {
+            snprintf(rs->vendor, sizeof(rs->vendor), "calix");
+        }
     }
     if (label) {
         snprintf(rs->label, sizeof(rs->label), "%s", label);
     }
     rs->enabled = enabled ? 1 : 0;
+    if (secret) {
+        /* Explicit secret including empty string clears/sets. */
+        snprintf(rs->secret, sizeof(rs->secret), "%s", secret);
+    }
     put_config_json(ch, rs);
     save_runtime_to_file(ch);
     return 0;
 }
 
+int edge_e7_callhome_allowlist_upsert(edge_e7_callhome_t *ch, const char *mac,
+                                      const char *label, int enabled)
+{
+    return edge_e7_callhome_allowlist_upsert_ex(ch, mac, label, enabled, NULL,
+                                                NULL, NULL);
+}
+
 int edge_e7_callhome_allowlist_delete(edge_e7_callhome_t *ch, const char *mac)
 {
     char norm[EDGE_E7_MAC_MAX];
-    char mac_key[EDGE_E7_MAC_MAX];
+    char sk[128];
     char key[EDGE_STATE_KEY_MAX];
     edge_e7_runtime_shelf_t *rs;
     edge_e7_session_t *s;
+    const char *lookup = mac;
 
     if (!ch || !mac) {
         return -1;
     }
-    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0) {
-        return -1;
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) == 0) {
+        lookup = norm;
     }
-    rs = runtime_find(ch, norm);
+    rs = runtime_find(ch, lookup);
     if (!rs) {
-        /* still disconnect if live */
-        s = session_find_by_mac(ch, norm);
+        s = session_find_by_mac(ch, lookup);
         if (s) {
             session_close(ch, s);
             return 0;
         }
         return -1;
     }
-    if (edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) == 0) {
-        int n = snprintf(key, sizeof(key), "e7/%s/config", mac_key);
+    sk[0] = '\0';
+    if (rs->mac[0]) {
+        (void)edge_e7_mac_to_key_seg(rs->mac, sk, sizeof(sk));
+    } else if (rs->device_id[0]) {
+        (void)edge_e7_device_key_seg(rs->device_id, sk, sizeof(sk));
+    }
+    if (sk[0]) {
+        int n = snprintf(key, sizeof(key), "e7/%s/config", sk);
         if (n > 0 && (size_t)n < sizeof(key) && ch->state) {
             (void)edge_state_delete_and_notify(ch->state, ch->hub, "inventory",
                                                key, NULL, 0);

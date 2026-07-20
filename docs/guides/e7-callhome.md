@@ -1,4 +1,64 @@
-# E7 NETCONF Call Home (lab)
+# E7 / Junos NETCONF Call Home (lab)
+
+## Juniper Junos Call Home (outbound-ssh)
+
+Same listen port as Calix (default **4334**). Roles match RFC 8071: device
+initiates TCP; after the initiation sequence, **edgehost is SSH client and
+NETCONF client** (device is SSH/NETCONF server). No Calix-style `<ack>ok</ack>`.
+
+After TCP accept, Junos sends an initiation sequence:
+
+```
+MSG-ID: DEVICE-CONN-INFO\r\n
+MSG-VER: V1\r\n
+DEVICE-ID: <device-id>\r\n
+```
+
+When `system services outbound-ssh client <name> secret <shared>` is configured
+on the router, the sequence also includes:
+
+```
+HOST-KEY: <ssh public host key>\r\n
+HMAC:<hex>\r\n
+```
+
+Juniper documents this as a **SHA1 hash derived in part from the secret** so the
+NMS can verify that the presented host key belongs to the `device-id`. edgehost
+verifies **HMAC-SHA1** when the allowlist entry has a shared secret (optional on
+both sides). If the allowlist has a secret but the peer omits HOST-KEY/HMAC, the
+dial is rejected. If the peer sends HMAC but the allowlist has no secret,
+verification is skipped (logged).
+
+Then SSH client (libchssh) + NETCONF client (`NETCONF_ROLE_CLIENT`, subsystem
+`netconf`) run on the **same** TCP socket.
+
+### SPA / allowlist
+
+**Add / edit shelf** on `/e7/`:
+
+| Field | Calix | Junos |
+|-------|-------|-------|
+| Vendor | `calix` | `junos` |
+| Path id | MAC | DEVICE-ID (or path id = device-id) |
+| Shared secret | n/a | optional; matches Junos `outbound-ssh … secret` |
+| DEVICE-ID | n/a | optional if path id already is the device-id |
+
+Secret is never echoed back (`has_secret: true|false` only). Clear with the
+“Clear stored secret” checkbox. Persist with
+`plugins.e7_callhome.allowlist_path` (`device_id=… vendor=junos secret=…`).
+
+### Junos device sketch
+
+```
+set system services netconf ssh
+set system services outbound-ssh client edgehost device-id pe1.lab
+set system services outbound-ssh client edgehost secret "optional-shared"
+set system services outbound-ssh client edgehost services netconf
+set system services outbound-ssh client edgehost servers 10.0.0.1 port 4334
+```
+
+Reference: [Juniper NETCONF Call Home Sessions](https://www.juniper.net/documentation/us/en/software/junos/netconf/topics/topic-map/netconf-call-home.html).
+
 
 How to run the **lab** Call Home vertical: raw transport on loopback port
 **4334**, Calix-shaped **identity preamble**, NETCONF **CLIENT** after accept,

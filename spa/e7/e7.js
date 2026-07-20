@@ -369,7 +369,8 @@
   /* --- shelves --- */
 
   function shelfRowHtml(s) {
-    var mac = s.mac || "";
+    var mac = s.mac || s.device_id || "";
+    var vendor = s.vendor || (s.device_id && !s.mac ? "junos" : "calix");
     var st = s.session_state || "empty";
     var stLabel = sessionLabel(st);
     var stCls = sessionClass(st);
@@ -382,9 +383,17 @@
       "\">Select</button></td>" +
       "<td><code>" +
       esc(mac) +
-      "</code></td>" +
+      "</code>" +
+      (s.device_id && s.mac
+        ? "<br/><span class=\"hint\">id=" + esc(s.device_id) + "</span>"
+        : "") +
+      "</td>" +
       "<td>" +
       esc(s.label || "") +
+      " <span class=\"badge muted\">" +
+      esc(vendor) +
+      "</span>" +
+      (s.has_secret ? " <span class=\"badge\">secret</span>" : "") +
       "</td>" +
       "<td>" +
       (s.enabled ? "<span class=\"badge ok\">yes</span>" : "<span class=\"badge muted\">no</span>") +
@@ -459,13 +468,22 @@
   async function putShelf() {
     var mac = $("shelfMac") ? $("shelfMac").value.trim() : "";
     if (!mac) {
-      setText("shelfFormOut", "MAC required");
+      setText("shelfFormOut", "MAC / DEVICE-ID required");
       return;
     }
     var label = $("shelfLabel") ? $("shelfLabel").value.trim() : "";
     var enabled = $("shelfEnabled") ? !!$("shelfEnabled").checked : true;
-    var body = { enabled: enabled };
+    var vendor = $("shelfVendor") ? $("shelfVendor").value : "calix";
+    var deviceId = $("shelfDeviceId") ? $("shelfDeviceId").value.trim() : "";
+    var secret = $("shelfSecret") ? $("shelfSecret").value : "";
+    var clearSecret = $("shelfSecretClear")
+      ? !!$("shelfSecretClear").checked
+      : false;
+    var body = { enabled: enabled, vendor: vendor };
     if (label) body.label = label;
+    if (deviceId) body.device_id = deviceId;
+    if (clearSecret) body.secret = "";
+    else if (secret) body.secret = secret;
     var r = await fetchText("/api/v1/e7/shelves/" + macPath(mac), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -474,6 +492,8 @@
     setText("shelfFormOut", "PUT HTTP " + r.status + "\n" + r.body);
     if (r.ok) {
       setSelectedMac(mac);
+      if ($("shelfSecret")) $("shelfSecret").value = "";
+      if ($("shelfSecretClear")) $("shelfSecretClear").checked = false;
       await refreshShelves();
     }
   }
@@ -526,7 +546,18 @@
         var j = JSON.parse(r.body);
         if ($("shelfLabel")) $("shelfLabel").value = j.label || "";
         if ($("shelfEnabled")) $("shelfEnabled").checked = !!j.enabled;
-        setText("shelfFormOut", "Loaded " + (j.mac || mac));
+        if ($("shelfVendor")) {
+          $("shelfVendor").value = j.vendor || "calix";
+        }
+        if ($("shelfDeviceId")) {
+          $("shelfDeviceId").value = j.device_id || "";
+        }
+        setText(
+          "shelfFormOut",
+          "Loaded " +
+            (j.mac || j.device_id || mac) +
+            (j.has_secret ? " (secret set)" : "")
+        );
       } catch (e) {
         setText("shelfFormOut", r.body);
       }

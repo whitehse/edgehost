@@ -27,6 +27,16 @@ extern "C" {
 #define EDGE_E7_SERIAL_MAX 32
 #define EDGE_E7_MODEL_MAX 64
 #define EDGE_E7_SOURCE_IP_MAX 64
+/** Junos DEVICE-ID / shelf key (not necessarily a MAC). */
+#define EDGE_E7_DEVICE_ID_MAX 128
+/** Shared secret for Junos HOST-KEY HMAC (outbound-ssh secret). */
+#define EDGE_E7_SECRET_MAX 128
+/** OpenSSH public host key line from HOST-KEY: field. */
+#define EDGE_E7_HOST_KEY_MAX 2048
+/** Hex HMAC from initiation sequence. */
+#define EDGE_E7_HMAC_MAX 128
+/** Vendor tag: "calix" | "junos" | "". */
+#define EDGE_E7_VENDOR_MAX 16
 /** AID / key segment (e.g. 1/1/3/12 or 1-1-3-12) + NUL. */
 #define EDGE_E7_AID_MAX 64
 /** ISO-8601 eventTime + NUL. */
@@ -35,15 +45,22 @@ extern "C" {
 #define EDGE_E7_TOKEN_MAX 32
 
 /**
- * Calix-shaped Call Home identity preamble fields (pre-SSH; not NETCONF hello).
- * mac is required and stored normalized (lowercase colon form).
+ * Call Home identity preamble (pre-SSH; not NETCONF hello).
+ * Calix: mac required (XML identity). Junos: device_id required (DEVICE-CONN-INFO).
  */
 typedef struct {
     char mac[EDGE_E7_MAC_MAX];
     char serial[EDGE_E7_SERIAL_MAX];
     char model[EDGE_E7_MODEL_MAX];
     char source_ip[EDGE_E7_SOURCE_IP_MAX];
-    int  identity_ok; /* 1 if mac parsed and normalized */
+    char device_id[EDGE_E7_DEVICE_ID_MAX]; /* Junos DEVICE-ID */
+    char vendor[EDGE_E7_VENDOR_MAX];       /* "calix" | "junos" */
+    char host_key[EDGE_E7_HOST_KEY_MAX];   /* Junos HOST-KEY (optional) */
+    char hmac[EDGE_E7_HMAC_MAX];           /* Junos HMAC:… (optional) */
+    int  identity_ok; /* 1 if identity complete */
+    int  has_host_key;
+    int  has_hmac;
+    size_t consumed; /* bytes of preamble consumed (SSH may follow) */
 } edge_e7_identity_t;
 
 typedef enum {
@@ -86,6 +103,44 @@ int edge_e7_aid_to_key_seg(const char *aid, char *out, size_t out_sz);
  */
 int edge_e7_identity_parse(const char *xml, size_t len,
                            edge_e7_identity_t *identity);
+
+/**
+ * True if @p buf looks like a Junos DEVICE-CONN-INFO initiation sequence
+ * (MSG-ID: DEVICE-CONN-INFO).
+ */
+int edge_e7_junos_identity_looks_like(const char *buf, size_t len);
+
+/**
+ * Parse Junos NETCONF Call Home initiation sequence (outbound-ssh):
+ *   MSG-ID: DEVICE-CONN-INFO\\r\\n
+ *   MSG-VER: V1\\r\\n
+ *   DEVICE-ID: <device-id>\\r\\n
+ *   [HOST-KEY: <public-host-key>\\r\\n
+ *    HMAC:<hex>\\r\\n ]   optional when secret is configured on Junos
+ *
+ * Sets vendor=junos, device_id, optional host_key/hmac, consumed byte count.
+ * identity_ok when DEVICE-ID present and (no HOST-KEY or HOST-KEY+HMAC both set).
+ * @return 0 complete, 1 incomplete (need more data), -1 invalid.
+ */
+int edge_e7_junos_identity_parse(const char *buf, size_t len,
+                                 edge_e7_identity_t *identity);
+
+/**
+ * Verify Junos HOST-KEY HMAC against shared secret (outbound-ssh secret).
+ * Juniper docs: SHA1/HMAC derived in part from secret + public host key.
+ * Tries HMAC-SHA1(key=secret, data=HOST-KEY) then swapped key/data order
+ * (case-insensitive hex compare). Field name is HMAC: even when secret is unset
+ * on the NMS (verification skipped).
+ * @return 0 match, -1 mismatch / bad args.
+ */
+int edge_e7_junos_hmac_verify(const char *host_key, const char *hmac_hex,
+                              const char *secret);
+
+/**
+ * Sanitize device-id / shelf key for state paths (alnum keep; else '-').
+ * @return 0 ok, -1 error.
+ */
+int edge_e7_device_key_seg(const char *device_id, char *out, size_t out_sz);
 
 /**
  * Parse lab.v1 NETCONF notification XML and put ONT/PON state under net.pon.

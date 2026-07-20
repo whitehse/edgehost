@@ -55,7 +55,8 @@ extern "C" {
 /** Peer TCP address string (inet_ntop). */
 #define EDGE_E7_PEER_ADDR_MAX 64
 /** Identity preamble accumulation cap. */
-#define EDGE_E7_IDENTITY_BUF_MAX 2048
+/** Identity preamble buffer (Calix XML or Junos DEVICE-CONN-INFO + HOST-KEY). */
+#define EDGE_E7_IDENTITY_BUF_MAX 8192
 /** Default dirty-set cap when config e7_dirty_cap is 0 (K16). */
 #define EDGE_E7_DIRTY_CAP_DEFAULT 8192
 /** Coalesce flush interval (ms) — design ≤100. */
@@ -112,10 +113,19 @@ typedef struct {
  */
 typedef struct {
     int  used;
-    char mac[EDGE_E7_MAC_MAX]; /* normalized colon form */
+    char mac[EDGE_E7_MAC_MAX]; /* normalized colon form (Calix); empty for Junos-only */
     char label[EDGE_CONFIG_E7_SHELF_ID_MAX];
     int  enabled; /* 1 allow subscribe; 0 present but disabled */
     int  from_yaml;
+    /** "calix" | "junos" | "" (auto/unknown). */
+    char vendor[EDGE_E7_VENDOR_MAX];
+    /** Junos DEVICE-ID (outbound-ssh device-id). */
+    char device_id[EDGE_E7_DEVICE_ID_MAX];
+    /**
+     * Optional shared secret matching Junos outbound-ssh `secret` for HMAC
+     * verification of HOST-KEY. Empty = do not require HMAC (secret optional).
+     */
+    char secret[EDGE_E7_SECRET_MAX];
     /**
      * Post-identity probe strategy for the next dial (raw Call Home).
      * Advanced on peer_eof before SESSION_OPEN so successive E7 retries
@@ -279,6 +289,19 @@ int edge_e7_callhome_shelf_json(const edge_e7_callhome_t *ch, const char *mac,
  */
 int edge_e7_callhome_allowlist_upsert(edge_e7_callhome_t *ch, const char *mac,
                                       const char *label, int enabled);
+
+/**
+ * Extended upsert for multi-vendor Call Home.
+ * @p mac may be a Calix MAC or a Junos DEVICE-ID (path key).
+ * @p vendor "calix" | "junos" | NULL (default calix if MAC-shaped).
+ * @p device_id optional Junos id (defaults to @p mac when vendor=junos).
+ * @p secret optional shared secret (NULL = leave existing; "" = clear).
+ */
+int edge_e7_callhome_allowlist_upsert_ex(edge_e7_callhome_t *ch,
+                                         const char *mac, const char *label,
+                                         int enabled, const char *vendor,
+                                         const char *device_id,
+                                         const char *secret);
 
 /**
  * Remove runtime allowlist entry + inventory config; disconnect live session.

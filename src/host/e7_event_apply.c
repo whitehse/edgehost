@@ -9,10 +9,14 @@
 
 #include "edge_e7_event_apply.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 const char *edge_e7_apply_err_name(edge_e7_apply_err_t e)
 {
@@ -279,8 +283,262 @@ int edge_e7_identity_parse(const char *xml, size_t len,
                         sizeof(identity->model));
     (void)xml_elem_text(xml, len, "source-ip", identity->source_ip,
                         sizeof(identity->source_ip));
+    snprintf(identity->vendor, sizeof(identity->vendor), "calix");
     identity->identity_ok = 1;
+    identity->consumed = len;
     return 0;
+}
+
+int edge_e7_device_key_seg(const char *device_id, char *out, size_t out_sz)
+{
+    size_t i, o = 0;
+    if (!device_id || !out || out_sz < 2 || !device_id[0]) {
+        return -1;
+    }
+    for (i = 0; device_id[i] && o + 1 < out_sz; i++) {
+        unsigned char c = (unsigned char)device_id[i];
+        if (isalnum(c) || c == '-' || c == '_' || c == '.') {
+            out[o++] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        } else {
+            out[o++] = '-';
+        }
+    }
+    out[o] = '\0';
+    return o > 0 ? 0 : -1;
+}
+
+int edge_e7_junos_identity_looks_like(const char *buf, size_t len)
+{
+    size_t i = 0;
+    if (!buf || len < 10) {
+        return 0;
+    }
+    while (i < len && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' ||
+                       buf[i] == '\n')) {
+        i++;
+    }
+    if (i + 7 <= len && memcmp(buf + i, "MSG-ID:", 7) == 0) {
+        return 1;
+    }
+    if (i + 20 <= len && memmem(buf + i, len - i, "DEVICE-CONN-INFO", 16)) {
+        return 1;
+    }
+    return 0;
+}
+
+static void junos_trim_copy(char *dst, size_t dst_sz, const char *src,
+                            size_t n)
+{
+    size_t a = 0, b = n;
+    while (a < b && (src[a] == ' ' || src[a] == '\t')) {
+        a++;
+    }
+    while (b > a &&
+           (src[b - 1] == ' ' || src[b - 1] == '\t' || src[b - 1] == '\r' ||
+            src[b - 1] == '\n')) {
+        b--;
+    }
+    if (b - a >= dst_sz) {
+        b = a + dst_sz - 1;
+    }
+    if (b > a) {
+        memcpy(dst, src + a, b - a);
+    }
+    dst[b - a] = '\0';
+}
+
+int edge_e7_junos_identity_parse(const char *buf, size_t len,
+                                 edge_e7_identity_t *identity)
+{
+    size_t pos = 0;
+    int have_msg = 0, have_id = 0;
+    int ended_by_ssh = 0;
+    int ended_by_blank = 0;
+
+    if (!buf || !identity || len == 0) {
+        return -1;
+    }
+    memset(identity, 0, sizeof(*identity));
+    snprintf(identity->vendor, sizeof(identity->vendor), "junos");
+
+    while (pos < len) {
+        const char *line = buf + pos;
+        const char *nl = memchr(line, '\n', len - pos);
+        size_t llen;
+        size_t next;
+        size_t rem = len - pos;
+
+        if (!nl) {
+            /*
+             * Incomplete trailing line. Do not complete after DEVICE-ID alone:
+             * HOST-KEY/HMAC may still be in flight when secret is configured.
+             * Complete only if the partial line is already an SSH banner.
+             */
+            if (have_id && rem >= 4 && memcmp(line, "SSH-", 4) == 0) {
+                identity->identity_ok = 1;
+                identity->consumed = pos;
+                return 0;
+            }
+            return 1; /* incomplete */
+        }
+        llen = (size_t)(nl - line);
+        next = (size_t)(nl - buf) + 1;
+        if (llen > 0 && line[llen - 1] == '\r') {
+            llen--;
+        }
+
+        if (llen >= 7 && strncasecmp(line, "MSG-ID:", 7) == 0) {
+            char v[64];
+            junos_trim_copy(v, sizeof(v), line + 7, llen - 7);
+            if (strcmp(v, "DEVICE-CONN-INFO") != 0) {
+                return -1;
+            }
+            have_msg = 1;
+        } else if (llen >= 8 && strncasecmp(line, "MSG-VER:", 8) == 0) {
+            /* accept V1 */
+        } else if (llen >= 10 && strncasecmp(line, "DEVICE-ID:", 10) == 0) {
+            junos_trim_copy(identity->device_id, sizeof(identity->device_id),
+                            line + 10, llen - 10);
+            if (!identity->device_id[0]) {
+                return -1;
+            }
+            have_id = 1;
+        } else if (llen >= 9 && strncasecmp(line, "HOST-KEY:", 9) == 0) {
+            junos_trim_copy(identity->host_key, sizeof(identity->host_key),
+                            line + 9, llen - 9);
+            identity->has_host_key = identity->host_key[0] ? 1 : 0;
+        } else if (llen >= 5 && strncasecmp(line, "HMAC:", 5) == 0) {
+            junos_trim_copy(identity->hmac, sizeof(identity->hmac), line + 5,
+                            llen - 5);
+            identity->has_hmac = identity->hmac[0] ? 1 : 0;
+        } else if (llen == 0) {
+            /* blank line ends initiation if we have DEVICE-ID */
+            if (have_id) {
+                ended_by_blank = 1;
+                pos = next;
+                break;
+            }
+        } else if (have_id && llen >= 4 && memcmp(line, "SSH-", 4) == 0) {
+            /* SSH banner starts — do not consume */
+            ended_by_ssh = 1;
+            break;
+        } else if (have_id && have_msg) {
+            /* Unknown line after DEVICE-CONN-INFO fields — treat as end */
+            ended_by_blank = 1;
+            break;
+        }
+
+        pos = next;
+
+        /* After HMAC line, sequence is complete (SSH may follow). */
+        if (have_id && identity->has_host_key && identity->has_hmac) {
+            identity->identity_ok = 1;
+            identity->consumed = pos;
+            return 0;
+        }
+    }
+
+    if (!have_msg && !have_id) {
+        return -1;
+    }
+    if (have_id && identity->has_host_key && identity->has_hmac) {
+        identity->identity_ok = 1;
+        identity->consumed = pos;
+        return 0;
+    }
+    /*
+     * Without HOST-KEY/HMAC: only complete when the initiation sequence is
+     * clearly finished (SSH banner or blank/unknown terminator). Otherwise
+     * wait — Junos may still send HOST-KEY when secret is configured.
+     */
+    if (have_id && !identity->has_host_key &&
+        (ended_by_ssh || ended_by_blank)) {
+        identity->identity_ok = 1;
+        identity->consumed = pos;
+        return 0;
+    }
+    /* HOST-KEY without HMAC, or DEVICE-ID only so far */
+    return 1;
+}
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static int hmac_sha1_hex(const char *key, size_t key_len, const char *data,
+                         size_t data_len, char *out_hex, size_t out_sz)
+{
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    size_t i;
+    if (!key || !data || !out_hex || out_sz < 41) {
+        return -1;
+    }
+    if (!HMAC(EVP_sha1(), key, (int)key_len, (const unsigned char *)data,
+              data_len, md, &md_len) ||
+        md_len != 20) {
+        return -1;
+    }
+    for (i = 0; i < md_len; i++) {
+        static const char xd[] = "0123456789abcdef";
+        out_hex[i * 2] = xd[md[i] >> 4];
+        out_hex[i * 2 + 1] = xd[md[i] & 0xf];
+    }
+    out_hex[md_len * 2] = '\0';
+    return 0;
+}
+
+int edge_e7_junos_hmac_verify(const char *host_key, const char *hmac_hex,
+                              const char *secret)
+{
+    char calc[48];
+    char calc2[48];
+    size_t i, n;
+    char norm[EDGE_E7_HMAC_MAX];
+
+    if (!host_key || !hmac_hex || !secret || !secret[0] || !host_key[0] ||
+        !hmac_hex[0]) {
+        return -1;
+    }
+    /* Normalize presented HMAC to lowercase hex (strip spaces). */
+    n = 0;
+    for (i = 0; hmac_hex[i] && n + 1 < sizeof(norm); i++) {
+        if (hmac_hex[i] == ' ' || hmac_hex[i] == '\t') {
+            continue;
+        }
+        if (hex_nibble(hmac_hex[i]) < 0) {
+            return -1;
+        }
+        norm[n++] = (char)tolower((unsigned char)hmac_hex[i]);
+    }
+    norm[n] = '\0';
+    if (n != 40) {
+        return -1; /* SHA1 hex length */
+    }
+
+    /* Primary: HMAC-SHA1(key=secret, data=HOST-KEY) per typical shared-secret. */
+    if (hmac_sha1_hex(secret, strlen(secret), host_key, strlen(host_key), calc,
+                      sizeof(calc)) == 0 &&
+        strcmp(calc, norm) == 0) {
+        return 0;
+    }
+    /* Alternate: HMAC-SHA1(key=HOST-KEY, data=secret) if device uses that order. */
+    if (hmac_sha1_hex(host_key, strlen(host_key), secret, strlen(secret), calc2,
+                      sizeof(calc2)) == 0 &&
+        strcmp(calc2, norm) == 0) {
+        return 0;
+    }
+    return -1;
 }
 
 static edge_e7_apply_err_t apply_state(edge_state_store_t *store,

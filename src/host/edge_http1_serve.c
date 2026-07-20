@@ -1029,16 +1029,67 @@ static int e7_parse_command_body(const char *body, size_t blen, char *rpc_out,
     return -1;
 }
 
-/** Extract optional "label" and "enabled" from shelf PUT body. */
-static void e7_parse_shelf_body(const char *body, size_t blen, char *label_out,
-                                size_t label_sz, int *enabled_out)
+/** Extract string field "key":"value" from small JSON body (best-effort). */
+static void e7_json_str_field(const char *tmp, const char *key, char *out,
+                              size_t out_sz)
 {
-    char tmp[1024];
-    size_t n;
+    char needle[64];
     const char *p;
+    size_t i = 0;
+    if (!tmp || !key || !out || out_sz == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (snprintf(needle, sizeof(needle), "\"%s\"", key) >= (int)sizeof(needle)) {
+        return;
+    }
+    p = strstr(tmp, needle);
+    if (!p) {
+        return;
+    }
+    p = strchr(p + strlen(needle), ':');
+    if (!p) {
+        return;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p != '"') {
+        return;
+    }
+    p++;
+    while (*p && *p != '"' && i + 1 < out_sz) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+}
+
+/** Extract optional shelf PUT fields from JSON body. */
+static void e7_parse_shelf_body(const char *body, size_t blen, char *label_out,
+                                size_t label_sz, int *enabled_out,
+                                char *vendor_out, size_t vendor_sz,
+                                char *device_id_out, size_t device_id_sz,
+                                char *secret_out, size_t secret_sz,
+                                int *secret_present)
+{
+    char tmp[2048];
+    size_t n;
 
     if (label_out && label_sz) {
         label_out[0] = '\0';
+    }
+    if (vendor_out && vendor_sz) {
+        vendor_out[0] = '\0';
+    }
+    if (device_id_out && device_id_sz) {
+        device_id_out[0] = '\0';
+    }
+    if (secret_out && secret_sz) {
+        secret_out[0] = '\0';
+    }
+    if (secret_present) {
+        *secret_present = 0;
     }
     if (enabled_out) {
         *enabled_out = 1;
@@ -1049,23 +1100,14 @@ static void e7_parse_shelf_body(const char *body, size_t blen, char *label_out,
     n = blen < sizeof(tmp) - 1 ? blen : sizeof(tmp) - 1;
     memcpy(tmp, body, n);
     tmp[n] = '\0';
-    p = strstr(tmp, "\"label\"");
-    if (p) {
-        p = strchr(p + 7, ':');
-        if (p) {
-            p++;
-            while (*p == ' ' || *p == '\t') {
-                p++;
-            }
-            if (*p == '"') {
-                size_t i = 0;
-                p++;
-                while (*p && *p != '"' && i + 1 < label_sz) {
-                    label_out[i++] = *p++;
-                }
-                label_out[i] = '\0';
-            }
+    e7_json_str_field(tmp, "label", label_out, label_sz);
+    e7_json_str_field(tmp, "vendor", vendor_out, vendor_sz);
+    e7_json_str_field(tmp, "device_id", device_id_out, device_id_sz);
+    if (strstr(tmp, "\"secret\"")) {
+        if (secret_present) {
+            *secret_present = 1;
         }
+        e7_json_str_field(tmp, "secret", secret_out, secret_sz);
     }
     if (strstr(tmp, "\"enabled\":false") || strstr(tmp, "\"enabled\": false") ||
         strstr(tmp, "\"enabled\":0") || strstr(tmp, "\"enabled\": 0")) {
@@ -1181,19 +1223,30 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
             if (!wait_full_body(s) && s->content_length > 0) {
                 return 0;
             }
-            get_body(s, &body, &blen);
-            e7_parse_shelf_body(body, blen, label, sizeof(label), &enabled);
-            if (edge_e7_callhome_allowlist_upsert(s->e7, mac,
-                                                  label[0] ? label : NULL,
-                                                  enabled) != 0) {
-                static const char eb[] = "{\"error\":\"UPSERT_FAILED\"}";
-                if (build_response(out, out_cap, 400, "Bad Request",
-                                   "application/json", eb, sizeof(eb) - 1,
-                                   out_len) != 0) {
-                    return -1;
+            {
+                char vendor[16];
+                char device_id[128];
+                char secret[128];
+                int secret_present = 0;
+                get_body(s, &body, &blen);
+                e7_parse_shelf_body(body, blen, label, sizeof(label), &enabled,
+                                    vendor, sizeof(vendor), device_id,
+                                    sizeof(device_id), secret, sizeof(secret),
+                                    &secret_present);
+                if (edge_e7_callhome_allowlist_upsert_ex(
+                        s->e7, mac, label[0] ? label : NULL, enabled,
+                        vendor[0] ? vendor : NULL,
+                        device_id[0] ? device_id : NULL,
+                        secret_present ? secret : NULL) != 0) {
+                    static const char eb[] = "{\"error\":\"UPSERT_FAILED\"}";
+                    if (build_response(out, out_cap, 400, "Bad Request",
+                                       "application/json", eb, sizeof(eb) - 1,
+                                       out_len) != 0) {
+                        return -1;
+                    }
+                    note_response(metrics, 400);
+                    return 1;
                 }
-                note_response(metrics, 400);
-                return 1;
             }
             jn = edge_e7_callhome_shelf_json(s->e7, mac, jbuf, sizeof(jbuf));
             if (jn < 0) {

@@ -54,8 +54,9 @@
   <section class="card" id="connLogCard">
     <h2>Connection progress</h2>
     <p class="hint" style="margin:0 0 0.5rem">
-      Live Call Home path: TCP accept → Calix identity (MAC) → allowlist →
-      SSH (sysadmin) → NETCONF hello → open → subscription.
+      Live Call Home path: TCP accept → identity (Calix XML MAC <em>or</em>
+      Junos <code>DEVICE-CONN-INFO</code>) → allowlist → SSH client → NETCONF →
+      subscription.
       Polls <code>GET /api/v1/e7/events?since=…</code> every second while logged in.
       Shelves that never leave <strong>Inactive</strong> almost always fail in this log
       (wrong MAC, disabled, identity timeout, SSH auth, etc.).
@@ -121,9 +122,32 @@
 
   <section class="card">
     <h2>Add / edit shelf</h2>
-    <p class="hint">PUT <code>/api/v1/e7/shelves/{mac}</code> — MAC required; label + enabled optional. Non-durable (see banner).</p>
-    <label>MAC (required) <input id="shelfMac" type="text" placeholder="00:02:5d:d9:21:47" autocomplete="off"/></label>
-    <label>Label <input id="shelfLabel" type="text" placeholder="west hut" autocomplete="off"/></label>
+    <p class="hint">
+      PUT <code>/api/v1/e7/shelves/{id}</code> — path id is Calix <strong>MAC</strong> or
+      Junos <strong>DEVICE-ID</strong>. For Junos Call Home, set vendor to
+      <code>junos</code> and optionally a shared <strong>secret</strong> matching
+      Junos <code>system services outbound-ssh client … secret</code> (HMAC of HOST-KEY).
+      Secret is optional if the router does not send HOST-KEY/HMAC.
+    </p>
+    <label>Vendor
+      <select id="shelfVendor">
+        <option value="calix">Calix E7</option>
+        <option value="junos">Juniper Junos</option>
+      </select>
+    </label>
+    <label>MAC / path id (required)
+      <input id="shelfMac" type="text" placeholder="00:02:5d:… or junos-device-id" autocomplete="off"/>
+    </label>
+    <label>Junos DEVICE-ID (if different from path)
+      <input id="shelfDeviceId" type="text" placeholder="optional; defaults to path id" autocomplete="off"/>
+    </label>
+    <label>Shared secret (Junos outbound-ssh secret, optional)
+      <input id="shelfSecret" type="password" placeholder="leave blank to keep / omit" autocomplete="new-password"/>
+    </label>
+    <label class="check-label">
+      <input id="shelfSecretClear" type="checkbox"/> Clear stored secret
+    </label>
+    <label>Label <input id="shelfLabel" type="text" placeholder="west hut / pe1" autocomplete="off"/></label>
     <label class="check-label">
       <input id="shelfEnabled" type="checkbox" checked/> Enabled
     </label>

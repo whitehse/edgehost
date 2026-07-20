@@ -148,7 +148,7 @@ target_include_directories(edgehost_e7 PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 # state_notify + ws hub live in edgehost_plugins (put_and_notify / K16)
-target_link_libraries(edgehost_e7 PUBLIC edgecore edgehost_plugins)
+target_link_libraries(edgehost_e7 PUBLIC edgecore edgehost_plugins OpenSSL::Crypto)
 if(Libnetconf_FOUND)
   target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_HAVE_LIBNETCONF=1)
   if(TARGET Libnetconf::netconf)
@@ -366,6 +366,9 @@ target_link_libraries(edgehost_sidecar_test PRIVATE
 add_executable(edgehost_e7_event_apply_test tests/test_e7_event_apply.c)
 target_link_libraries(edgehost_e7_event_apply_test PRIVATE edgehost_e7)
 
+add_executable(edgehost_junos_identity_test tests/test_junos_identity.c)
+target_link_libraries(edgehost_junos_identity_test PRIVATE edgehost_e7 OpenSSL::Crypto)
+
 add_executable(edgehost_e7_callhome_test tests/test_e7_callhome.c)
 target_link_libraries(edgehost_e7_callhome_test PRIVATE edgehost_e7 pthread)
 if(Libnetconf_FOUND)
@@ -397,7 +400,8 @@ add_test(NAME edgehost_openai_proxy COMMAND edgehost_openai_test)
 add_test(NAME edgehost_plugin_stubs COMMAND edgehost_stubs_test)
 add_test(NAME edgehost_tls_server COMMAND edgehost_tls_test)
 add_test(NAME edgehost_sidecar_notify COMMAND edgehost_sidecar_test)
-add_test(NAME edgehost_e7_event_apply COMMAND edgehost_e7_event_apply_test
+add_test(NAME edgehost_e7_event_apply COMMAND edgehost_e7_event_apply_test)
+add_test(NAME edgehost_junos_identity COMMAND edgehost_junos_identity_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME edgehost_e7_callhome COMMAND edgehost_e7_callhome_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
