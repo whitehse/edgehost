@@ -1,14 +1,18 @@
 # Combined lab profile: WebGPU status map + multi-vendor NETCONF Call Home
-# (Calix E7 + Juniper Junos on the same listener).
+# (Calix E7 + Juniper Junos on the same listener) + libanim documentation SPA.
 #
 # Prefer the helper:
 #   ./scripts/run-status-map-junos.sh
+#   # links map + Call Home + /documentation/ (2-port tap) + /explain/
 #
 # IMPORTANT: This profile shares the Call Home port and allowlist with Calix E7.
 # Do NOT run run-status-map-e7.sh and run-status-map-junos.sh at the same time
-# on the same CH_PORT — use one process. Both UIs work against that process:
-#   /e7/     multi-vendor admin
-#   /junos/  Junos DEVICE-ID + optional secret form
+# on the same CH_PORT — use one process. UIs against that process:
+#   /e7/              multi-vendor admin
+#   /junos/           Junos DEVICE-ID + optional secret form
+#   /map/             status map
+#   /documentation/   2-port tap lesson (libanim)
+#   /explain/         template fill lab
 #
 # The same TCP listener demuxes by identity preamble:
 #   Calix XML <identity><mac>…  → ack → SSH client → stream exa-events

@@ -3,6 +3,7 @@
 #   - Calix E7 (identity XML + <ack>ok</ack> + SSH client + exa-events)
 #   - Juniper Junos (DEVICE-CONN-INFO + SSH client + NETCONF stream)
 #   - SPAs: /junos/ (add Junos systems), /e7/ (full admin), /map/
+#   - libanim: /documentation/ (2-port tap lesson), /explain/ (template lab)
 #
 # IMPORTANT — one listener on CH_PORT (default 4334):
 #   This script shares the same allowlist and Call Home port as
@@ -16,16 +17,21 @@
 #   JUNOS_DEVICE_ID=pe1.lab JUNOS_SECRET=shared ./scripts/run-status-map-junos.sh
 #   # Only if all devices use this NMS SSH login (defaults keep Calix sysadmin):
 #   JUNOS_SSH_USER=netconf JUNOS_SSH_PASSWORD=secret ./scripts/run-status-map-junos.sh
+#   LIBANIM_ROOT=$HOME/libanim ./scripts/run-status-map-junos.sh
+#   SKIP_LIBANIM=1 ./scripts/run-status-map-junos.sh   # map + Call Home only
 #   FOREGROUND=0 NO_BUILD=1 ./scripts/run-status-map-junos.sh
 #
 # Aliases: E7_HOST/E7_PORT → CH_HOST/CH_PORT
 #
 # Browser (password: lab):
-#   http://127.0.0.1:18080/junos/  → add Junos DEVICE-ID + optional secret
-#   http://127.0.0.1:18080/e7/     → multi-vendor Call Home admin
-#   http://127.0.0.1:18080/map/    → status map
+#   http://127.0.0.1:18080/junos/          → add Junos DEVICE-ID + optional secret
+#   http://127.0.0.1:18080/e7/             → multi-vendor Call Home admin
+#   http://127.0.0.1:18080/map/            → status map
+#   http://127.0.0.1:18080/documentation/  → 2-port tap animation lesson
+#   http://127.0.0.1:18080/explain/        → template fill + player lab
 #
 # Guide: docs/guides/e7-callhome.md
+# Tap lesson: libanim docs/guides/two-port-tap.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,7 +51,11 @@ SEED_ID="${JUNOS_DEVICE_ID:-}"
 SEED_SECRET="${JUNOS_SECRET:-}"
 SEED_LABEL="${JUNOS_LABEL:-junos}"
 DEMO="${LIBWEBMAP_DEMO:-$HOME/libwebmap/demo}"
+ANIM="${LIBANIM_ROOT:-$HOME/libanim}"
+SKIP_LIBANIM="${SKIP_LIBANIM:-0}"
 MAP_DIR="$ROOT/spa/map"
+EXPLAIN_DIR="$ROOT/spa/explain"
+DOC_DIR="$ROOT/spa/documentation"
 CFG_SRC="$ROOT/config/edgehost.status-map-junos.yaml"
 CFG_RUNTIME="${EDGEHOST_JUNOS_RUNTIME_CFG:-$ROOT/var/edgehost.status-map-junos.runtime.yaml}"
 LOG="${EDGEHOST_LOG:-$ROOT/build/edgehost-status-map-junos.log}"
@@ -68,7 +78,7 @@ link_or_refresh() {
   if [[ -L "$linkpath" || -e "$linkpath" ]]; then
     rm -rf "$linkpath"
   fi
-  ln -s "$target" "$linkpath"
+  ln -sfn "$target" "$linkpath"
   echo "  linked $linkpath → $target"
 }
 
@@ -176,8 +186,84 @@ ensure_allowlist() {
   echo "==> seeded Junos device_id=${SEED_ID}${SEED_SECRET:+ (secret set)} into shared allowlist"
 }
 
-echo "==> edgehost status map + multi-vendor Call Home (Calix + Junos)"
+link_map_assets() {
+  echo "==> linking libwebmap demo assets into spa/map/"
+  link_or_refresh "$DEMO/main.js" "$MAP_DIR/main.js"
+  link_or_refresh "$DEMO/display" "$MAP_DIR/display"
+  link_or_refresh "$DEMO/webmap.wasm" "$MAP_DIR/webmap.wasm"
+  link_or_refresh "$DEMO/basemap" "$MAP_DIR/basemap"
+  link_or_refresh "$DEMO/fiber_data" "$MAP_DIR/fiber_data"
+  link_or_refresh "$DEMO/tiles_fiber" "$MAP_DIR/tiles_fiber"
+  [[ -d "$DEMO/weather" ]] && link_or_refresh "$DEMO/weather" "$MAP_DIR/weather"
+  [[ -d "$DEMO/dynamic" ]] && link_or_refresh "$DEMO/dynamic" "$MAP_DIR/dynamic"
+  [[ -d "$DEMO/splice_diagrams" ]] && link_or_refresh "$DEMO/splice_diagrams" "$MAP_DIR/splice_diagrams"
+}
+
+# libanim player + templates + 2-port tap documentation lesson
+link_libanim_assets() {
+  if [[ "$SKIP_LIBANIM" == "1" ]]; then
+    echo "==> SKIP_LIBANIM=1 — not linking documentation / explain assets"
+    return 0
+  fi
+  if [[ ! -d "$ANIM" ]]; then
+    echo "warning: libanim not found at $ANIM (set LIBANIM_ROOT) — skip animation SPA links"
+    return 0
+  fi
+
+  echo "==> linking libanim assets (documentation + explain)"
+  echo "    libanim: $ANIM"
+
+  if [[ "$NO_BUILD" != "1" ]]; then
+    if [[ ! -f "$ANIM/demo/anim.wasm" ]]; then
+      echo "==> building libanim freestanding WASM (anim.wasm missing)"
+      cmake -B "$ANIM/build-wasm" -S "$ANIM" \
+        -DCMAKE_TOOLCHAIN_FILE="$ANIM/cmake/WasmToolchain.cmake" \
+        -DANIM_BUILD_WASM=ON
+      cmake --build "$ANIM/build-wasm"
+    fi
+    # Prefer rebuilding native lib when edgehost will link it
+    if [[ ! -f "$ANIM/build/libanim.a" && ! -f "$ANIM/build/libanim.so" ]]; then
+      echo "==> building libanim native library"
+      cmake -B "$ANIM/build" -S "$ANIM"
+      cmake --build "$ANIM/build"
+    fi
+  fi
+
+  if [[ ! -f "$ANIM/demo/anim.wasm" ]]; then
+    echo "warning: missing $ANIM/demo/anim.wasm — documentation player will not load WASM"
+  fi
+
+  mkdir -p "$EXPLAIN_DIR/player" "$EXPLAIN_DIR/templates" "$EXPLAIN_DIR/fixtures" \
+           "$DOC_DIR/lessons"
+
+  link_or_refresh "$ANIM/demo/demo.js" "$EXPLAIN_DIR/player/demo.js"
+  link_or_refresh "$ANIM/demo/demo.css" "$EXPLAIN_DIR/player/demo.css"
+  link_or_refresh "$ANIM/demo/wasm_host.js" "$EXPLAIN_DIR/player/wasm_host.js"
+  link_or_refresh "$ANIM/demo/webgpu_renderer.js" "$EXPLAIN_DIR/player/webgpu_renderer.js"
+  link_or_refresh "$ANIM/demo/anim.wasm" "$EXPLAIN_DIR/player/anim.wasm"
+  link_or_refresh "$ANIM/demo/index.html" "$EXPLAIN_DIR/player/index.html"
+
+  if [[ -d "$ANIM/fixtures/templates" ]]; then
+    for f in "$ANIM/fixtures/templates"/*.tmpl; do
+      [[ -f "$f" ]] || continue
+      link_or_refresh "$f" "$EXPLAIN_DIR/templates/$(basename "$f")"
+    done
+  fi
+  for name in optical_path outage_story two_port_tap; do
+    [[ -f "$ANIM/fixtures/${name}.anim" ]] && \
+      link_or_refresh "$ANIM/fixtures/${name}.anim" "$EXPLAIN_DIR/fixtures/${name}.anim"
+  done
+  # Documentation screen lesson (2-port tap)
+  if [[ -f "$ANIM/fixtures/two_port_tap.anim" ]]; then
+    link_or_refresh "$ANIM/fixtures/two_port_tap.anim" "$DOC_DIR/lessons/two_port_tap.anim"
+  else
+    echo "warning: missing fixtures/two_port_tap.anim — /documentation/ lesson unavailable"
+  fi
+}
+
+echo "==> edgehost status map + multi-vendor Call Home (Calix + Junos) + libanim docs"
 echo "    demo:      $DEMO"
+echo "    libanim:   $ANIM  (SKIP_LIBANIM=$SKIP_LIBANIM)"
 echo "    cfg src:   $CFG_SRC"
 echo "    CH_HOST:   $CH_HOST  CH_PORT: $CH_PORT"
 echo "    SSH user:  $SSH_USER  (default sysadmin for Calix; set JUNOS_SSH_USER only if needed)"
@@ -192,16 +278,8 @@ if (( CH_PORT < 1 || CH_PORT > 65535 )); then
   die "CH_PORT out of range 1–65535 (got: $CH_PORT)"
 fi
 
-echo "==> linking demo assets into spa/map/"
-link_or_refresh "$DEMO/main.js" "$MAP_DIR/main.js"
-link_or_refresh "$DEMO/display" "$MAP_DIR/display"
-link_or_refresh "$DEMO/webmap.wasm" "$MAP_DIR/webmap.wasm"
-link_or_refresh "$DEMO/basemap" "$MAP_DIR/basemap"
-link_or_refresh "$DEMO/fiber_data" "$MAP_DIR/fiber_data"
-link_or_refresh "$DEMO/tiles_fiber" "$MAP_DIR/tiles_fiber"
-[[ -d "$DEMO/weather" ]] && link_or_refresh "$DEMO/weather" "$MAP_DIR/weather"
-[[ -d "$DEMO/dynamic" ]] && link_or_refresh "$DEMO/dynamic" "$MAP_DIR/dynamic"
-[[ -d "$DEMO/splice_diagrams" ]] && link_or_refresh "$DEMO/splice_diagrams" "$MAP_DIR/splice_diagrams"
+link_map_assets
+link_libanim_assets
 
 ensure_allowlist
 
@@ -223,7 +301,20 @@ if [[ ! -x "$ROOT/build/edgehost" ]]; then
     die "build/edgehost missing and NO_BUILD=1"
   fi
   echo "==> building edgehost"
-  cmake -B build -S . >/dev/null
+  if [[ "$SKIP_LIBANIM" != "1" && -d "$ANIM" ]]; then
+    cmake -B build -S . -DLIBANIM_ROOT="$ANIM"
+  else
+    cmake -B build -S .
+  fi
+  cmake --build build -j"$(nproc 2>/dev/null || echo 2)"
+elif [[ "$NO_BUILD" != "1" ]]; then
+  # Rebuild so explain/documentation routes and libanim stay in sync
+  echo "==> rebuilding edgehost"
+  if [[ "$SKIP_LIBANIM" != "1" && -d "$ANIM" ]]; then
+    cmake -B build -S . -DLIBANIM_ROOT="$ANIM" >/dev/null
+  else
+    cmake -B build -S . >/dev/null
+  fi
   cmake --build build -j"$(nproc 2>/dev/null || echo 2)"
 fi
 [[ -x "$ROOT/build/edgehost" ]] || die "build/edgehost missing"
@@ -248,7 +339,7 @@ if port_listening "$CH_PORT"; then
   echo "         stop the other edgehost (Calix/Junos share this port)"
 fi
 
-echo "==> starting edgehost (multi-vendor Call Home)"
+echo "==> starting edgehost (multi-vendor Call Home + documentation)"
 echo "    HTTP:      ${HOST}:${PORT}"
 echo "    Call Home: ${CH_HOST}:${CH_PORT}  (Calix + Junos demux by identity)"
 echo "    config:    $CFG_RUNTIME"
@@ -260,15 +351,18 @@ HTTP_URL_HOST="$HOST"
 if [[ "$HOST" == "0.0.0.0" ]]; then
   HTTP_URL_HOST="127.0.0.1"
 fi
-echo "  Home:      http://${HTTP_URL_HOST}:${PORT}/"
-echo "  Map:       http://${HTTP_URL_HOST}:${PORT}/map/"
-echo "  Junos UI:  http://${HTTP_URL_HOST}:${PORT}/junos/  (add DEVICE-ID systems)"
-echo "  Full CH:   http://${HTTP_URL_HOST}:${PORT}/e7/     (Calix + Junos admin)"
-echo "  Lab:       http://${HTTP_URL_HOST}:${PORT}/lab/"
-echo "  Call Home: ${CH_HOST}:${CH_PORT}"
+echo "  Home:           http://${HTTP_URL_HOST}:${PORT}/"
+echo "  Map:            http://${HTTP_URL_HOST}:${PORT}/map/"
+echo "  Documentation:  http://${HTTP_URL_HOST}:${PORT}/documentation/  (2-port tap lesson)"
+echo "  Explain lab:    http://${HTTP_URL_HOST}:${PORT}/explain/"
+echo "  Junos UI:       http://${HTTP_URL_HOST}:${PORT}/junos/  (add DEVICE-ID systems)"
+echo "  Full CH:        http://${HTTP_URL_HOST}:${PORT}/e7/     (Calix + Junos admin)"
+echo "  Lab:            http://${HTTP_URL_HOST}:${PORT}/lab/"
+echo "  Call Home:      ${CH_HOST}:${CH_PORT}"
 echo ""
 echo "  Calix E7s and Junos routers dial the same port; identity preamble selects path."
 echo "  Add Calix MACs and Junos DEVICE-IDs to the shared allowlist (SPA or file)."
+echo "  Skip animations: SKIP_LIBANIM=1"
 echo ""
 
 if [[ "$FOREGROUND" == "1" ]]; then
