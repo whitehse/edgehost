@@ -1,6 +1,5 @@
 /**
  * Employee documentation: auth gate + libanim 2-port tap lesson player.
- * Assets: /explain/player/* and ./lessons/two_port_tap.anim
  * Voice: Web Speech API via /explain/player/narrator.js
  */
 
@@ -57,6 +56,30 @@ function highlightChapter(ms) {
   if (active) active.classList.add("active");
 }
 
+/** Parse narr lines from ASCII plan for seek/chapter speech without re-fire. */
+function parseNarrCues(planText) {
+  const cues = [];
+  if (!planText) return cues;
+  for (const raw of planText.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line.startsWith("narr ")) continue;
+    const m = line.match(/^narr\s+(\d+)\s+(.+)$/);
+    if (!m) continue;
+    cues.push({ t_ms: Number(m[1]), text: m[2] });
+  }
+  cues.sort((a, b) => a.t_ms - b.t_ms);
+  return cues;
+}
+
+function cueAtOrBefore(cues, ms) {
+  let hit = null;
+  for (const c of cues) {
+    if (c.t_ms <= ms) hit = c;
+    else break;
+  }
+  return hit;
+}
+
 async function startLesson() {
   const canvas = $("stage");
   const overlay = $("overlay");
@@ -71,6 +94,9 @@ async function startLesson() {
     pauseWhileSpeaking: true,
     rate: 1.0,
     log: (s) => console.info("[documentation/voice]", s),
+    onStatus: (line) => {
+      if (voiceStatus) voiceStatus.textContent = line;
+    },
   });
 
   function refreshVoiceUi() {
@@ -81,10 +107,6 @@ async function startLesson() {
     if (en) en.checked = narrator.enabled;
     if (hold) hold.checked = narrator.pauseWhileSpeaking;
     if (rate) rate.value = String(narrator.rate);
-    if (!narrator.available() && voiceStatus) {
-      voiceStatus.textContent =
-        "Voice: unavailable in this browser (Web Speech API missing)";
-    }
   }
 
   $("voiceEnabled")?.addEventListener("change", (e) => {
@@ -103,6 +125,24 @@ async function startLesson() {
     narrator.cancel();
     refreshVoiceUi();
   });
+  $("btnTestVoice")?.addEventListener("click", () => {
+    narrator.ensureVoices();
+    const ok = narrator.testVoice();
+    const d = narrator.diagnostics();
+    console.info("[documentation/voice] test", d);
+    if (!ok || d.lastError) {
+      narration.textContent =
+        "Voice test failed: " +
+        (d.lastError || "unknown") +
+        (d.voiceCount === 0
+          ? ". No system TTS voices found. On Linux install: sudo apt install speech-dispatcher espeak-ng"
+          : ". Try Chrome/Edge, check OS sound output, and click Test voice again.");
+    } else {
+      narration.textContent =
+        "Voice test started — you should hear a short phrase. If silent, check OS volume and TTS voices.";
+    }
+    refreshVoiceUi();
+  });
   refreshVoiceUi();
 
   let wasm = null;
@@ -112,13 +152,16 @@ async function startLesson() {
   let octx = overlay ? overlay.getContext("2d") : null;
   let playing = false;
   let lastTs = 0;
+  let planText = "";
+  let narrCues = [];
+  let lastSpokenKey = "";
 
   try {
     wasm = createAnimWasmHost({ log: (s) => console.info("[documentation]", s) });
     await wasm.init("/explain/player/anim.wasm");
   } catch (e) {
     narration.textContent =
-      "Could not load anim.wasm. Run ./scripts/run-status-map-junos.sh (or run-documentation.sh) to link player assets. " +
+      "Could not load anim.wasm. Run ./scripts/run-status-map-junos.sh to link player assets. " +
       e;
     modeLabel.textContent = "Engine: unavailable";
     return;
@@ -141,25 +184,27 @@ async function startLesson() {
   modeLabel.textContent =
     "Engine: WASM · Draw: " + (drawMode === "webgpu" ? "WebGPU" : "Canvas2D");
 
-  function onNarration(text) {
-    if (!text) return;
+  function speakCue(text, force) {
+    if (!text || !narrator.enabled) return;
+    const key = text;
+    if (!force && key === lastSpokenKey && narrator.isSpeaking()) return;
+    lastSpokenKey = key;
     narration.textContent = text;
-    narrator.speak(text);
+    narrator.speak(text, { force: !!force });
     refreshVoiceUi();
   }
 
   function drain(opts = {}) {
-    const speak = opts.speak !== false;
+    const doSpeak = opts.speak !== false;
     for (;;) {
       const ev = wasm.pollEvent();
       if (!ev) break;
       if (ev.type === 2 && ev.text) {
         narration.textContent = ev.text;
-        if (speak) narrator.speak(ev.text);
+        if (doSpeak) speakCue(ev.text, opts.force);
       }
       if (ev.type === 4) {
         playing = false;
-        /* let last line finish */
       }
     }
     refreshVoiceUi();
@@ -192,12 +237,13 @@ async function startLesson() {
     try {
       const res = await fetch(p, { credentials: "same-origin" });
       if (!res.ok) continue;
-      const planText = await res.text();
+      planText = await res.text();
+      narrCues = parseNarrCues(planText);
       if (!wasm.loadPlan(planText)) throw new Error("anim_load_plan failed");
       drain({ speak: false });
       draw();
       narration.textContent =
-        "Ready — press Play for voice + animation (or click a chapter). First click enables browser speech.";
+        "Ready — click Test voice (confirm audio), then Play. Voice uses the browser’s speech engine.";
       loaded = true;
       break;
     } catch (e) {
@@ -206,23 +252,29 @@ async function startLesson() {
   }
   if (!loaded) {
     narration.textContent =
-      "Lesson file missing. Link fixtures/two_port_tap.anim via run-status-map-junos.sh or run-documentation.sh.";
+      "Lesson file missing. Run ./scripts/run-status-map-junos.sh to link two_port_tap.anim.";
     return;
   }
 
+  function speakAtPlayhead(force) {
+    const cue = cueAtOrBefore(narrCues, wasm.timeMs());
+    if (cue) speakCue(cue.text, force);
+  }
+
   $("btnPlay")?.addEventListener("click", () => {
-    /* User gesture unlocks speech in most browsers */
+    /* User gesture: best moment to unlock / prime TTS */
+    narrator.ensureVoices();
     if (wasm.timeMs() >= wasm.durationMs()) {
       wasm.seekMs(0);
       drain({ speak: false });
+      lastSpokenKey = "";
     }
     wasm.play();
     playing = true;
     lastTs = performance.now();
-    /* If already on a cue with text showing, re-speak current box */
-    if (narration.textContent && !narration.textContent.startsWith("Ready")) {
-      narrator.speak(narration.textContent, { force: true });
-    }
+    /* Speak current chapter line immediately under the click gesture */
+    speakAtPlayhead(true);
+    refreshVoiceUi();
   });
   $("btnPause")?.addEventListener("click", () => {
     playing = false;
@@ -232,26 +284,28 @@ async function startLesson() {
   });
   $("btnRestart")?.addEventListener("click", () => {
     narrator.cancel();
+    lastSpokenKey = "";
     wasm.seekMs(0);
     drain({ speak: false });
     wasm.play();
     playing = true;
     lastTs = performance.now();
+    speakAtPlayhead(true);
     draw();
   });
   seek?.addEventListener("input", () => {
     playing = false;
     wasm.pause();
     narrator.cancel();
+    lastSpokenKey = "";
     wasm.seekMs(Number(seek.value));
     drain({ speak: false });
     draw();
-    /* Speak the caption that is now current (last drained or on-screen) */
-    if (narrator.enabled && narration.textContent) {
-      /* after seek, re-fire nearest past narration by scanning plan is heavy;
-         speak whatever text we last set if user clicks Play */
-    }
     refreshVoiceUi();
+  });
+  seek?.addEventListener("change", () => {
+    /* On release, speak the cue at this time (user gesture from slider) */
+    speakAtPlayhead(true);
   });
 
   document.querySelectorAll("#chapters li").forEach((li) => {
@@ -260,10 +314,11 @@ async function startLesson() {
       playing = false;
       wasm.pause();
       narrator.cancel();
+      lastSpokenKey = "";
       wasm.seekMs(ms);
-      /* Chapter click is a user gesture — speak cues at this playhead */
-      drain({ speak: true });
+      drain({ speak: false });
       draw();
+      speakAtPlayhead(true);
       refreshVoiceUi();
     });
   });
@@ -271,7 +326,6 @@ async function startLesson() {
   function tick(now) {
     if (playing) {
       if (narrator.shouldHoldTimeline()) {
-        /* Hold playhead; keep drawing and voice status */
         lastTs = now;
         draw();
         refreshVoiceUi();
