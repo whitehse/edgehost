@@ -20,6 +20,14 @@ Call Home listener — default **0.0.0.0:4334**):
 # E7 guide: docs/guides/e7-callhome.md
 ```
 
+**Map + Juniper Junos Call Home** (DEVICE-CONN-INFO outbound-ssh):
+
+```bash
+./scripts/run-status-map-junos.sh
+# CH_HOST=0.0.0.0 CH_PORT=4334 ./scripts/run-status-map-junos.sh
+# JUNOS_DEVICE_ID=pe1.lab JUNOS_SECRET=shared ./scripts/run-status-map-junos.sh
+# config: config/edgehost.status-map-junos.yaml · allowlist: var/junos_allowlist.txt
+```
 Browser (WebGPU required — Chrome/Edge recommended):
 
 1. Open `http://127.0.0.1:18080/`
@@ -31,7 +39,8 @@ Also:
 | URL | Purpose |
 |-----|---------|
 | `/map/` | Status map (session required in UI) |
-| `/e7/` | E7 Call Home configure + monitor (status-map-e7 script) |
+| `/junos/` | Junos Call Home systems (DEVICE-ID, optional secret) |
+| `/e7/` | Full Call Home admin (Calix + multi-vendor) |
 | `/lab/` | Phase-1 API console (health, state, WS, packages) |
 | `/health` | Process metrics JSON (no auth) |
 

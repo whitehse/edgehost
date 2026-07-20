@@ -67,6 +67,10 @@
         location.href = "/e7/";
         return;
       }
+      if (next === "junos") {
+        location.href = "/junos/";
+        return;
+      }
       await me();
     } else {
       setBadge(false, "login failed");

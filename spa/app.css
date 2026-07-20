@@ -124,13 +124,40 @@ ul.plain {
 ul.plain li { margin: 0.25rem 0; }
 ul.plain strong { color: var(--text); }
 
-/* E7 admin */
+/* E7 / Junos admin */
 body.e7 { max-width: 64rem; }
 .banner-warn {
   border-color: color-mix(in srgb, #e6b84d 45%, var(--border));
   background: color-mix(in srgb, #e6b84d 8%, var(--card));
 }
 .banner-warn h2 { color: #e6b84d; }
+.banner-info {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+}
+.banner-info h2 { color: var(--accent); }
+.form-grid {
+  display: grid;
+  gap: 0.35rem 1rem;
+  margin-top: 0.25rem;
+}
+@media (min-width: 40rem) {
+  .form-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .form-grid .check-label { grid-column: 1 / -1; }
+}
+.req { color: var(--bad); font-weight: 600; }
+.hint-inline { color: var(--muted); font-weight: 400; font-size: 0.85em; }
+.status-summary { margin: 0.5rem 0; }
+.router-help { margin-top: 0.85rem; color: var(--muted); font-size: 0.88rem; }
+.router-help summary { cursor: pointer; color: var(--accent); }
+.router-help pre.sketch { margin-top: 0.5rem; max-height: 12rem; }
+table.data tr.row-selected {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+#eventsLog .evt-junos { font-weight: 500; }
+#eventsLog > div { margin: 0.05rem 0; }
 table.data {
   width: 100%;
   border-collapse: collapse;

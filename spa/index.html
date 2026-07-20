@@ -30,9 +30,10 @@
     </div>
 
     <div id="appPanel" class="hidden">
-      <p class="hint">Session active. Open the map, E7 Call Home admin, or lab API console.</p>
+      <p class="hint">Session active. Open the map, Call Home admin, or lab API console.</p>
       <div class="row nav-row">
         <a class="btn primary" href="/map/">Open status map</a>
+        <a class="btn secondary" href="/junos/">Junos Call Home</a>
         <a class="btn secondary" href="/e7/">E7 Call Home</a>
         <a class="btn secondary" href="/lab/">Lab console</a>
         <button type="button" id="btnLogout" class="ghost">Log out (local)</button>
@@ -45,14 +46,15 @@
     <ul class="plain">
       <li><strong>Login</strong> — <code>POST /auth/lab-login</code> (ADR-013 cookie)</li>
       <li><strong>Map UI</strong> — <code>/map/</code> (WebGPU host; assets linked from libwebmap demo)</li>
-      <li><strong>E7 Call Home</strong> — <code>/e7/</code> (shelves allowlist, ONTs, commands)</li>
+      <li><strong>Junos Call Home</strong> — <code>/junos/</code> (DEVICE-ID allowlist, shared secret)</li>
+      <li><strong>E7 Call Home</strong> — <code>/e7/</code> (Calix + multi-vendor admin, ONTs, commands)</li>
       <li><strong>Packages</strong> — <code>/packages/</code> (auth-gated catalog + fixtures)</li>
       <li><strong>State / WS</strong> — <code>/api/v1/state/*</code>, <code>/api/v1/stream</code></li>
     </ul>
     <p class="hint">
       Status map only: <code>./scripts/run-status-map.sh</code>.
-      Map + E7 Call Home: <code>./scripts/run-status-map-e7.sh</code>
-      (links demo tiles, enables Call Home on :4334, SPA at <code>/e7/</code>).
+      Map + Calix E7: <code>./scripts/run-status-map-e7.sh</code> → <code>/e7/</code>.
+      Map + Junos: <code>./scripts/run-status-map-junos.sh</code> → <code>/junos/</code>.
     </p>
   </section>
 

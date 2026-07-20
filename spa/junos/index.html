@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>edgehost · Junos Call Home</title>
+  <link rel="stylesheet" href="/app.css"/>
+</head>
+<body class="e7 junos">
+  <header>
+    <h1><a href="/" class="home-link">edgehost</a> · Junos Call Home</h1>
+    <span id="authBadge" class="badge muted">not logged in</span>
+  </header>
+
+  <section class="card banner-info">
+    <h2>Juniper NETCONF Call Home</h2>
+    <p class="hint" style="margin:0">
+      Configure devices that dial in with Junos
+      <code>system services outbound-ssh</code> (DEVICE-CONN-INFO).
+      After the initiation sequence, edgehost is the <strong>SSH client</strong> and
+      <strong>NETCONF client</strong> on the same TCP socket (RFC 8071).
+      Optional shared secret verifies <code>HOST-KEY</code> / <code>HMAC:</code> when the
+      router sends them.
+    </p>
+    <p class="hint" style="margin:0.5rem 0 0">
+      This UI shares the Call Home listener and allowlist with Calix E7
+      (<code>./var/e7_allowlist.txt</code>). Calix dials are handled by identity
+      demux, not this form — manage Calix MACs on <a href="/e7/">/e7/</a>.
+    </p>
+  </section>
+
+  <section class="card" id="loginCard">
+    <h2>Lab login</h2>
+    <p class="hint">POST /auth/lab-login → session cookie. Employee role required for allowlist PUT.</p>
+    <label>Password <input id="labPw" type="password" value="lab" autocomplete="current-password"/></label>
+    <div class="row">
+      <button type="button" id="btnLogin">Login</button>
+      <button type="button" id="btnMe" class="ghost">GET /auth/me</button>
+      <a class="btn secondary" href="/e7/">Full Call Home admin</a>
+      <a class="btn secondary" href="/map/">Status map</a>
+      <a class="btn secondary" href="/">Home</a>
+    </div>
+    <pre id="authOut" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Listener status</h2>
+    <p class="hint">GET <code>/api/v1/e7/status</code> — shared Call Home listener (Calix + Junos).</p>
+    <div class="row">
+      <button type="button" id="btnStatus">Refresh</button>
+      <span id="statusBadge" class="badge muted">—</span>
+    </div>
+    <div id="statusSummary" class="status-summary hint">Log in to load status.</div>
+    <div class="table-wrap">
+      <table class="data" id="statusTable">
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody id="statusBody"><tr><td colspan="2" class="muted-cell">…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="addCard">
+    <h2>Add / edit Junos system</h2>
+    <p class="hint">
+      PUT <code>/api/v1/e7/shelves/{device-id}</code> with
+      <code>vendor: "junos"</code>.
+      <strong>DEVICE-ID</strong> must match
+      <code>set system services outbound-ssh client … device-id</code> on the router.
+      Shared secret is optional and must match the router
+      <code>secret</code> statement when HOST-KEY/HMAC are sent.
+    </p>
+
+    <div class="form-grid">
+      <label>DEVICE-ID <span class="req">*</span>
+        <input id="devId" type="text" placeholder="pe1.lab" autocomplete="off" spellcheck="false"/>
+      </label>
+      <label>Label
+        <input id="devLabel" type="text" placeholder="PE1 / lab router" autocomplete="off"/>
+      </label>
+      <label>Shared secret <span class="hint-inline">(optional)</span>
+        <input id="devSecret" type="password" placeholder="leave blank to omit / keep existing" autocomplete="new-password"/>
+      </label>
+      <label class="check-label">
+        <input id="devSecretClear" type="checkbox"/> Clear stored secret on save
+      </label>
+      <label class="check-label">
+        <input id="devEnabled" type="checkbox" checked/> Enabled (accept Call Home dials)
+      </label>
+    </div>
+
+    <div class="row">
+      <button type="button" id="btnSave">Save system</button>
+      <button type="button" id="btnFormClear" class="ghost">Clear form</button>
+      <button type="button" id="btnFormLoad" class="ghost">Load selected</button>
+    </div>
+    <pre id="formOut" class="compact"></pre>
+
+    <details class="router-help">
+      <summary>Router configuration sketch</summary>
+      <pre class="compact sketch" id="routerSketch">set system services netconf ssh
+set system services outbound-ssh client edgehost device-id pe1.lab
+set system services outbound-ssh client edgehost services netconf
+set system services outbound-ssh client edgehost servers &lt;nms-ip&gt; port 4334
+# optional HMAC of HOST-KEY:
+# set system services outbound-ssh client edgehost secret "shared-secret"</pre>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>Configured Junos systems</h2>
+    <p class="hint">
+      Filtered from GET <code>/api/v1/e7/shelves</code> (<code>vendor=junos</code> or DEVICE-ID path).
+      Select a row to edit, disconnect, or delete.
+    </p>
+    <div class="row">
+      <button type="button" id="btnDevices">Refresh</button>
+      <span id="devicesMeta" class="hint" style="margin:0"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="data" id="devicesTable">
+        <thead>
+          <tr>
+            <th></th>
+            <th>DEVICE-ID</th>
+            <th>Label</th>
+            <th>Secret</th>
+            <th>Enabled</th>
+            <th>Session</th>
+            <th>Peer</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="devicesBody">
+          <tr><td colspan="8" class="muted-cell">…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="connLogCard">
+    <h2>Connection progress</h2>
+    <p class="hint" style="margin:0 0 0.5rem">
+      TCP accept → <code>DEVICE-CONN-INFO</code> → optional HMAC → SSH client → NETCONF.
+      Polls <code>GET /api/v1/e7/events</code>. Junos-related stages are highlighted.
+    </p>
+    <div class="row" style="margin-top:0.35rem">
+      <button type="button" id="btnEventsRefresh">Refresh now</button>
+      <button type="button" id="btnEventsClear" class="ghost">Clear log view</button>
+      <label class="check-label" style="margin:0">
+        <input id="eventsAuto" type="checkbox" checked/> Auto-refresh
+      </label>
+      <span id="eventsBadge" class="badge muted">log off</span>
+      <span id="eventsMeta" class="hint" style="margin:0"></span>
+    </div>
+    <h3 class="subhead">In-flight sessions</h3>
+    <div class="table-wrap">
+      <table class="data" id="liveSessTable">
+        <thead>
+          <tr>
+            <th>State</th>
+            <th>Id</th>
+            <th>Peer</th>
+            <th>Age</th>
+            <th>SSH</th>
+            <th>Allow</th>
+          </tr>
+        </thead>
+        <tbody id="liveSessBody">
+          <tr><td colspan="6" class="muted-cell">No in-flight sessions</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3 class="subhead">Event log</h3>
+    <pre id="eventsLog" class="log events-log" aria-live="polite"></pre>
+  </section>
+
+  <script src="/app.js"></script>
+  <script src="/junos/junos.js"></script>
+</body>
+</html>

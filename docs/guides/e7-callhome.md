@@ -70,8 +70,10 @@ REST under **`/api/v1/e7/`**.
 | [Design](../designs/e7-netconf-callhome.md) | Full architecture, K-decisions, PR plan |
 | [ADR-018](../decisions/018-e7-netconf-callhome.md) | Accepted lab decisions summary |
 | `config/edgehost.e7-lab.yaml` | **Lab YAML** (E7 only) |
-| `config/edgehost.status-map-e7.yaml` | **Map + E7** combined lab YAML |
-| `./scripts/run-status-map-e7.sh` | Start script: map tiles + E7 SPA |
+| `config/edgehost.status-map-e7.yaml` | **Map + Calix E7** combined lab YAML |
+| `config/edgehost.status-map-junos.yaml` | **Map + Junos Call Home** combined lab YAML |
+| `./scripts/run-status-map-e7.sh` | Start script: map tiles + Calix E7 SPA |
+| `./scripts/run-status-map-junos.sh` | Start script: map tiles + Junos Call Home SPA |
 
 ---
 
@@ -138,9 +140,11 @@ Default `config/edgehost.lab.yaml` / `edgehost.example.yaml` keep
 
 ## Start the server
 
-### Recommended: status map + E7 admin
+### Recommended: status map + Call Home admin
 
-One process with the **WebGPU status map** and **E7 Call Home** screens:
+One process with the **WebGPU status map** and **Call Home** screens:
+
+**Calix E7:**
 
 ```bash
 cd ~/edgehost
@@ -155,6 +159,32 @@ cd ~/edgehost
 #   E7_HOST=192.0.2.10 ./scripts/run-status-map-e7.sh
 # HTTP SPA still defaults to 127.0.0.1 (EDGEHOST_HOST / EDGEHOST_PORT).
 ```
+
+**Juniper Junos (outbound-ssh) — multi-vendor listener:**
+
+```bash
+cd ~/edgehost
+./scripts/run-status-map-junos.sh
+# config:    config/edgehost.status-map-junos.yaml  (Calix + Junos on one port)
+# runtime:   var/edgehost.status-map-junos.runtime.yaml
+# allowlist: var/e7_allowlist.txt  (SHARED with Calix — not a separate empty file)
+#
+# Do not run run-status-map-e7.sh at the same time on the same CH_PORT.
+# Call Home bind:
+#   CH_HOST=0.0.0.0 CH_PORT=4334 ./scripts/run-status-map-junos.sh
+# Optional seed DEVICE-ID (+ outbound-ssh secret for HOST-KEY HMAC):
+#   JUNOS_DEVICE_ID=pe1.lab JUNOS_SECRET=shared ./scripts/run-status-map-junos.sh
+# SSH client user defaults to sysadmin (Calix field). Override only if needed:
+#   JUNOS_SSH_USER=netconf JUNOS_SSH_PASSWORD=secret ./scripts/run-status-map-junos.sh
+#
+# UIs (same process):
+#   http://127.0.0.1:18080/junos/  add Junos DEVICE-ID + optional secret
+#   http://127.0.0.1:18080/e7/     multi-vendor admin (Calix MACs + Junos)
+```
+
+Identity demux on the shared port: Calix XML MAC preamble vs Junos
+`DEVICE-CONN-INFO`. Subscription stream is per-session (`exa-events` vs
+`NETCONF`).
 
 ### E7-only lab (no map asset linking)
 

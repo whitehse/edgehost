@@ -1,0 +1,112 @@
+# Combined lab profile: WebGPU status map + multi-vendor NETCONF Call Home
+# (Calix E7 + Juniper Junos on the same listener).
+#
+# Prefer the helper:
+#   ./scripts/run-status-map-junos.sh
+#
+# IMPORTANT: This profile shares the Call Home port and allowlist with Calix E7.
+# Do NOT run run-status-map-e7.sh and run-status-map-junos.sh at the same time
+# on the same CH_PORT — use one process. Both UIs work against that process:
+#   /e7/     multi-vendor admin
+#   /junos/  Junos DEVICE-ID + optional secret form
+#
+# The same TCP listener demuxes by identity preamble:
+#   Calix XML <identity><mac>…  → ack → SSH client → stream exa-events
+#   Junos DEVICE-CONN-INFO      → SSH client → stream NETCONF
+#
+# Manual:
+#   export EDGEHOST_LAB_PASSWORD=lab
+#   export EDGEHOST_SESSION_HMAC='dev-hmac-key-32-bytes-minimum!!'
+#   ./build/edgehost --config config/edgehost.status-map-junos.yaml
+
+listen:
+  host: 127.0.0.1
+  port: 18080
+
+spa:
+  root: ./spa
+  max_file_bytes: 33554432
+
+packages:
+  root: ./packages
+
+http:
+  max_body_bytes: 1048576
+  max_pending_outbound: 256
+  max_upstream_body_bytes: 4194304
+
+state:
+  max_keys_default: 1024
+  max_value_bytes: 2048
+  namespaces:
+    net_core:
+      enabled: true
+    map_dynamic:
+      enabled: true
+    net_pon:
+      enabled: true
+      max_keys: 16384
+    net_home:
+      enabled: false
+    electric:
+      enabled: false
+    inventory:
+      enabled: true
+      max_keys: 512
+
+auth:
+  mode: lab_password
+  lab_password_env: EDGEHOST_LAB_PASSWORD
+  session_hmac_key_env: EDGEHOST_SESSION_HMAC
+  session_ttl_s: 28800
+
+dns:
+  allow_blocking: true
+
+plugins:
+  openai_proxy:
+    enabled: false
+    upstream: "https://api.openai.com"
+    api_key_env: OPENAI_API_KEY
+    service_api_key_env: EDGEHOST_OPENAI_SERVICE_KEY
+    timeout_ms: 60000
+    rate_limit_rpm: 60
+    max_concurrent_per_principal: 4
+  slack:
+    enabled: false
+  teams:
+    enabled: false
+  pqproxy:
+    enabled: false
+    metrics_url: "http://127.0.0.1:9108/metrics"
+    scrape_interval_ms: 5000
+  e7_callhome:
+    enabled: true
+    listen_host: 0.0.0.0
+    listen_port: 4334
+    # Shared SSH client defaults for Calix field gear (NMS → device).
+    # Override at runtime via script env if your Junos login user differs.
+    transport: ssh
+    ssh_username: sysadmin
+    ssh_password: sysadmin
+    lab_insecure_raw: false
+    reload_policy: merge
+    auto_subscribe_unknown: false
+    # Default stream for Calix; Junos sessions force NETCONF in code.
+    subscription_stream: exa-events
+    dirty_cap: 8192
+    rss_budget_bytes: 268435456
+    max_sessions: 160
+    # SHARED with Calix — do not use a separate empty allowlist or E7s will reject.
+    allowlist_path: ./var/e7_allowlist.txt
+    shelves:
+      - mac: "00:02:5d:d9:21:47"
+        shelf_id: "lab-e7-1"
+        enabled: true
+      - mac: "00:02:5d:d8:f3:18"
+        shelf_id: "lab-e7-2"
+        enabled: true
+
+postgres:
+  notify_enabled: false
+  listen_channel: map_overlay

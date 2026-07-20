@@ -32,6 +32,14 @@ cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on
 # docs: docs/guides/status-map.md · docs/guides/e7-callhome.md
 # browser: /map/ status map · /e7/ shelves, sessions, ONTs, commands
 
+# status map + Juniper Junos Call Home (outbound-ssh DEVICE-CONN-INFO):
+./scripts/run-status-map-junos.sh
+# CH_HOST=0.0.0.0 CH_PORT=4334 ./scripts/run-status-map-junos.sh
+# JUNOS_SSH_USER=netconf JUNOS_SSH_PASSWORD=… ./scripts/run-status-map-junos.sh
+# JUNOS_DEVICE_ID=pe1.lab JUNOS_SECRET=shared ./scripts/run-status-map-junos.sh
+# config: config/edgehost.status-map-junos.yaml · allowlist: var/junos_allowlist.txt
+# browser: /junos/ add systems · /e7/ multi-vendor admin
+
 # lab_password manual:
 #   EDGEHOST_LAB_PASSWORD + EDGEHOST_SESSION_HMAC
 #   ./build/edgehost --config config/edgehost.lab.yaml

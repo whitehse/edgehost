@@ -1705,6 +1705,7 @@ static void session_try_subscribe(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     int mid;
     const char *stream = "exa-events";
+    int is_junos = 0;
 
     if (!s || !s->nc || s->sub_sent || s->state != EDGE_E7_SESS_OPEN) {
         return;
@@ -1714,29 +1715,35 @@ static void session_try_subscribe(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         return;
     }
     /*
-     * Calix field create-subscription (compact form on wire after wrap):
-     *   <create-subscription xmlns="...notification:1.0">
-     *     <stream>exa-events</stream>
-     *   </create-subscription>
-     * Override via plugins.e7_callhome.subscription_stream if needed.
+     * Stream is vendor-specific on a shared Call Home listener:
+     *   Calix field gear → exa-events (or plugins.e7_callhome.subscription_stream)
+     *   Junos outbound-ssh → NETCONF (RFC 5277 default)
+     * Do not force the global YAML stream onto the wrong vendor.
      */
-    if (ch && ch->cfg && ch->cfg->e7_subscription_stream[0]) {
+    is_junos =
+        (s->identity.vendor[0] &&
+         (strcmp(s->identity.vendor, "junos") == 0 ||
+          strcmp(s->identity.vendor, "juniper") == 0)) ||
+        (s->identity.device_id[0] && !s->identity.mac[0]);
+    if (is_junos) {
+        stream = "NETCONF";
+    } else if (ch && ch->cfg && ch->cfg->e7_subscription_stream[0]) {
         stream = ch->cfg->e7_subscription_stream;
     }
     mid = netconf_create_subscription(s->nc, stream, NULL);
     if (mid < 0) {
-        e7_trace(ch, "subscribe_fail",
-                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+        e7_trace(ch, "subscribe_fail", sess_id_key(s), s->peer,
                  "create_subscription stream=%s failed", stream);
         return;
     }
     s->sub_sent = 1;
     s->sub_msg_id = mid;
-    e7_trace(ch, "subscribe", s->identity.identity_ok ? s->identity.mac : "",
-             s->peer, "create-subscription stream=%s msg_id=%d", stream, mid);
+    e7_trace(ch, "subscribe", sess_id_key(s), s->peer,
+             "create-subscription stream=%s msg_id=%d vendor=%s", stream, mid,
+             s->identity.vendor[0] ? s->identity.vendor : "?");
     fprintf(stderr,
-            "edgehost: e7_subscribe mac=%s peer=%s stream=%s msg_id=%d\n",
-            s->identity.identity_ok ? s->identity.mac : "-",
+            "edgehost: e7_subscribe id=%s peer=%s stream=%s msg_id=%d\n",
+            sess_id_key(s)[0] ? sess_id_key(s) : "-",
             s->peer[0] ? s->peer : "-", stream, mid);
     (void)session_drain_output(s);
 }
