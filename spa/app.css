@@ -89,6 +89,22 @@ pre {
 }
 pre.compact { max-height: 8rem; margin-top: 0.75rem; }
 pre.log { min-height: 5rem; max-height: 14rem; }
+pre.events-log {
+  min-height: 10rem;
+  max-height: 22rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+.subhead {
+  margin: 0.85rem 0 0.35rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.sess-open { color: var(--ok); font-weight: 600; }
+.sess-warn { color: #e6b84d; }
+.sess-bad { color: var(--bad); }
 .badge {
   font-size: 0.75rem;
   padding: 0.2rem 0.55rem;

@@ -39,10 +39,14 @@ find_package(Libharness QUIET)
 find_package(Libslack QUIET)
 find_package(Libteams QUIET)
 find_package(Libwebmap QUIET)
-# Optional: E7 Call Home NETCONF SM (+ libassh when present for SSH Call Home).
+# Optional: E7 Call Home NETCONF SM + Call Home SSH (libchssh preferred).
+find_package(Libchssh QUIET)
 find_package(Libnetconf QUIET)
 if(NOT DEFINED EDGEHOST_E7_SSH_AVAILABLE)
   set(EDGEHOST_E7_SSH_AVAILABLE 0)
+endif()
+if(NOT DEFINED EDGEHOST_E7_CHSSH_AVAILABLE)
+  set(EDGEHOST_E7_CHSSH_AVAILABLE 0)
 endif()
 if(EDGEHOST_REQUIRE_LIBSIM)
   find_package(Libsim REQUIRED)
@@ -71,6 +75,7 @@ else()
   message(STATUS "  libnetconf FOUND=0 (optional; E7 Call Home session pump needs sibling + build/libnetconf.a)")
 endif()
 message(STATUS "  E7 SSH     EDGEHOST_E7_SSH_AVAILABLE=${EDGEHOST_E7_SSH_AVAILABLE}")
+message(STATUS "  E7 chssh   EDGEHOST_E7_CHSSH_AVAILABLE=${EDGEHOST_E7_CHSSH_AVAILABLE}")
 message(STATUS "  liburing   ${LIBURING_LIBRARY}")
 
 if(EDGEHOST_REQUIRE_SIBLINGS AND Shaggy_FOUND AND NOT SHAGGY_LIBRARY)
@@ -150,16 +155,29 @@ if(Libnetconf_FOUND)
     target_link_libraries(edgehost_e7 PUBLIC Libnetconf::headers)
   endif()
   if(EDGEHOST_E7_SSH_AVAILABLE)
-    target_compile_definitions(edgehost_e7 PUBLIC
-      EDGEHOST_E7_SSH_AVAILABLE=1
-      HAVE_LIBASSH=1)
+    target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_E7_SSH_AVAILABLE=1)
   else()
     target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_E7_SSH_AVAILABLE=0)
+  endif()
+  if(EDGEHOST_E7_CHSSH_AVAILABLE)
+    target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_E7_CHSSH_AVAILABLE=1)
+    if(TARGET Libchssh::chssh)
+      target_link_libraries(edgehost_e7 PUBLIC Libchssh::chssh)
+    elseif(LIBCHSSH_LIBRARY)
+      target_link_libraries(edgehost_e7 PUBLIC ${LIBCHSSH_LIBRARY})
+    endif()
+  else()
+    target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_E7_CHSSH_AVAILABLE=0)
+  endif()
+  # Legacy libassh symbols only when linking libnetconf SSH without chssh.
+  if(EDGEHOST_E7_SSH_AVAILABLE AND NOT EDGEHOST_E7_CHSSH_AVAILABLE)
+    target_compile_definitions(edgehost_e7 PUBLIC HAVE_LIBASSH=1)
   endif()
 else()
   target_compile_definitions(edgehost_e7 PUBLIC
     EDGEHOST_HAVE_LIBNETCONF=0
-    EDGEHOST_E7_SSH_AVAILABLE=0)
+    EDGEHOST_E7_SSH_AVAILABLE=0
+    EDGEHOST_E7_CHSSH_AVAILABLE=0)
 endif()
 
 

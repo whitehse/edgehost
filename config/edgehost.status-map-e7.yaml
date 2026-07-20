@@ -1,0 +1,116 @@
+# Combined lab profile: WebGPU status map + Calix E7 Call Home admin.
+#
+# Prefer the helper (links libwebmap demo tiles + exports secrets):
+#   ./scripts/run-status-map-e7.sh
+#
+# Manual:
+#   export EDGEHOST_LAB_PASSWORD=lab
+#   export EDGEHOST_SESSION_HMAC='dev-hmac-key-32-bytes-minimum!!'
+#   ./build/edgehost --config config/edgehost.status-map-e7.yaml
+#
+# Browser (after login password "lab"):
+#   http://127.0.0.1:18080/      → company home
+#   http://127.0.0.1:18080/map/  → status map (WebGPU)
+#   http://127.0.0.1:18080/e7/   → E7 Call Home configure + monitor
+#   http://127.0.0.1:18080/lab/  → API lab console
+#
+# Call Home peer (SSH; all interfaces by default for field E7s):
+#   connect <host>:4334 → identity preamble (MAC) → SSH (sysadmin/sysadmin)
+#   → NETCONF subsystem (NMS is SSH server / NETCONF client; prefers libchssh).
+# Override bind with scripts/run-status-map-e7.sh E7_HOST / E7_PORT.
+
+listen:
+  host: 127.0.0.1
+  port: 18080
+
+spa:
+  root: ./spa
+  # Basemap / fiber tiles and path_index can exceed 1–20 MiB per file.
+  max_file_bytes: 33554432
+
+packages:
+  root: ./packages
+
+http:
+  max_body_bytes: 1048576
+  max_pending_outbound: 256
+  max_upstream_body_bytes: 4194304
+
+# Per-ns capacity (K10). net_pon + inventory for E7; map_dynamic for map feed.
+state:
+  max_keys_default: 1024
+  max_value_bytes: 2048
+  namespaces:
+    net_core:
+      enabled: true
+    map_dynamic:
+      enabled: true
+    net_pon:
+      enabled: true
+      max_keys: 16384
+    net_home:
+      enabled: false
+    electric:
+      enabled: false
+    inventory:
+      enabled: true
+      max_keys: 512
+
+auth:
+  mode: lab_password
+  lab_password_env: EDGEHOST_LAB_PASSWORD
+  session_hmac_key_env: EDGEHOST_SESSION_HMAC
+  session_ttl_s: 28800
+
+dns:
+  allow_blocking: true
+
+plugins:
+  openai_proxy:
+    enabled: false
+    upstream: "https://api.openai.com"
+    api_key_env: OPENAI_API_KEY
+    service_api_key_env: EDGEHOST_OPENAI_SERVICE_KEY
+    timeout_ms: 60000
+    rate_limit_rpm: 60
+    max_concurrent_per_principal: 4
+  slack:
+    enabled: false
+  teams:
+    enabled: false
+  pqproxy:
+    enabled: false
+    metrics_url: "http://127.0.0.1:9108/metrics"
+    scrape_interval_ms: 5000
+  e7_callhome:
+    enabled: true
+    # 0.0.0.0 so remote E7 Call Home can reach the agent (not loopback-only).
+    # run-status-map-e7.sh rewrites these via E7_HOST / E7_PORT into a runtime YAML.
+    listen_host: 0.0.0.0
+    listen_port: 4334
+    # Same TCP socket only (no outbound connect):
+    # cleartext identity → SSH per RFC 8071 (NMS=SSH server, E7=SSH client)
+    # → NETCONF app client on subsystem "netconf".
+    # E7 authenticates to us as ssh_username/ssh_password.
+    transport: ssh
+    ssh_username: sysadmin
+    ssh_password: sysadmin
+    lab_insecure_raw: false
+    reload_policy: merge
+    auto_subscribe_unknown: false
+    dirty_cap: 8192
+    rss_budget_bytes: 268435456
+    max_sessions: 160
+    # REST allowlist file durability (PR-10 interim; not Postgres)
+    allowlist_path: ./var/e7_allowlist.txt
+    shelves:
+      - mac: "00:02:5d:d9:21:47"
+        shelf_id: "lab-e7-1"
+        enabled: true
+      - mac: "00:02:5d:d8:f3:18"
+        shelf_id: "lab-e7-2"
+        enabled: true
+
+postgres:
+  notify_enabled: false
+  listen_channel: map_overlay

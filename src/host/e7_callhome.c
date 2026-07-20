@@ -12,20 +12,64 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
 #if EDGEHOST_HAVE_LIBNETCONF
 #include "netconf.h"
 #endif
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+#include "chssh.h"
+#endif
 
 #define EDGE_E7_RX_CAP           (64 * 1024)
 #define EDGE_E7_TX_CAP           (64 * 1024)
 #define EDGE_E7_IDENTITY_TIMEOUT_MS 10000u
 #define EDGE_E7_HELLO_TIMEOUT_MS    30000u
+/** After identity (auto): wait this long for peer bytes before speaking. */
+#define EDGE_E7_POST_ID_WAIT_MS     400u
+/** Silent listen after identity before we speak (raw probe). */
+#define EDGE_E7_PROBE_SILENT_MS     1500u
+/** Wait after proprietary identity ACK before escalating. */
+#define EDGE_E7_PROBE_ACK_WAIT_MS   800u
+/**
+ * Field SSH path: after identity, stay silent this long and capture any
+ * peer-first bytes before identity ACK ladder / SSH server banner.
+ * Prior field dials: E7 waits if we stay silent; any wrong TX → immediate RST.
+ */
+#define EDGE_E7_SSH_HOLD_MS         3000u
+/** Wait after each identity-layer ACK attempt on the SSH field ladder. */
+#define EDGE_E7_SSH_ACK_WAIT_MS     800u
+
+/* Per-MAC post-identity probe modes (raw). Advanced on pre-OPEN peer_eof. */
+enum {
+    EDGE_E7_PROBE_SILENT = 0,      /* listen only — capture peer-first bytes */
+    EDGE_E7_PROBE_VERSION_ACK = 1, /* proprietary identity ACK (no NETCONF) */
+    EDGE_E7_PROBE_VERSION_ACK2 = 2,/* alternate ACK forms */
+    EDGE_E7_PROBE_NC_CLIENT = 3,   /* NETCONF client hello base:1.0 */
+    EDGE_E7_PROBE_NC_SERVER = 4,   /* NETCONF server hello + session-id */
+    EDGE_E7_PROBE_COUNT = 5
+};
+
+/*
+ * Same-dial post-identity phases for transport:ssh field diagnostics.
+ * 0 = silent hold, 1..N-1 = identity ACK variants, N = SSH server banner.
+ */
+enum {
+    EDGE_E7_SSH_PHASE_HOLD = 0,
+    EDGE_E7_SSH_PHASE_ACK0 = 1,
+    EDGE_E7_SSH_PHASE_ACK1 = 2,
+    EDGE_E7_SSH_PHASE_ACK2 = 3,
+    EDGE_E7_SSH_PHASE_ACK3 = 4,
+    EDGE_E7_SSH_PHASE_ACK4 = 5,
+    EDGE_E7_SSH_PHASE_SSH  = 6
+};
 
 /* Per-session host buffers + reduced libnetconf profile (Appendix A). */
 #define EDGE_E7_NC_MAX_RPC       (256 * 1024)
@@ -36,18 +80,54 @@
 #define EDGE_E7_DIRTY_NS_MAX     32
 
 typedef struct {
+    uint64_t id;
+    uint64_t t_ms;
+    char     stage[EDGE_E7_TRACE_STAGE_MAX];
+    char     mac[EDGE_E7_MAC_MAX];
+    char     peer[EDGE_E7_PEER_ADDR_MAX];
+    char     detail[EDGE_E7_TRACE_DETAIL_MAX];
+} edge_e7_trace_ev_t;
+
+typedef struct {
     edge_e7_sess_state_t state;
-    int                  fd;
+    int                  fd;           /* Call Home TCP (identity + SSH/NETCONF) */
     int                  slot;
     edge_e7_identity_t   identity;
     char                 peer[EDGE_E7_PEER_ADDR_MAX];
     int                  allowlisted; /* MAC in shelves[] and enabled */
     int                  auto_unknown; /* accepted via auto_subscribe_unknown */
+    int                  last_nc_state; /* last traced netconf_state_t or -1 */
     int                  sub_sent;     /* create_subscription issued */
     int                  sub_ok;       /* subscription rpc-ok */
     int                  sub_msg_id;
     int                  hello_sent;   /* netconf_send_hello issued */
-    int                  use_ssh;      /* transport=ssh for this session */
+    int                  use_ssh;      /* transport is SSH Call Home (same fd) */
+    int                  use_chssh;     /* 1 = libchssh path (preferred) */
+    int                  chssh_ready;   /* subsystem netconf open */
+    int                  nc_as_server; /* raw-probe only: NETCONF server hello */
+    int                  ssh_banner_flushed;
+    int                  saw_ssh_rx;
+    uint8_t              probe_mode;   /* EDGE_E7_PROBE_* (raw transport only) */
+    uint8_t              probe_spoke;
+    uint8_t              probe_ack_sent;
+    uint8_t              ssh_phase;    /* EDGE_E7_SSH_PHASE_* (transport:ssh) */
+    uint8_t              ssh_resume;   /* phase after hold (from runtime) */
+    uint8_t              first_tx_logged;
+
+    /* Per-dial capture summary (host stream log) */
+    uint64_t             cap_t0_ms;       /* first app byte (usually identity RX) */
+    uint64_t             cap_ident_ms;    /* identity complete time */
+    uint64_t             cap_first_tx_ms; /* first NMS app TX after identity */
+    uint32_t             cap_rx_bytes;
+    uint32_t             cap_tx_bytes;
+    uint16_t             cap_rx_chunks;
+    uint16_t             cap_tx_chunks;
+    uint8_t              cap_saw_ident;
+    uint8_t              cap_saw_ssh_tx;
+    uint8_t              cap_saw_ack_tx;
+    uint8_t              cap_saw_ssh_rx;
+    uint8_t              cap_summary_done;
+    char                 cap_first_tx_tag[40];
 
     char                 id_buf[EDGE_E7_IDENTITY_BUF_MAX];
     size_t               id_len;
@@ -63,6 +143,9 @@ typedef struct {
 
 #if EDGEHOST_HAVE_LIBNETCONF
     netconf_ctx_t       *nc;
+#endif
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+    chssh_ctx_t         *chssh;
 #endif
 } edge_e7_session_t;
 
@@ -109,6 +192,26 @@ struct edge_e7_callhome {
     /* Command correlation (message_id → cmd_id) */
     edge_e7_cmd_slot_t cmds[EDGE_E7_CMD_TABLE_MAX];
     uint32_t           cmd_seq;
+
+    /* Connection progress ring for SPA /api/v1/e7/events */
+    edge_e7_trace_ev_t trace[EDGE_E7_TRACE_CAP];
+    uint32_t           trace_head; /* next write slot */
+    uint32_t           trace_count;
+    uint64_t           trace_seq; /* monotonic event id */
+
+    /*
+     * Host-visible Call Home stream capture (what e7_callhome read/write sees
+     * after io_uring accept). Not AF_PACKET; records app-stream as PCAP RAW IP.
+     */
+    FILE    *pcap_fp;
+    FILE    *pcap_text_fp;
+    char     pcap_path[512];
+    char     pcap_text_path[512];
+    uint32_t pcap_seq_c2s; /* synthetic TCP seq NMS→E7 */
+    uint32_t pcap_seq_s2c; /* E7→NMS */
+    uint64_t pcap_pkts;
+    uint64_t pcap_bytes;
+    uint64_t pcap_dials; /* completed dial summaries written */
 };
 
 /* ---- utilities ---- */
@@ -309,6 +412,13 @@ static void seed_runtime_from_yaml(edge_e7_callhome_t *ch)
         }
         rs->enabled = ch->cfg->e7_shelves[i].enabled ? 1 : 0;
         rs->from_yaml = 1;
+        if (created) {
+            /*
+             * YAML seed: NETCONF client hello (unit tests + design K13).
+             * Field shelves that fail will probe_advance to silent → version_ack.
+             */
+            rs->probe_mode = EDGE_E7_PROBE_NC_CLIENT;
+        }
         put_config_json(ch, rs);
     }
 }
@@ -393,6 +503,8 @@ static void load_runtime_from_file(edge_e7_callhome_t *ch)
             }
             memcpy(rs->mac, norm, sizeof(rs->mac));
             rs->from_yaml = 0;
+            /* Field allowlist: start with silent listen probe. */
+            rs->probe_mode = EDGE_E7_PROBE_SILENT;
         }
         rs->enabled = enabled ? 1 : 0;
         if (label[0]) {
@@ -474,6 +586,37 @@ static int e7_transport_is_ssh(const char *t)
     return a == 's' && b == 's' && c == 'h';
 }
 
+static int e7_transport_is_auto(const char *t)
+{
+    char a, b, c, d;
+    if (!t || !t[0] || !t[1] || !t[2] || !t[3] || t[4] != '\0') {
+        return 0;
+    }
+    a = t[0];
+    b = t[1];
+    c = t[2];
+    d = t[3];
+    if (a >= 'A' && a <= 'Z') {
+        a = (char)(a - 'A' + 'a');
+    }
+    if (b >= 'A' && b <= 'Z') {
+        b = (char)(b - 'A' + 'a');
+    }
+    if (c >= 'A' && c <= 'Z') {
+        c = (char)(c - 'A' + 'a');
+    }
+    if (d >= 'A' && d <= 'Z') {
+        d = (char)(d - 'A' + 'a');
+    }
+    return a == 'a' && b == 'u' && c == 't' && d == 'o';
+}
+
+/** True when config may use SSH (ssh or auto). */
+static int e7_transport_may_ssh(const char *t)
+{
+    return e7_transport_is_ssh(t) || e7_transport_is_auto(t);
+}
+
 static edge_e7_session_t *session_find_by_mac(edge_e7_callhome_t *ch,
                                               const char *mac_norm)
 {
@@ -499,6 +642,7 @@ const char *edge_e7_sess_state_name(edge_e7_sess_state_t st)
     case EDGE_E7_SESS_EMPTY:     return "empty";
     case EDGE_E7_SESS_ACCEPTED:  return "accepted";
     case EDGE_E7_SESS_IDENTITY:  return "identity";
+    case EDGE_E7_SESS_POST_ID:   return "post_identity";
     case EDGE_E7_SESS_SSH:       return "ssh";
     case EDGE_E7_SESS_HELLO:     return "hello";
     case EDGE_E7_SESS_OPEN:      return "open";
@@ -506,6 +650,146 @@ const char *edge_e7_sess_state_name(edge_e7_sess_state_t st)
     case EDGE_E7_SESS_CLOSING:   return "closing";
     default:                     return "unknown";
     }
+}
+
+#if EDGEHOST_HAVE_LIBNETCONF
+static const char *e7_nc_state_name(netconf_state_t st)
+{
+    switch (st) {
+    case NETCONF_STATE_IDLE:                 return "idle";
+    case NETCONF_STATE_SSH_CONNECTING:       return "ssh_connecting";
+    case NETCONF_STATE_SSH_AUTHENTICATING:   return "ssh_authenticating";
+    case NETCONF_STATE_CAPABILITY_EXCHANGE:  return "capability_exchange";
+    case NETCONF_STATE_SESSION_OPEN:         return "session_open";
+    case NETCONF_STATE_CLOSING:              return "closing";
+    case NETCONF_STATE_CLOSED:               return "closed";
+    case NETCONF_STATE_ERROR:                return "error";
+    default:                                 return "unknown";
+    }
+}
+#endif
+
+/** Append one connection-progress event (ring; oldest dropped). */
+static void e7_trace(edge_e7_callhome_t *ch, const char *stage, const char *mac,
+                     const char *peer, const char *detail_fmt, ...)
+{
+    edge_e7_trace_ev_t *ev;
+    va_list ap;
+    int n;
+
+    if (!ch || !stage || !stage[0]) {
+        return;
+    }
+    ev = &ch->trace[ch->trace_head];
+    memset(ev, 0, sizeof(*ev));
+    ch->trace_seq++;
+    ev->id = ch->trace_seq;
+    ev->t_ms = mono_now_ms();
+    snprintf(ev->stage, sizeof(ev->stage), "%s", stage);
+    if (mac && mac[0]) {
+        snprintf(ev->mac, sizeof(ev->mac), "%s", mac);
+    }
+    if (peer && peer[0]) {
+        snprintf(ev->peer, sizeof(ev->peer), "%s", peer);
+    }
+    if (detail_fmt && detail_fmt[0]) {
+        va_start(ap, detail_fmt);
+        n = vsnprintf(ev->detail, sizeof(ev->detail), detail_fmt, ap);
+        va_end(ap);
+        if (n < 0) {
+            ev->detail[0] = '\0';
+        }
+    }
+    ch->trace_head = (ch->trace_head + 1u) % EDGE_E7_TRACE_CAP;
+    if (ch->trace_count < EDGE_E7_TRACE_CAP) {
+        ch->trace_count++;
+    }
+}
+
+/**
+ * Log raw bytes as ascii peek + chunked hex (fits EDGE_E7_TRACE_DETAIL_MAX).
+ * Used for field identity / first TX / post-identity RX diagnostics.
+ */
+static void e7_trace_bytes(edge_e7_callhome_t *ch, const char *stage,
+                           const char *mac, const char *peer,
+                           const char *label, const void *data, size_t len)
+{
+    const unsigned char *p = (const unsigned char *)data;
+    char ascii[56];
+    size_t i, alen, off;
+    const size_t chunk = 28; /* 56 hex chars + prefixes fit in detail */
+
+    if (!ch || !stage) {
+        return;
+    }
+    if (!p || len == 0) {
+        e7_trace(ch, stage, mac ? mac : "", peer ? peer : "",
+                 "%s 0B (empty)", label ? label : "bytes");
+        return;
+    }
+    alen = len < sizeof(ascii) - 1 ? len : sizeof(ascii) - 1;
+    for (i = 0; i < alen; i++) {
+        unsigned char c = p[i];
+        ascii[i] = (c >= 32 && c < 127) ? (char)c : '.';
+    }
+    ascii[alen] = '\0';
+    e7_trace(ch, stage, mac ? mac : "", peer ? peer : "",
+             "%s %zuB ascii=\"%s\"%s", label ? label : "bytes", len, ascii,
+             len > alen ? "…" : "");
+
+    for (off = 0; off < len; off += chunk) {
+        char hex[(28 * 2) + 1];
+        size_t n = len - off;
+        size_t j;
+        if (n > chunk) {
+            n = chunk;
+        }
+        for (j = 0; j < n; j++) {
+            static const char xd[] = "0123456789abcdef";
+            hex[j * 2] = xd[p[off + j] >> 4];
+            hex[j * 2 + 1] = xd[p[off + j] & 0x0f];
+        }
+        hex[n * 2] = '\0';
+        e7_trace(ch, stage, mac ? mac : "", peer ? peer : "",
+                 "%s hex[%zu..%zu]=%s", label ? label : "bytes", off,
+                 off + n - 1, hex);
+    }
+}
+
+/** JSON-escape into @p out including surrounding quotes. @return length or -1. */
+static int json_escape_str(const char *in, char *out, size_t out_sz)
+{
+    size_t o = 0;
+    if (!out || out_sz < 3) {
+        return -1;
+    }
+    out[o++] = '"';
+    if (in) {
+        for (; *in; in++) {
+            unsigned char c = (unsigned char)*in;
+            if (c == '"' || c == '\\') {
+                if (o + 3 >= out_sz) {
+                    return -1;
+                }
+                out[o++] = '\\';
+                out[o++] = (char)c;
+            } else if (c < 0x20u || c == 0x7fu) {
+                /* drop control chars */
+                continue;
+            } else {
+                if (o + 2 >= out_sz) {
+                    return -1;
+                }
+                out[o++] = (char)c;
+            }
+        }
+    }
+    if (o + 2 > out_sz) {
+        return -1;
+    }
+    out[o++] = '"';
+    out[o] = '\0';
+    return (int)o;
 }
 
 /* ---- K16 dirty-set ---- */
@@ -814,6 +1098,9 @@ static int lab_v1_map_key(const char *mac_colon, const char *xml, size_t len,
     return (n > 0 && (size_t)n < key_sz) ? 0 : -1;
 }
 
+static void e7_pcap_dial_summary(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                                 const char *why);
+
 static void session_clear_nc(edge_e7_session_t *s)
 {
 #if EDGEHOST_HAVE_LIBNETCONF
@@ -821,7 +1108,16 @@ static void session_clear_nc(edge_e7_session_t *s)
         netconf_destroy(s->nc);
         s->nc = NULL;
     }
-#else
+#endif
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+    if (s->chssh) {
+        chssh_destroy(s->chssh);
+        s->chssh = NULL;
+    }
+    s->use_chssh = 0;
+    s->chssh_ready = 0;
+#endif
+#if !EDGEHOST_HAVE_LIBNETCONF && !EDGEHOST_E7_CHSSH_AVAILABLE
     (void)s;
 #endif
 }
@@ -829,11 +1125,25 @@ static void session_clear_nc(edge_e7_session_t *s)
 static void session_close(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     int was_open;
+    const char *mac;
+    const char *peer;
+    const char *stname;
 
     if (!s || s->state == EDGE_E7_SESS_EMPTY) {
         return;
     }
     was_open = (s->state == EDGE_E7_SESS_OPEN);
+    mac = (s->identity.identity_ok && s->identity.mac[0]) ? s->identity.mac
+                                                          : "";
+    peer = s->peer[0] ? s->peer : "";
+    stname = edge_e7_sess_state_name(s->state);
+    /* Capture dial summary before tearing down counters / fd. */
+    if (s->identity_ms && s->cap_ident_ms == 0) {
+        s->cap_ident_ms = s->identity_ms;
+        s->cap_saw_ident = 1;
+    }
+    e7_pcap_dial_summary(ch, s, stname);
+    e7_trace(ch, "closed", mac, peer, "from_state=%s", stname);
     /* Disconnect of an open session → inventory status + immediate notify. */
     if (was_open && s->identity.identity_ok) {
         put_session_json(ch, s, "disconnected");
@@ -860,8 +1170,197 @@ static void session_close(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     s->sub_msg_id = 0;
     s->hello_sent = 0;
     s->use_ssh = 0;
+    s->use_chssh = 0;
+    s->chssh_ready = 0;
+    s->nc_as_server = 0;
+    s->ssh_banner_flushed = 0;
+    s->saw_ssh_rx = 0;
+    s->probe_mode = 0;
+    s->probe_spoke = 0;
+    s->probe_ack_sent = 0;
+    s->ssh_phase = 0;
+    s->ssh_resume = 0;
+    s->first_tx_logged = 0;
+    s->last_nc_state = -1;
+    s->cap_t0_ms = 0;
+    s->cap_ident_ms = 0;
+    s->cap_first_tx_ms = 0;
+    s->cap_rx_bytes = 0;
+    s->cap_tx_bytes = 0;
+    s->cap_rx_chunks = 0;
+    s->cap_tx_chunks = 0;
+    s->cap_saw_ident = 0;
+    s->cap_saw_ssh_tx = 0;
+    s->cap_saw_ack_tx = 0;
+    s->cap_saw_ssh_rx = 0;
+    s->cap_summary_done = 0;
+    s->cap_first_tx_tag[0] = '\0';
     memset(&s->identity, 0, sizeof(s->identity));
     s->peer[0] = '\0';
+}
+
+static const char *e7_probe_mode_name(uint8_t mode)
+{
+    switch (mode) {
+    case EDGE_E7_PROBE_SILENT:       return "silent_listen";
+    case EDGE_E7_PROBE_VERSION_ACK:  return "version_ack";
+    case EDGE_E7_PROBE_VERSION_ACK2: return "version_ack_alt";
+    case EDGE_E7_PROBE_NC_CLIENT:    return "netconf_client_hello";
+    case EDGE_E7_PROBE_NC_SERVER:    return "netconf_server_hello";
+    default:                         return "unknown";
+    }
+}
+
+static int session_append_tx(edge_e7_session_t *s, const uint8_t *data,
+                             size_t n);
+static int session_flush_tx(edge_e7_callhome_t *ch, edge_e7_session_t *s);
+
+static void probe_advance_on_fail(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    edge_e7_runtime_shelf_t *rs;
+    uint8_t next;
+
+    if (!ch || !s || !s->identity.identity_ok) {
+        return;
+    }
+    rs = runtime_find(ch, s->identity.mac);
+    if (!rs) {
+        return;
+    }
+    next = (uint8_t)((rs->probe_mode + 1u) % (uint8_t)EDGE_E7_PROBE_COUNT);
+    e7_trace(ch, "probe_advance", s->identity.mac, s->peer,
+             "mode %u (%s) failed before OPEN → next dial mode %u (%s)",
+             (unsigned)rs->probe_mode, e7_probe_mode_name(rs->probe_mode),
+             (unsigned)next, e7_probe_mode_name(next));
+    rs->probe_mode = next;
+}
+
+static int session_send_raw(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                            const void *data, size_t len, const char *what)
+{
+    if (!s || s->fd < 0 || !data || len == 0) {
+        return -1;
+    }
+    if (session_append_tx(s, (const uint8_t *)data, len) != 0) {
+        return -1;
+    }
+    s->probe_spoke = 1;
+    if (!s->first_tx_logged) {
+        s->first_tx_logged = 1;
+        e7_trace_bytes(ch, "first_tx", s->identity.mac, s->peer,
+                       what ? what : "raw", data, len);
+    } else {
+        e7_trace_bytes(ch, "probe_tx", s->identity.mac, s->peer,
+                       what ? what : "raw", data, len);
+    }
+    if (session_flush_tx(ch, s) != 0) {
+        e7_trace(ch, "write_err", s->identity.mac, s->peer,
+                 "flush %s errno=%d", what ? what : "bytes", errno);
+        return -1;
+    }
+    e7_trace(ch, "probe_tx", s->identity.mac, s->peer, "sent %s (%zu bytes)",
+             what ? what : "data", len);
+    return 0;
+}
+
+#if EDGEHOST_HAVE_LIBNETCONF
+static int session_begin_after_identity(edge_e7_callhome_t *ch,
+                                        edge_e7_session_t *s, int use_ssh);
+#endif
+
+/** Send proprietary Calix-style identity ACK (not NETCONF hello). */
+static int session_send_version_ack(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                                    int alt)
+{
+    /* Observed E7 waits for NMS after identity; NETCONF hello is rejected.
+     * Try identity-layer ACKs that mirror the preamble's <version> framing. */
+    static const char ack0[] = "<version>1</version>\n";
+    static const char ack1[] = "<version>1</version>";
+    static const char ack2[] = "<version>1</version>\r\n";
+    static const char ack3[] = "<?xml version=\"1.0\"?>\n<version>1</version>\n";
+    const char *ack;
+    size_t len;
+    const char *tag;
+
+    if (alt) {
+        /* Rotate alts using probe_ack_sent as a small counter */
+        switch (s->probe_ack_sent % 3) {
+        case 0:
+            ack = ack1;
+            len = sizeof(ack1) - 1;
+            tag = "version ACK (no NL)";
+            break;
+        case 1:
+            ack = ack2;
+            len = sizeof(ack2) - 1;
+            tag = "version ACK (CRLF)";
+            break;
+        default:
+            ack = ack3;
+            len = sizeof(ack3) - 1;
+            tag = "version ACK (xml decl)";
+            break;
+        }
+    } else {
+        ack = ack0;
+        len = sizeof(ack0) - 1;
+        tag = "version ACK (LF)";
+    }
+    s->probe_ack_sent = (uint8_t)(s->probe_ack_sent + 1);
+    return session_send_raw(ch, s, ack, len, tag);
+}
+
+/**
+ * Field SSH ladder: identity-layer unlock candidates before SSH banner.
+ * Each form is tried once per phase on the same dial (after silent hold).
+ * @return 0 ok, -1 write failed.
+ */
+static int __attribute__((unused)) session_send_ssh_field_ack(edge_e7_callhome_t *ch,
+                                      edge_e7_session_t *s, unsigned phase)
+{
+    /* phase EDGE_E7_SSH_PHASE_ACK0..ACK4 */
+    static const char ack_lf[] = "<version>1</version>\n";
+    static const char ack_crlf[] = "<version>1</version>\r\n";
+    static const char ack_ok[] = "OK\n";
+    static const char ack_nl[] = "\n";
+    static const char ack_id[] =
+        "<identity-response><status>ok</status></identity-response>\n";
+    const char *ack = NULL;
+    size_t len = 0;
+    const char *tag = "identity ACK";
+
+    switch (phase) {
+    case EDGE_E7_SSH_PHASE_ACK0:
+        ack = ack_lf;
+        len = sizeof(ack_lf) - 1;
+        tag = "identity ACK version+LF";
+        break;
+    case EDGE_E7_SSH_PHASE_ACK1:
+        ack = ack_crlf;
+        len = sizeof(ack_crlf) - 1;
+        tag = "identity ACK version+CRLF";
+        break;
+    case EDGE_E7_SSH_PHASE_ACK2:
+        ack = ack_ok;
+        len = sizeof(ack_ok) - 1;
+        tag = "identity ACK OK\\n";
+        break;
+    case EDGE_E7_SSH_PHASE_ACK3:
+        ack = ack_nl;
+        len = sizeof(ack_nl) - 1;
+        tag = "identity ACK bare LF";
+        break;
+    case EDGE_E7_SSH_PHASE_ACK4:
+        ack = ack_id;
+        len = sizeof(ack_id) - 1;
+        tag = "identity ACK identity-response";
+        break;
+    default:
+        return -1;
+    }
+    e7_trace(ch, "ssh_field_ack", s->identity.mac, s->peer,
+             "phase=%u %s (%zu bytes)", phase, tag, len);
+    return session_send_raw(ch, s, ack, len, tag);
 }
 
 static edge_e7_session_t *session_alloc(edge_e7_callhome_t *ch)
@@ -941,6 +1440,18 @@ static int session_drain_output(edge_e7_session_t *s)
         if (n == 0) {
             break;
         }
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+        /*
+         * Over libchssh the NETCONF app stream rides the SSH channel —
+         * never write cleartext hello/RPC onto the Call Home TCP socket.
+         */
+        if (s->use_chssh && s->chssh && s->chssh_ready) {
+            if (chssh_channel_send(s->chssh, tmp, n) != 0) {
+                return -1;
+            }
+            continue;
+        }
+#endif
         if (session_append_tx(s, tmp, n) != 0) {
             return -1;
         }
@@ -961,10 +1472,15 @@ static void session_try_subscribe(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     }
     mid = netconf_create_subscription(s->nc, "NETCONF", NULL);
     if (mid < 0) {
+        e7_trace(ch, "subscribe_fail",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "create_subscription returned error");
         return;
     }
     s->sub_sent = 1;
     s->sub_msg_id = mid;
+    e7_trace(ch, "subscribe", s->identity.identity_ok ? s->identity.mac : "",
+             s->peer, "create-subscription sent msg_id=%d", mid);
     (void)session_drain_output(s);
     (void)ch;
 }
@@ -1092,6 +1608,10 @@ static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         reply->message_id == (uint32_t)s->sub_msg_id) {
         s->sub_ok = 1;
         ch->stats.subscriptions_ok++;
+        e7_trace(ch, "subscribed",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "create-subscription ok msg_id=%u",
+                 (unsigned)reply->message_id);
     }
     for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
         edge_e7_cmd_slot_t *cmd = &ch->cmds[i];
@@ -1115,15 +1635,36 @@ static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         } else if (ev.type == NETCONF_EVENT_RPC_OK ||
                    ev.type == NETCONF_EVENT_RPC_REPLY) {
             on_rpc_reply(ch, s, &ev.data.rpc_reply);
+        } else if (ev.type == NETCONF_EVENT_SSH_AUTHENTICATED) {
+            e7_trace(ch, "ssh_auth_ok",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "SSH userauth succeeded");
+        } else if (ev.type == NETCONF_EVENT_SSH_CONNECTED) {
+            e7_trace(ch, "ssh_channel",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "netconf subsystem channel ready");
+        } else if (ev.type == NETCONF_EVENT_SSH_DISCONNECTED) {
+            e7_trace(ch, "ssh_disconnect",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "SSH disconnected");
+        } else if (ev.type == NETCONF_EVENT_SSH_ERROR) {
+            e7_trace(ch, "ssh_error",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "libnetconf SSH error (algo/auth/hostkey?)");
+        } else if (ev.type == NETCONF_EVENT_ERROR) {
+            e7_trace(ch, "nc_error",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "%s",
+                     ev.data.error.message[0] ? ev.data.error.message
+                                              : "NETCONF_EVENT_ERROR");
         }
-        /* QUEUE_OVERFLOW / ERROR: count optionally later */
+        /* QUEUE_OVERFLOW: count later */
     }
 }
 
-#if EDGEHOST_E7_SSH_AVAILABLE
+#if EDGEHOST_E7_SSH_AVAILABLE && !EDGEHOST_E7_CHSSH_AVAILABLE
 /**
- * Apply SSH Call Home fields from edge config onto a reduced profile.
- * NMS after accept: NETCONF_ROLE_CLIENT + NETCONF_SSH_CALLHOME.
+ * Legacy: libassh-in-libnetconf SSH roles (used only when libchssh absent).
  */
 static void edge_e7_netconf_apply_ssh(netconf_config_t *ncfg,
                                       const edge_config_t *cfg)
@@ -1132,24 +1673,69 @@ static void edge_e7_netconf_apply_ssh(netconf_config_t *ncfg,
         return;
     }
     ncfg->ssh_mode = NETCONF_SSH_CALLHOME;
-    if (cfg->e7_ssh_password[0]) {
-        ncfg->ssh_server_password = cfg->e7_ssh_password;
-    } else {
-        ncfg->ssh_server_password = NULL;
-    }
-    if (cfg->e7_ssh_username[0]) {
-        ncfg->ssh_server_username = cfg->e7_ssh_username;
-    } else {
-        ncfg->ssh_server_username = NULL;
-    }
+    ncfg->ssh_server_password =
+        cfg->e7_ssh_password[0] ? cfg->e7_ssh_password : "sysadmin";
+    ncfg->ssh_server_username =
+        cfg->e7_ssh_username[0] ? cfg->e7_ssh_username : "sysadmin";
+    ncfg->ssh_allow_none_auth = cfg->e7_ssh_allow_none_auth ? 1 : 0;
     if (cfg->e7_host_key_path[0]) {
         ncfg->host_key_path = cfg->e7_host_key_path;
     } else {
-        ncfg->host_key_path = NULL; /* ephemeral ed25519 */
+        ncfg->host_key_path = NULL;
     }
-    ncfg->ssh_allow_none_auth = cfg->e7_ssh_allow_none_auth ? 1 : 0;
+    ncfg->client_username = NULL;
+    ncfg->client_password = NULL;
+    ncfg->ssh_accept_any_hostkey = 0;
 }
-#endif /* EDGEHOST_E7_SSH_AVAILABLE */
+#endif
+
+static void session_trace_nc_state(edge_e7_callhome_t *ch, edge_e7_session_t *s);
+static int session_flush_tx(edge_e7_callhome_t *ch, edge_e7_session_t *s);
+static int session_drain_output(edge_e7_session_t *s);
+static void session_after_nc_io(edge_e7_callhome_t *ch, edge_e7_session_t *s);
+static void e7_pcap_write(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                          int to_peer, const uint8_t *data, size_t len);
+static void e7_pcap_dial_summary(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                                 const char *why);
+#if EDGEHOST_HAVE_LIBNETCONF
+static int session_begin_after_identity(edge_e7_callhome_t *ch,
+                                        edge_e7_session_t *s, int use_ssh);
+#endif
+
+/**
+ * Apply a conservative capability set for field gear (Calix E7).
+ * Advertising base:1.1 without RFC 6242 chunked framing causes some peers to
+ * abort as soon as they parse our hello — use base:1.0 only for lab raw.
+ */
+static void session_apply_e7_caps(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    netconf_capability_t caps[2];
+    static const char *uris[] = {
+        "urn:ietf:params:netconf:base:1.0",
+    };
+    size_t i, n = sizeof(uris) / sizeof(uris[0]);
+
+    (void)ch;
+    if (!s || !s->nc) {
+        return;
+    }
+    memset(caps, 0, sizeof(caps));
+    for (i = 0; i < n; i++) {
+        size_t len = strlen(uris[i]);
+        if (len >= sizeof(caps[i].uri)) {
+            continue;
+        }
+        memcpy(caps[i].uri, uris[i], len);
+        caps[i].uri_len = len;
+    }
+    if (netconf_set_capabilities(s->nc, caps, n) != 0) {
+        e7_trace(ch, "caps_fail", s->identity.identity_ok ? s->identity.mac : "",
+                 s->peer, "netconf_set_capabilities failed; using library defaults");
+    } else {
+        e7_trace(ch, "caps", s->identity.identity_ok ? s->identity.mac : "",
+                 s->peer, "hello caps: base:1.0 only");
+    }
+}
 
 /**
  * After SSH subsystem is ready (CAPABILITY_EXCHANGE), send client hello.
@@ -1167,16 +1753,26 @@ static int session_try_send_hello(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         st == NETCONF_STATE_CLOSING) {
         return -1;
     }
-    /* Raw: ready immediately after create. SSH: wait for subsystem. */
-    if (s->use_ssh && st != NETCONF_STATE_CAPABILITY_EXCHANGE &&
+    /* libchssh: wait until subsystem ready (nc created only then). */
+    if (s->use_chssh && !s->chssh_ready) {
+        return 0;
+    }
+    /* Legacy libassh-in-libnetconf: wait for subsystem. */
+    if (s->use_ssh && !s->use_chssh && st != NETCONF_STATE_CAPABILITY_EXCHANGE &&
         st != NETCONF_STATE_SESSION_OPEN) {
         return 0; /* still SSH_CONNECTING / SSH_AUTHENTICATING */
     }
+    session_apply_e7_caps(ch, s);
     if (netconf_send_hello(s->nc, NULL, 0) != 0) {
         return -1;
     }
     s->hello_sent = 1;
     s->state = EDGE_E7_SESS_HELLO;
+    e7_trace(ch, "hello", s->identity.identity_ok ? s->identity.mac : "",
+             s->peer,
+             s->nc_as_server
+                 ? "NETCONF server hello sent (session-id, base:1.0, ]]>]]>)"
+                 : "NETCONF client hello sent (base:1.0, ]]>]]>)");
     drain_nc_events(ch, s);
     if (session_drain_output(s) != 0) {
         return -1;
@@ -1184,51 +1780,339 @@ static int session_try_send_hello(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     return 0;
 }
 
-static int session_start_netconf(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+/** Drain libchssh wire output into session TX buffer. */
+static int session_drain_chssh(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    uint8_t tmp[8192];
+    size_t n;
+    if (!s || !s->chssh) {
+        return 0;
+    }
+    for (;;) {
+        n = chssh_get_output(s->chssh, tmp, sizeof(tmp));
+        if (n == 0) {
+            break;
+        }
+        if (!s->first_tx_logged) {
+            s->first_tx_logged = 1;
+            e7_trace_bytes(ch, "first_tx",
+                           s->identity.identity_ok ? s->identity.mac : "",
+                           s->peer, "SSH (libchssh)", tmp, n);
+        }
+        if (session_append_tx(s, tmp, n) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/** Start raw NETCONF CLIENT over ready chssh channel. */
+static int session_start_nc_over_chssh(edge_e7_callhome_t *ch,
+                                       edge_e7_session_t *s)
 {
     netconf_config_t ncfg;
-    int use_ssh = 0;
-
-    if (!ch || !ch->cfg || !s) {
-        return -1;
+    if (!s || s->nc) {
+        return 0;
     }
     edge_e7_netconf_profile(&ncfg);
-    use_ssh = e7_transport_is_ssh(ch->cfg->e7_transport);
-    s->use_ssh = use_ssh ? 1 : 0;
-    s->hello_sent = 0;
-
-    if (use_ssh) {
-#if !EDGEHOST_E7_SSH_AVAILABLE
-        return -1;
-#else
-        edge_e7_netconf_apply_ssh(&ncfg, ch->cfg);
-#endif
-    }
-
+    ncfg.ssh_mode = NETCONF_SSH_OFF;
     s->nc = netconf_create_with_config(NETCONF_ROLE_CLIENT, &ncfg);
     if (!s->nc) {
+        e7_trace(ch, "netconf_create_fail", s->identity.mac, s->peer,
+                 "netconf over chssh create failed");
         return -1;
     }
+    e7_trace(ch, "nc_role", s->identity.mac, s->peer,
+             "NETCONF_ROLE=CLIENT ssh_mode=OFF (over libchssh netconf channel)");
+    if (session_try_send_hello(ch, s) != 0) {
+        return -1;
+    }
+    return 0;
+}
 
-    /* SSH init may already have produced banner/KEX WRITE — drain it. */
-    drain_nc_events(ch, s);
-    if (session_drain_output(s) != 0) {
+/**
+ * Pull chssh events; on READY start NETCONF; on CHANNEL_DATA feed netconf.
+ * Queue netconf output back into chssh channel.
+ */
+static int session_chssh_process(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    chssh_event_t ev;
+    if (!s || !s->chssh) {
+        return 0;
+    }
+    while (chssh_next_event(s->chssh, &ev)) {
+        switch (ev.type) {
+        case CHSSH_EVENT_IDENT_SENT:
+            s->ssh_banner_flushed = 1;
+            e7_trace(ch, "ssh_banner_sent", s->identity.mac, s->peer,
+                     "libchssh server identification flushed");
+            break;
+        case CHSSH_EVENT_IDENT_RECEIVED:
+            s->saw_ssh_rx = 1;
+            e7_trace(ch, "ssh_rx", s->identity.mac, s->peer,
+                     "peer SSH ident \"%s\"", ev.u.ident.banner);
+            break;
+        case CHSSH_EVENT_AUTHENTICATED:
+            e7_trace(ch, "ssh_auth", s->identity.mac, s->peer,
+                     "SSH user authenticated (libchssh)");
+            break;
+        case CHSSH_EVENT_READY:
+            s->chssh_ready = 1;
+            e7_trace(ch, "ssh_ready", s->identity.mac, s->peer,
+                     "libchssh subsystem=netconf READY — starting NETCONF client");
+            if (session_start_nc_over_chssh(ch, s) != 0) {
+                return -1;
+            }
+            break;
+        case CHSSH_EVENT_CHANNEL_DATA:
+            if (s->nc && ev.u.data.len > 0) {
+                (void)netconf_feed_input(s->nc, ev.u.data.data, ev.u.data.len);
+                drain_nc_events(ch, s);
+                session_after_nc_io(ch, s);
+                if (s->state == EDGE_E7_SESS_EMPTY) {
+                    return -1;
+                }
+            }
+            break;
+        case CHSSH_EVENT_ERROR:
+            e7_trace(ch, "ssh_error", s->identity.mac, s->peer, "%s",
+                     ev.u.error.message);
+            return -1;
+        case CHSSH_EVENT_DISCONNECTED:
+            e7_trace(ch, "ssh_disconnected", s->identity.mac, s->peer,
+                     "libchssh disconnect");
+            return -1;
+        default:
+            break;
+        }
+    }
+    /* NETCONF app bytes → SSH channel */
+    if (s->nc && s->chssh_ready) {
+        uint8_t tmp[8192];
+        size_t n;
+        for (;;) {
+            n = netconf_get_output(s->nc, tmp, sizeof(tmp));
+            if (n == 0) {
+                break;
+            }
+            if (chssh_channel_send(s->chssh, tmp, n) != 0) {
+                e7_trace(ch, "ssh_error", s->identity.mac, s->peer,
+                         "chssh_channel_send failed");
+                return -1;
+            }
+        }
+    }
+    if (session_drain_chssh(ch, s) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * Calix CMS-compatible SSH (from /tmp/callback.pcap):
+ *   after identity NMS already sent "<ack>ok</ack>"; E7 is SSH *server*;
+ *   NMS is SSH *client* → subsystem netconf → NETCONF client.
+ */
+static int session_start_chssh(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    chssh_config_t ccfg;
+    const char *user = "sysadmin";
+    const char *pass = "sysadmin";
+
+    memset(&ccfg, 0, sizeof(ccfg));
+    ccfg.lab_mode = 0;
+    ccfg.hold_ident = 0;
+    ccfg.accept_any_hostkey = 1;
+    if (ch->cfg->e7_ssh_username[0]) {
+        user = ch->cfg->e7_ssh_username;
+    }
+    if (ch->cfg->e7_ssh_password[0]) {
+        pass = ch->cfg->e7_ssh_password;
+    }
+    ccfg.client_username = user;
+    ccfg.client_password = pass;
+
+    s->chssh = chssh_create(CHSSH_ROLE_CLIENT, &ccfg);
+    if (!s->chssh) {
+        e7_trace(ch, "chssh_create_fail", s->identity.mac, s->peer,
+                 "chssh_create(CLIENT) returned NULL");
+        return -1;
+    }
+    s->use_ssh = 1;
+    s->use_chssh = 1;
+    s->chssh_ready = 0;
+    s->hello_sent = 0;
+    s->last_nc_state = -1;
+    s->nc_as_server = 0;
+    s->state = EDGE_E7_SESS_SSH;
+    s->ssh_banner_flushed = chssh_ident_flushed(s->chssh);
+    s->saw_ssh_rx = 0;
+    s->identity_ms = mono_now_ms();
+
+    e7_trace(ch, "ssh_client", s->identity.mac, s->peer,
+             "libchssh SSH client after calix ack (E7 is SSH server); "
+             "user=%s subsystem=netconf",
+             user);
+
+    if (s->id_len > 0) {
+        size_t used = chssh_feed_input(s->chssh, (const uint8_t *)s->id_buf,
+                                       s->id_len);
+        e7_trace(ch, "ssh_rx", s->identity.mac, s->peer,
+                 "fed %zu leftover post-identity bytes into chssh client",
+                 used);
+        s->id_len = 0;
+        s->saw_ssh_rx = 1;
+    }
+
+    if (session_chssh_process(ch, s) != 0) {
         session_clear_nc(s);
         return -1;
     }
-
-    s->identity_ms = mono_now_ms();
-    if (use_ssh) {
-        /* Wait for subsystem before netconf_send_hello (raw TCP identity done). */
-        s->state = EDGE_E7_SESS_SSH;
-        return 0;
-    }
-
-    if (session_try_send_hello(ch, s) != 0) {
+    if (session_flush_tx(ch, s) != 0) {
+        e7_trace(ch, "write_err", s->identity.mac, s->peer,
+                 "flush SSH client output errno=%d", errno);
         session_clear_nc(s);
         return -1;
     }
     return 0;
+}
+
+/** Calix identity-layer ACK from working CMS capture: exactly "<ack>ok</ack>". */
+static int session_send_calix_ack_ok(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    static const char ack[] = "<ack>ok</ack>";
+    return session_send_raw(ch, s, ack, sizeof(ack) - 1, "calix <ack>ok</ack>");
+}
+#endif /* EDGEHOST_E7_CHSSH_AVAILABLE */
+
+/**
+ * Start libnetconf SM after identity on the *same* Call Home TCP fd.
+ * @p force_ssh 1 = SSH after identity (RFC 8071 roles), 0 = raw NETCONF.
+ * @p as_server raw-probe only: NETCONF server-shaped hello.
+ *
+ * SSH prefers libchssh (production KEX). Fallback: libnetconf+libassh.
+ * NETCONF app role stays CLIENT after subsystem open.
+ */
+static int session_start_netconf(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                                 int force_ssh, int as_server)
+{
+    netconf_config_t ncfg;
+    int use_ssh = force_ssh ? 1 : 0;
+    netconf_role_t role;
+    const char *ssh_user = "sysadmin";
+
+    if (!ch || !ch->cfg || !s) {
+        return -1;
+    }
+
+    if (use_ssh) {
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+        return session_start_chssh(ch, s);
+#elif EDGEHOST_E7_SSH_AVAILABLE
+        /* legacy libassh-in-libnetconf path below */
+#else
+        e7_trace(ch, "ssh_unavailable",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "EDGEHOST_E7_SSH_AVAILABLE=0 (build libchssh or libassh)");
+        return -1;
+#endif
+    }
+
+    edge_e7_netconf_profile(&ncfg);
+    s->use_ssh = 0;
+    s->use_chssh = 0;
+    s->hello_sent = 0;
+    s->last_nc_state = -1;
+    s->nc_as_server = as_server ? 1 : 0;
+    role = s->nc_as_server ? NETCONF_ROLE_CALLHOME_SERVER : NETCONF_ROLE_CLIENT;
+
+#if EDGEHOST_E7_SSH_AVAILABLE && !EDGEHOST_E7_CHSSH_AVAILABLE
+    if (use_ssh) {
+        edge_e7_netconf_apply_ssh(&ncfg, ch->cfg);
+        if (ch->cfg->e7_ssh_username[0]) {
+            ssh_user = ch->cfg->e7_ssh_username;
+        }
+        s->use_ssh = 1;
+    }
+#else
+    (void)ssh_user;
+#endif
+
+    s->nc = netconf_create_with_config(role, &ncfg);
+    if (!s->nc) {
+        e7_trace(ch, "netconf_create_fail",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "netconf_create_with_config returned NULL (nc_role=%s ssh=%d)",
+                 s->nc_as_server ? "server" : "client", use_ssh);
+        return -1;
+    }
+    e7_trace(ch, "nc_role", s->identity.identity_ok ? s->identity.mac : "",
+             s->peer, "NETCONF_ROLE=%s ssh_mode=%s",
+             s->nc_as_server ? "CALLHOME_SERVER" : "CLIENT",
+             use_ssh ? "SSH_CALLHOME(server)" : "OFF(raw)");
+
+    drain_nc_events(ch, s);
+    if (session_drain_output(s) != 0) {
+        session_clear_nc(s);
+        e7_trace(ch, "netconf_start_fail",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "initial output drain failed");
+        return -1;
+    }
+
+    s->identity_ms = mono_now_ms();
+#if EDGEHOST_E7_SSH_AVAILABLE && !EDGEHOST_E7_CHSSH_AVAILABLE
+    if (use_ssh) {
+        s->state = EDGE_E7_SESS_SSH;
+        s->ssh_banner_flushed = 0;
+        s->saw_ssh_rx = 0;
+        e7_trace(ch, "ssh_server", s->identity.identity_ok ? s->identity.mac : "",
+                 s->peer,
+                 "legacy libassh SSH server after identity; user=%s",
+                 ssh_user);
+        session_trace_nc_state(ch, s);
+        if (s->tx_len > s->tx_off && !s->first_tx_logged) {
+            s->first_tx_logged = 1;
+            e7_trace_bytes(ch, "first_tx", s->identity.mac, s->peer,
+                           "SSH server ident", s->tx + s->tx_off,
+                           s->tx_len - s->tx_off);
+        }
+        if (session_flush_tx(ch, s) != 0) {
+            session_clear_nc(s);
+            return -1;
+        }
+        s->ssh_banner_flushed = 1;
+        e7_trace(ch, "ssh_banner_sent", s->identity.mac, s->peer,
+                 "SSH server identification flushed (libassh)");
+        return 0;
+    }
+#endif
+
+    if (session_try_send_hello(ch, s) != 0) {
+        session_clear_nc(s);
+        e7_trace(ch, "hello_fail",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "initial hello failed");
+        return -1;
+    }
+    return 0;
+}
+
+static void session_trace_nc_state(edge_e7_callhome_t *ch, edge_e7_session_t *s)
+{
+    netconf_state_t st;
+    if (!ch || !s || !s->nc) {
+        return;
+    }
+    st = netconf_current_state(s->nc);
+    if ((int)st == s->last_nc_state) {
+        return;
+    }
+    s->last_nc_state = (int)st;
+    e7_trace(ch, "nc_state", s->identity.identity_ok ? s->identity.mac : "",
+             s->peer, "%s (sess=%s)", e7_nc_state_name(st),
+             edge_e7_sess_state_name(s->state));
 }
 
 static void session_check_open(edge_e7_callhome_t *ch, edge_e7_session_t *s)
@@ -1236,6 +2120,7 @@ static void session_check_open(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     if (!s->nc) {
         return;
     }
+    session_trace_nc_state(ch, s);
     if (netconf_current_state(s->nc) == NETCONF_STATE_SESSION_OPEN &&
         s->state != EDGE_E7_SESS_OPEN) {
         s->state = EDGE_E7_SESS_OPEN;
@@ -1243,6 +2128,20 @@ static void session_check_open(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         ch->stats.sessions_open++;
         ch->stats.sessions_opened++;
         put_session_json(ch, s, "open");
+        e7_trace(ch, "open", s->identity.identity_ok ? s->identity.mac : "",
+                 s->peer, "NETCONF SESSION_OPEN (probe=%s)",
+                 e7_probe_mode_name(s->probe_mode));
+        {
+            edge_e7_runtime_shelf_t *rs =
+                runtime_find(ch, s->identity.mac);
+            if (rs) {
+                /* Lock successful strategy for future dials. */
+                rs->probe_mode = s->probe_mode;
+                e7_trace(ch, "probe_success", s->identity.mac, s->peer,
+                         "locking mode %u (%s)", (unsigned)s->probe_mode,
+                         e7_probe_mode_name(s->probe_mode));
+            }
+        }
         session_try_subscribe(ch, s);
     }
 }
@@ -1253,10 +2152,14 @@ static void session_after_nc_io(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     if (!s || !s->nc) {
         return;
     }
+    session_trace_nc_state(ch, s);
     if (!s->hello_sent) {
         if (session_try_send_hello(ch, s) != 0) {
             ch->stats.rejects_other++;
             put_session_json(ch, s, "error");
+            e7_trace(ch, "hello_fail",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "send hello after SSH failed");
             session_close(ch, s);
             return;
         }
@@ -1265,6 +2168,9 @@ static void session_after_nc_io(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         return;
     }
     if (session_drain_output(s) != 0) {
+        e7_trace(ch, "io_error",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "tx drain failed");
         session_close(ch, s);
         return;
     }
@@ -1284,16 +2190,22 @@ static int session_finish_identity(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (edge_e7_identity_parse(s->id_buf, id_end, &id) != 0 ||
         !id.identity_ok) {
         ch->stats.rejects_bad_identity++;
+        e7_trace(ch, "identity_bad", "", s->peer,
+                 "parse failed or incomplete identity (%zu bytes)", id_end);
         session_close(ch, s);
         return -1;
     }
     s->identity = id;
+    e7_trace(ch, "identity_ok", s->identity.mac, s->peer,
+             "serial=%s model=%s", s->identity.serial, s->identity.model);
 
     look = shelf_lookup_runtime(ch, s->identity.mac);
     if (look == 0) {
         /* present but disabled */
         put_session_json(ch, s, "disabled");
         ch->stats.rejects_disabled++;
+        e7_trace(ch, "reject_disabled", s->identity.mac, s->peer,
+                 "shelf on allowlist but enabled=false");
         session_close(ch, s);
         return -1;
     }
@@ -1301,43 +2213,161 @@ static int session_finish_identity(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         if (!ch->cfg->e7_auto_subscribe_unknown) {
             put_session_json(ch, s, "unconfigured");
             ch->stats.rejects_not_allowlisted++;
+            e7_trace(ch, "reject_unconfigured", s->identity.mac, s->peer,
+                     "MAC not on allowlist — add shelf on /e7/ then retry");
             session_close(ch, s);
             return -1;
         }
         s->auto_unknown = 1;
         s->allowlisted = 0;
+        e7_trace(ch, "auto_unknown", s->identity.mac, s->peer,
+                 "MAC not allowlisted; auto_subscribe_unknown=true");
     } else {
         s->allowlisted = 1;
         s->auto_unknown = 0;
+        e7_trace(ch, "allowlist_ok", s->identity.mac, s->peer,
+                 "MAC matched runtime allowlist");
     }
 
-    /* Shift any trailing bytes after identity into a leftover for NETCONF. */
+    /* Hex-log full identity preamble (field wire forensics). */
+    e7_trace_bytes(ch, "identity_hex", s->identity.mac, s->peer, "identity",
+                   s->id_buf, id_end);
+
+    /* Shift any trailing bytes after identity into a leftover buffer. */
     {
         size_t rem = s->id_len > id_end ? s->id_len - id_end : 0;
+        size_t off = 0;
         if (rem > 0) {
             memmove(s->id_buf, s->id_buf + id_end, rem);
         }
         s->id_len = rem;
+        /* Strip leading whitespace after </identity>. */
+        while (off < s->id_len &&
+               (s->id_buf[off] == ' ' || s->id_buf[off] == '\t' ||
+                s->id_buf[off] == '\r' || s->id_buf[off] == '\n')) {
+            off++;
+        }
+        if (off > 0) {
+            if (off < s->id_len) {
+                memmove(s->id_buf, s->id_buf + off, s->id_len - off);
+                s->id_len -= off;
+            } else {
+                s->id_len = 0;
+            }
+        }
     }
 
 #if EDGEHOST_HAVE_LIBNETCONF
-    if (session_start_netconf(ch, s) != 0) {
-        ch->stats.rejects_other++;
-        put_session_json(ch, s, "error");
-        session_close(ch, s);
-        return -1;
-    }
     /*
-     * Feed any leftover post-identity bytes into libnetconf.
-     * Raw: start of peer NETCONF hello. SSH: first ciphertext (SSH-2.0-…).
+     * Post-identity:
+     *  - leftover SSH- from E7: start SSH server and feed immediately.
+     *  - transport ssh: silent hold → identity ACK ladder → SSH server
+     *    (field E7 rejects immediate wrong TX; capture peer-first if any).
+     *  - transport raw: probe modes (unit tests / experimental cleartext).
      */
-    if (s->id_len > 0 && s->nc) {
-        size_t used =
-            netconf_feed_input(s->nc, (const uint8_t *)s->id_buf, s->id_len);
-        (void)used;
-        s->id_len = 0;
-        drain_nc_events(ch, s);
-        session_after_nc_io(ch, s);
+    {
+        edge_e7_runtime_shelf_t *rs = runtime_find(ch, s->identity.mac);
+        s->probe_mode = rs ? rs->probe_mode : EDGE_E7_PROBE_NC_CLIENT;
+        s->probe_spoke = 0;
+        s->probe_ack_sent = 0;
+        s->ssh_phase = EDGE_E7_SSH_PHASE_HOLD;
+        s->first_tx_logged = 0;
+    }
+
+    if (s->id_len > 0) {
+        e7_trace_bytes(ch, "post_identity_leftover", s->identity.mac, s->peer,
+                       "after </identity>", s->id_buf, s->id_len);
+    }
+
+    if (s->id_len >= 4 &&
+        s->id_buf[0] == 'S' && s->id_buf[1] == 'S' && s->id_buf[2] == 'H' &&
+        s->id_buf[3] == '-') {
+        e7_trace(ch, "detect_ssh_client", s->identity.mac, s->peer,
+                 "E7 SSH client banner in post-identity bytes — NMS SSH server");
+        if (session_begin_after_identity(ch, s, 1) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    /*
+     * Primary Calix path (transport: ssh) — from successful CMS capture:
+     *   1) send "<ack>ok</ack>" (no trailing NL)
+     *   2) wait for E7 SSH *server* identification
+     *   3) NMS acts as SSH *client* (libchssh CLIENT)
+     */
+    if (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport)) {
+        s->state = EDGE_E7_SESS_POST_ID;
+        s->identity_ms = mono_now_ms();
+        s->probe_mode = EDGE_E7_PROBE_SILENT;
+        s->ssh_phase = EDGE_E7_SSH_PHASE_HOLD; /* wait for peer SSH after ack */
+        s->ssh_resume = EDGE_E7_SSH_PHASE_SSH;
+
+        e7_trace(ch, "post_identity", s->identity.mac, s->peer,
+                 "identity complete — calix ack then wait for E7 SSH server "
+                 "(NMS will be SSH client)");
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+        if (session_send_calix_ack_ok(ch, s) != 0) {
+            session_close(ch, s);
+            return -1;
+        }
+        e7_trace(ch, "calix_ack", s->identity.mac, s->peer,
+                 "sent <ack>ok</ack> — waiting for peer SSH- identification");
+#else
+        e7_trace(ch, "post_identity_hold", s->identity.mac, s->peer,
+                 "libchssh unavailable; silent hold then legacy path");
+#endif
+        return 0;
+    }
+
+    if (s->id_len >= 1 && s->id_buf[0] == '<') {
+        e7_trace(ch, "detect_raw_hello", s->identity.mac, s->peer,
+                 "XML after identity — starting raw NETCONF");
+        s->probe_mode = EDGE_E7_PROBE_NC_CLIENT;
+        if (session_begin_after_identity(ch, s, 0) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    /* auto: short wait, then SSH client if peer stays quiet */
+    if (ch->cfg && e7_transport_is_auto(ch->cfg->e7_transport)) {
+        s->state = EDGE_E7_SESS_POST_ID;
+        s->identity_ms = mono_now_ms();
+        e7_trace(ch, "post_identity_wait", s->identity.mac, s->peer,
+                 "auto: wait %ums then SSH client if peer silent",
+                 (unsigned)EDGE_E7_POST_ID_WAIT_MS);
+        return 0;
+    }
+
+    /* transport: raw — experimental probe ladder (unit tests use client hello) */
+    e7_trace(ch, "probe", s->identity.mac, s->peer, "mode %u (%s) for this dial",
+             (unsigned)s->probe_mode, e7_probe_mode_name(s->probe_mode));
+
+    if (s->probe_mode == EDGE_E7_PROBE_NC_CLIENT ||
+        s->probe_mode == EDGE_E7_PROBE_NC_SERVER) {
+        if (session_begin_after_identity(ch, s, 0) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    s->state = EDGE_E7_SESS_POST_ID;
+    s->identity_ms = mono_now_ms();
+    if (s->probe_mode == EDGE_E7_PROBE_VERSION_ACK ||
+        s->probe_mode == EDGE_E7_PROBE_VERSION_ACK2) {
+        if (session_send_version_ack(
+                ch, s, s->probe_mode == EDGE_E7_PROBE_VERSION_ACK2) != 0) {
+            session_close(ch, s);
+            return -1;
+        }
+        e7_trace(ch, "probe_wait", s->identity.mac, s->peer,
+                 "waiting up to %ums for peer after version ACK",
+                 (unsigned)EDGE_E7_PROBE_ACK_WAIT_MS);
+    } else {
+        e7_trace(ch, "probe_wait", s->identity.mac, s->peer,
+                 "silent listen up to %ums (no NMS TX) — capturing peer-first data",
+                 (unsigned)EDGE_E7_PROBE_SILENT_MS);
     }
     return 0;
 #else
@@ -1347,9 +2377,420 @@ static int session_finish_identity(edge_e7_callhome_t *ch, edge_e7_session_t *s,
 #endif
 }
 
+#if EDGEHOST_HAVE_LIBNETCONF
+/** Start netconf/SSH and feed any buffered post-identity bytes. */
+static int session_begin_after_identity(edge_e7_callhome_t *ch,
+                                        edge_e7_session_t *s, int use_ssh)
+{
+    int as_server = (s->probe_mode == EDGE_E7_PROBE_NC_SERVER) ? 1 : 0;
+
+    if (session_start_netconf(ch, s, use_ssh, as_server) != 0) {
+        ch->stats.rejects_other++;
+        put_session_json(ch, s, "error");
+        e7_trace(ch, "netconf_start_fail", s->identity.mac, s->peer,
+                 "could not start %s after identity",
+                 use_ssh ? "SSH" : "raw NETCONF");
+        session_close(ch, s);
+        return -1;
+    }
+    s->probe_spoke = 1;
+    if (s->id_len > 0 && s->nc) {
+        size_t used;
+        e7_trace(ch, "post_identity_bytes", s->identity.mac, s->peer,
+                 "%zu leftover bytes after </identity>", s->id_len);
+        used = netconf_feed_input(s->nc, (const uint8_t *)s->id_buf, s->id_len);
+        (void)used;
+        s->id_len = 0;
+        drain_nc_events(ch, s);
+        session_after_nc_io(ch, s);
+        if (s->state == EDGE_E7_SESS_EMPTY) {
+            return -1;
+        }
+        if (session_flush_tx(ch, s) != 0) {
+            e7_trace(ch, "write_err", s->identity.mac, s->peer,
+                     "flush after leftover feed errno=%d", errno);
+            session_close(ch, s);
+            return -1;
+        }
+    }
+    return 0;
+}
+#endif
+
+/* ---- Call Home stream capture (host-visible after accept) ---- */
+
+static void e7_pcap_u16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
+}
+
+static void e7_pcap_u32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+static uint16_t e7_ip_checksum(const uint8_t *hdr, size_t len)
+{
+    uint32_t sum = 0;
+    size_t i;
+    for (i = 0; i + 1 < len; i += 2) {
+        sum += ((uint32_t)hdr[i] << 8) | hdr[i + 1];
+    }
+    if (i < len) {
+        sum += (uint32_t)hdr[i] << 8;
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xffffu) + (sum >> 16);
+    }
+    return (uint16_t)~sum;
+}
+
+static int e7_pcap_open(edge_e7_callhome_t *ch)
+{
+    static const uint8_t ghdr[24] = {
+        0xd4, 0xc3, 0xb2, 0xa1, /* magic LE */
+        0x02, 0x00, 0x04, 0x00, /* v2.4 */
+        0x00, 0x00, 0x00, 0x00, /* thiszone */
+        0x00, 0x00, 0x00, 0x00, /* sigfigs */
+        0x00, 0x00, 0x04, 0x00, /* snaplen 262144 */
+        0x65, 0x00, 0x00, 0x00  /* LINKTYPE_RAW = 101 */
+    };
+    const char *dir = "var";
+    if (!ch || ch->pcap_fp) {
+        return 0;
+    }
+    snprintf(ch->pcap_path, sizeof(ch->pcap_path),
+             "%s/e7_callhome_capture.pcap", dir);
+    snprintf(ch->pcap_text_path, sizeof(ch->pcap_text_path),
+             "%s/e7_callhome_capture.log", dir);
+    ch->pcap_fp = fopen(ch->pcap_path, "wb");
+    ch->pcap_text_fp = fopen(ch->pcap_text_path, "a");
+    if (!ch->pcap_fp) {
+        fprintf(stderr, "edgehost: e7 pcap open failed path=%s errno=%d\n",
+                ch->pcap_path, errno);
+        if (ch->pcap_text_fp) {
+            fclose(ch->pcap_text_fp);
+            ch->pcap_text_fp = NULL;
+        }
+        return -1;
+    }
+    if (fwrite(ghdr, 1, sizeof(ghdr), ch->pcap_fp) != sizeof(ghdr)) {
+        fclose(ch->pcap_fp);
+        ch->pcap_fp = NULL;
+        return -1;
+    }
+    fflush(ch->pcap_fp);
+    ch->pcap_seq_c2s = 1000;
+    ch->pcap_seq_s2c = 2000;
+    ch->pcap_pkts = 0;
+    ch->pcap_bytes = 0;
+    fprintf(stderr,
+            "edgehost: e7_callhome stream capture → %s (+ %s text)\n",
+            ch->pcap_path, ch->pcap_text_path);
+    if (ch->pcap_text_fp) {
+        fprintf(ch->pcap_text_fp,
+                "# e7_callhome host stream capture (post-accept app bytes)\n"
+                "# Lines starting with \"# DIAL\" summarize each TCP dial:\n"
+                "#   RX identity → hold → first TX → peer EOF\n");
+        fflush(ch->pcap_text_fp);
+    }
+    return 0;
+}
+
+static void e7_pcap_close(edge_e7_callhome_t *ch)
+{
+    if (!ch) {
+        return;
+    }
+    if (ch->pcap_fp) {
+        fflush(ch->pcap_fp);
+        fclose(ch->pcap_fp);
+        ch->pcap_fp = NULL;
+    }
+    if (ch->pcap_text_fp) {
+        fflush(ch->pcap_text_fp);
+        fclose(ch->pcap_text_fp);
+        ch->pcap_text_fp = NULL;
+    }
+}
+
+/** Classify chunk and update per-dial counters for summary lines. */
+static void e7_pcap_note_chunk(edge_e7_session_t *s, int to_peer,
+                               const uint8_t *data, size_t len)
+{
+    uint64_t now;
+    if (!s || !data || len == 0) {
+        return;
+    }
+    now = mono_now_ms();
+    if (s->cap_t0_ms == 0) {
+        s->cap_t0_ms = now;
+    }
+    if (to_peer) {
+        s->cap_tx_chunks++;
+        s->cap_tx_bytes += (uint32_t)(len > 0xffffffffu ? 0xffffffffu : len);
+        if (s->cap_first_tx_ms == 0) {
+            s->cap_first_tx_ms = now;
+            if (len >= 4 && data[0] == 'S' && data[1] == 'S' && data[2] == 'H' &&
+                data[3] == '-') {
+                s->cap_saw_ssh_tx = 1;
+                snprintf(s->cap_first_tx_tag, sizeof(s->cap_first_tx_tag),
+                         "SSH-banner");
+            } else if (len >= 9 && data[0] == '<' &&
+                       memcmp(data, "<version>", 9) == 0) {
+                s->cap_saw_ack_tx = 1;
+                snprintf(s->cap_first_tx_tag, sizeof(s->cap_first_tx_tag),
+                         "version-ACK");
+            } else {
+                snprintf(s->cap_first_tx_tag, sizeof(s->cap_first_tx_tag),
+                         "other");
+            }
+        } else if (len >= 4 && data[0] == 'S' && data[1] == 'S' &&
+                   data[2] == 'H' && data[3] == '-') {
+            s->cap_saw_ssh_tx = 1;
+        } else if (len >= 9 && data[0] == '<' &&
+                   memcmp(data, "<version>", 9) == 0) {
+            s->cap_saw_ack_tx = 1;
+        }
+    } else {
+        s->cap_rx_chunks++;
+        s->cap_rx_bytes += (uint32_t)(len > 0xffffffffu ? 0xffffffffu : len);
+        if (len >= 10 && memmem(data, len, "<identity>", 10) != NULL) {
+            s->cap_saw_ident = 1;
+            if (s->cap_ident_ms == 0) {
+                s->cap_ident_ms = now;
+            }
+        }
+        if (len >= 4 && data[0] == 'S' && data[1] == 'S' && data[2] == 'H' &&
+            data[3] == '-') {
+            s->cap_saw_ssh_rx = 1;
+        }
+    }
+}
+
+/**
+ * One-line dial summary for the text capture log (and SPA-adjacent forensics).
+ * Example:
+ *   # DIAL #3 end peer=192.168.35.11 mac=00:02:5d:… rx=182B identity
+ *     hold_ms=3000 first_tx=SSH-banner 21B eof_ms_after_tx=12 saw_peer_ssh=0
+ */
+static void e7_pcap_dial_summary(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                                 const char *why)
+{
+    uint64_t now;
+    uint64_t hold_ms = 0;
+    uint64_t eof_after_tx = 0;
+    const char *mac;
+    const char *peer;
+    struct timeval tv;
+
+    if (!ch || !s || s->cap_summary_done) {
+        return;
+    }
+    if (s->cap_rx_chunks == 0 && s->cap_tx_chunks == 0) {
+        return; /* empty accept with no app data */
+    }
+    s->cap_summary_done = 1;
+    now = mono_now_ms();
+    if (s->cap_ident_ms && s->cap_first_tx_ms &&
+        s->cap_first_tx_ms >= s->cap_ident_ms) {
+        hold_ms = s->cap_first_tx_ms - s->cap_ident_ms;
+    } else if (s->identity_ms && s->cap_first_tx_ms &&
+               s->cap_first_tx_ms >= s->identity_ms) {
+        hold_ms = s->cap_first_tx_ms - s->identity_ms;
+    }
+    if (s->cap_first_tx_ms && now >= s->cap_first_tx_ms) {
+        eof_after_tx = now - s->cap_first_tx_ms;
+    }
+    mac = (s->identity.identity_ok && s->identity.mac[0]) ? s->identity.mac
+                                                          : "-";
+    peer = s->peer[0] ? s->peer : "-";
+    gettimeofday(&tv, NULL);
+    ch->pcap_dials++;
+
+    if (ch->pcap_text_fp) {
+        fprintf(ch->pcap_text_fp,
+                "# DIAL #%llu end peer=%s mac=%s why=%s "
+                "rx=%uB/%u chunk%s tx=%uB/%u chunk%s "
+                "identity=%u hold_ms=%llu first_tx=%s "
+                "ssh_tx=%u ssh_rx=%u ack_tx=%u "
+                "eof_ms_after_first_tx=%llu state=%s\n",
+                (unsigned long long)ch->pcap_dials, peer, mac,
+                why ? why : "close", (unsigned)s->cap_rx_bytes,
+                (unsigned)s->cap_rx_chunks,
+                s->cap_rx_chunks == 1 ? "" : "s", (unsigned)s->cap_tx_bytes,
+                (unsigned)s->cap_tx_chunks,
+                s->cap_tx_chunks == 1 ? "" : "s",
+                (unsigned)s->cap_saw_ident, (unsigned long long)hold_ms,
+                s->cap_first_tx_tag[0] ? s->cap_first_tx_tag : "none",
+                (unsigned)s->cap_saw_ssh_tx, (unsigned)s->cap_saw_ssh_rx,
+                (unsigned)s->cap_saw_ack_tx,
+                (unsigned long long)eof_after_tx,
+                edge_e7_sess_state_name(s->state));
+        fflush(ch->pcap_text_fp);
+    }
+
+    /* Also surface a short line in SPA events. */
+    e7_trace(ch, "dial_summary", mac, peer,
+             "#%llu rx=%uB tx=%uB ident=%u hold_ms=%llu first_tx=%s "
+             "ssh_tx=%u ssh_rx=%u eof_ms=%llu why=%s",
+             (unsigned long long)ch->pcap_dials, (unsigned)s->cap_rx_bytes,
+             (unsigned)s->cap_tx_bytes, (unsigned)s->cap_saw_ident,
+             (unsigned long long)hold_ms,
+             s->cap_first_tx_tag[0] ? s->cap_first_tx_tag : "none",
+             (unsigned)s->cap_saw_ssh_tx, (unsigned)s->cap_saw_ssh_rx,
+             (unsigned long long)eof_after_tx, why ? why : "close");
+}
+
+/**
+ * Record one host-visible RX/TX chunk as a synthetic IPv4/TCP packet (RAW IP
+ * PCAP). Captures exactly what e7_callhome read()/write() on the accepted fd
+ * after io_uring E7 accept — not AF_PACKET L2 frames.
+ *
+ * @p to_peer 1 = NMS→E7 (write), 0 = E7→NMS (read)
+ */
+static void e7_pcap_write(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                          int to_peer, const uint8_t *data, size_t len)
+{
+    struct sockaddr_storage lss, pss;
+    socklen_t ll = sizeof(lss), pl = sizeof(pss);
+    uint32_t sip = 0, dip = 0;
+    uint16_t sport = 0, dport = 0;
+    uint8_t *frame = NULL;
+    size_t frame_len;
+    uint8_t *ip;
+    uint8_t *tcp;
+    uint32_t seq;
+    struct timeval tv;
+    uint8_t rec_hdr[16];
+    size_t i;
+
+    if (!ch || !data || len == 0) {
+        return;
+    }
+    if (!ch->pcap_fp && e7_pcap_open(ch) != 0) {
+        return;
+    }
+    if (!ch->pcap_fp) {
+        return;
+    }
+    if (s) {
+        e7_pcap_note_chunk(s, to_peer, data, len);
+    }
+
+    memset(&lss, 0, sizeof(lss));
+    memset(&pss, 0, sizeof(pss));
+    if (s && s->fd >= 0) {
+        (void)getsockname(s->fd, (struct sockaddr *)&lss, &ll);
+        (void)getpeername(s->fd, (struct sockaddr *)&pss, &pl);
+    }
+    if (lss.ss_family == AF_INET) {
+        struct sockaddr_in *a = (struct sockaddr_in *)&lss;
+        sip = ntohl(a->sin_addr.s_addr);
+        sport = ntohs(a->sin_port);
+    }
+    if (pss.ss_family == AF_INET) {
+        struct sockaddr_in *a = (struct sockaddr_in *)&pss;
+        dip = ntohl(a->sin_addr.s_addr);
+        dport = ntohs(a->sin_port);
+    }
+    if (!to_peer) {
+        uint32_t t = sip;
+        uint16_t tp = sport;
+        sip = dip;
+        dip = t;
+        sport = dport;
+        dport = tp;
+    }
+
+    frame_len = 20 + 20 + len; /* IPv4 + TCP + payload */
+    if (frame_len > 65535) {
+        len = 65535 - 40;
+        frame_len = 20 + 20 + len;
+    }
+    frame = (uint8_t *)malloc(frame_len);
+    if (!frame) {
+        return;
+    }
+    memset(frame, 0, frame_len);
+    ip = frame;
+    tcp = frame + 20;
+    ip[0] = 0x45;
+    e7_pcap_u16(ip + 2, (uint16_t)frame_len);
+    e7_pcap_u16(ip + 4, (uint16_t)(ch->pcap_pkts + 1));
+    ip[8] = 64;
+    ip[9] = 6; /* TCP */
+    e7_pcap_u32(ip + 12, sip);
+    e7_pcap_u32(ip + 16, dip);
+    e7_pcap_u16(ip + 10, e7_ip_checksum(ip, 20));
+
+    e7_pcap_u16(tcp + 0, sport);
+    e7_pcap_u16(tcp + 2, dport);
+    if (to_peer) {
+        seq = ch->pcap_seq_c2s;
+        ch->pcap_seq_c2s += (uint32_t)len;
+    } else {
+        seq = ch->pcap_seq_s2c;
+        ch->pcap_seq_s2c += (uint32_t)len;
+    }
+    e7_pcap_u32(tcp + 4, seq);
+    e7_pcap_u32(tcp + 8, 0);
+    tcp[12] = 0x50; /* data offset 5 */
+    tcp[13] = 0x18; /* PSH+ACK */
+    e7_pcap_u16(tcp + 14, 65535);
+    memcpy(tcp + 20, data, len);
+
+    gettimeofday(&tv, NULL);
+    /* PCAP record header little-endian */
+    rec_hdr[0] = (uint8_t)(tv.tv_sec);
+    rec_hdr[1] = (uint8_t)(tv.tv_sec >> 8);
+    rec_hdr[2] = (uint8_t)(tv.tv_sec >> 16);
+    rec_hdr[3] = (uint8_t)(tv.tv_sec >> 24);
+    rec_hdr[4] = (uint8_t)(tv.tv_usec);
+    rec_hdr[5] = (uint8_t)(tv.tv_usec >> 8);
+    rec_hdr[6] = (uint8_t)(tv.tv_usec >> 16);
+    rec_hdr[7] = (uint8_t)(tv.tv_usec >> 24);
+    rec_hdr[8] = (uint8_t)frame_len;
+    rec_hdr[9] = (uint8_t)(frame_len >> 8);
+    rec_hdr[10] = (uint8_t)(frame_len >> 16);
+    rec_hdr[11] = (uint8_t)(frame_len >> 24);
+    memcpy(rec_hdr + 12, rec_hdr + 8, 4);
+    (void)fwrite(rec_hdr, 1, 16, ch->pcap_fp);
+    (void)fwrite(frame, 1, frame_len, ch->pcap_fp);
+    fflush(ch->pcap_fp);
+    ch->pcap_pkts++;
+    ch->pcap_bytes += len;
+
+    if (ch->pcap_text_fp) {
+        fprintf(ch->pcap_text_fp, "%ld.%06ld %s %s %zuB ",
+                (long)tv.tv_sec, (long)tv.tv_usec,
+                to_peer ? "TX(nms→e7)" : "RX(e7→nms)",
+                s && s->identity.identity_ok ? s->identity.mac : "-",
+                len);
+        for (i = 0; i < len && i < 64; i++) {
+            fprintf(ch->pcap_text_fp, "%02x", data[i]);
+        }
+        if (len > 64) {
+            fprintf(ch->pcap_text_fp, "…");
+        }
+        fprintf(ch->pcap_text_fp, " | ");
+        for (i = 0; i < len && i < 48; i++) {
+            unsigned char c = data[i];
+            fputc((c >= 32 && c < 127) ? (int)c : '.', ch->pcap_text_fp);
+        }
+        fputc('\n', ch->pcap_text_fp);
+        fflush(ch->pcap_text_fp);
+    }
+    free(frame);
+}
+
 /* ---- I/O pump ---- */
 
-static int session_flush_tx(edge_e7_session_t *s)
+static int session_flush_tx(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     while (s->tx_off < s->tx_len) {
         ssize_t n = write(s->fd, s->tx + s->tx_off, s->tx_len - s->tx_off);
@@ -1362,70 +2803,301 @@ static int session_flush_tx(edge_e7_session_t *s)
         if (n == 0) {
             return -1;
         }
+        if (ch && n > 0) {
+            e7_pcap_write(ch, s, 1, s->tx + s->tx_off, (size_t)n);
+        }
         s->tx_off += (size_t)n;
     }
     s->tx_len = s->tx_off = 0;
     return 0;
 }
 
+/**
+ * Process one readable chunk already in s->rx[0..n).
+ * @return 0 continue, -1 session closed.
+ */
+static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                             size_t n)
+{
+    if (s->state == EDGE_E7_SESS_ACCEPTED || s->state == EDGE_E7_SESS_IDENTITY) {
+        if (s->state == EDGE_E7_SESS_ACCEPTED) {
+            e7_trace(ch, "identity", "", s->peer,
+                     "receiving Calix identity preamble");
+        }
+        s->state = EDGE_E7_SESS_IDENTITY;
+        if (s->id_len + n > EDGE_E7_IDENTITY_BUF_MAX) {
+            ch->stats.rejects_bad_identity++;
+            e7_trace(ch, "identity_overflow", "", s->peer,
+                     "identity buffer > %u bytes",
+                     (unsigned)EDGE_E7_IDENTITY_BUF_MAX);
+            session_close(ch, s);
+            return -1;
+        }
+        memcpy(s->id_buf + s->id_len, s->rx, n);
+        s->id_len += n;
+        {
+            int end = find_identity_end(s->id_buf, s->id_len);
+            if (end >= 0) {
+                if (session_finish_identity(ch, s, (size_t)end) != 0) {
+                    return -1;
+                }
+                if (session_flush_tx(ch, s) != 0) {
+                    e7_trace(ch, "write_err",
+                             s->identity.identity_ok ? s->identity.mac : "",
+                             s->peer, "flush after identity errno=%d", errno);
+                    session_close(ch, s);
+                    return -1;
+                }
+            }
+        }
+        return 0;
+    }
+
+#if EDGEHOST_HAVE_LIBNETCONF
+    /* After identity: peer may speak first (SSH client banner or raw hello). */
+    if (s->state == EDGE_E7_SESS_POST_ID) {
+        int use_ssh = 1;
+
+        e7_trace_bytes(ch, "post_identity_rx", s->identity.mac, s->peer,
+                       "peer", s->rx, n);
+
+        if (n >= 1 && s->rx[0] == '<') {
+            if (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport)) {
+                /*
+                 * Peer XML during hold/ACK may be identity-layer reply or
+                 * raw NETCONF. Prefer SSH path still; feed leftover after
+                 * start only if SSH. Log and continue ladder only if we
+                 * already spoke (ACK) — otherwise start SSH server? No:
+                 * XML first from E7 after identity is unexpected for SSH
+                 * Call Home; capture and still try SSH server after buffering
+                 * is wrong. Buffer and escalate to SSH only if banner-like.
+                 * For pure XML: if transport=ssh treat as unexpected and
+                 * still attempt SSH server (prior raw hello path).
+                 */
+                e7_trace(ch, "unexpected_xml", s->identity.mac, s->peer,
+                         "XML after identity (phase=%u spoke=%u) — "
+                         "starting SSH server and feeding if leftover SSH only",
+                         (unsigned)s->ssh_phase, (unsigned)s->probe_spoke);
+                /* Buffer; do not feed XML into SSH. Stay in POST_ID if we
+                 * have not finished hold — actually peer spoke so end hold. */
+                if (s->id_len + n > EDGE_E7_IDENTITY_BUF_MAX) {
+                    e7_trace(ch, "post_identity_overflow", s->identity.mac,
+                             s->peer, "buffer full");
+                    session_close(ch, s);
+                    return -1;
+                }
+                memcpy(s->id_buf + s->id_len, s->rx, n);
+                s->id_len += n;
+                /* Do not start SSH with XML buffered into SSH feed — clear
+                 * leftover so SSH starts clean; XML already hex-logged. */
+                s->id_len = 0;
+                if (session_begin_after_identity(ch, s, 1) != 0) {
+                    return -1;
+                }
+                return 0;
+            }
+            if (ch->cfg && e7_transport_is_auto(ch->cfg->e7_transport)) {
+                use_ssh = 0;
+                e7_trace(ch, "detect_raw_hello", s->identity.mac, s->peer,
+                         "XML after identity — raw NETCONF (auto)");
+            } else {
+                e7_trace(ch, "unexpected_xml", s->identity.mac, s->peer,
+                         "XML after identity — still trying SSH");
+            }
+        } else if (n >= 4 && s->rx[0] == 'S' && s->rx[1] == 'S' &&
+                   s->rx[2] == 'H' && s->rx[3] == '-') {
+            e7_trace(ch, "detect_ssh_server", s->identity.mac, s->peer,
+                     "peer SSH identification — E7 is SSH server; "
+                     "NMS will be SSH client (Calix CMS roles)");
+            use_ssh = 1;
+        } else if (n >= 1 && s->rx[0] == 0x16) {
+            e7_trace(ch, "detect_tls", s->identity.mac, s->peer,
+                     "TLS record (0x16) — TLS Call Home not supported");
+            session_close(ch, s);
+            return -1;
+        }
+
+        /* Buffer peer bytes then start transport and feed. */
+        if (s->id_len + n > EDGE_E7_IDENTITY_BUF_MAX) {
+            e7_trace(ch, "post_identity_overflow", s->identity.mac, s->peer,
+                     "buffer full");
+            session_close(ch, s);
+            return -1;
+        }
+        memcpy(s->id_buf + s->id_len, s->rx, n);
+        s->id_len += n;
+        if (session_begin_after_identity(ch, s, use_ssh) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+#endif
+
+#if EDGEHOST_HAVE_LIBNETCONF || EDGEHOST_E7_CHSSH_AVAILABLE
+    /* SSH (post-identity) or NETCONF hello/open. */
+    if (s->state == EDGE_E7_SESS_SSH || s->state == EDGE_E7_SESS_HELLO ||
+        s->state == EDGE_E7_SESS_OPEN) {
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+        if (s->use_chssh && s->chssh) {
+            size_t used;
+            if (s->state == EDGE_E7_SESS_SSH && n > 0) {
+                s->saw_ssh_rx = 1;
+                e7_trace_bytes(ch, "ssh_rx",
+                               s->identity.identity_ok ? s->identity.mac : "",
+                               s->peer, "ssh", s->rx, n);
+            }
+            used = chssh_feed_input(s->chssh, s->rx, n);
+            (void)used;
+            if (session_chssh_process(ch, s) != 0) {
+                session_close(ch, s);
+                return -1;
+            }
+            if (session_flush_tx(ch, s) != 0) {
+                e7_trace(ch, "write_err",
+                         s->identity.identity_ok ? s->identity.mac : "",
+                         s->peer, "flush after chssh feed errno=%d", errno);
+                session_close(ch, s);
+                return -1;
+            }
+            return 0;
+        }
+#endif
+#if EDGEHOST_HAVE_LIBNETCONF
+        if (s->nc) {
+            size_t used;
+            if (s->state == EDGE_E7_SESS_SSH && n > 0) {
+                s->saw_ssh_rx = 1;
+                e7_trace_bytes(ch, "ssh_rx",
+                               s->identity.identity_ok ? s->identity.mac : "",
+                               s->peer, "ssh", s->rx, n);
+            }
+            used = netconf_feed_input(s->nc, s->rx, n);
+            (void)used;
+            drain_nc_events(ch, s);
+            session_after_nc_io(ch, s);
+            if (s->state == EDGE_E7_SESS_EMPTY) {
+                return -1;
+            }
+            if (session_flush_tx(ch, s) != 0) {
+                e7_trace(ch, "write_err",
+                         s->identity.identity_ok ? s->identity.mac : "",
+                         s->peer, "flush after ssh/nc feed errno=%d", errno);
+                session_close(ch, s);
+                return -1;
+            }
+            return 0;
+        }
+#endif
+    }
+#else
+    (void)ch;
+    (void)n;
+#endif
+    return 0;
+}
+
 static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
-    ssize_t n;
+    int guard;
 
     if (s->fd < 0 || !s->rx) {
         return;
     }
-    n = read(s->fd, s->rx, EDGE_E7_RX_CAP);
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-            return;
-        }
-        session_close(ch, s);
-        return;
-    }
-    if (n == 0) {
-        session_close(ch, s);
-        return;
-    }
-
-    if (s->state == EDGE_E7_SESS_ACCEPTED || s->state == EDGE_E7_SESS_IDENTITY) {
-        s->state = EDGE_E7_SESS_IDENTITY;
-        if (s->id_len + (size_t)n > EDGE_E7_IDENTITY_BUF_MAX) {
-            ch->stats.rejects_bad_identity++;
+    /*
+     * Drain the socket aggressively. Tick-only I/O (~200 ms) is too slow for
+     * SSH KEX if we process a single read and leave responses buffered.
+     */
+    for (guard = 0; guard < 64; guard++) {
+        ssize_t n = read(s->fd, s->rx, EDGE_E7_RX_CAP);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                return;
+            }
+            e7_trace(ch, "read_err",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "errno=%d state=%s", errno,
+                     edge_e7_sess_state_name(s->state));
             session_close(ch, s);
             return;
         }
-        memcpy(s->id_buf + s->id_len, s->rx, (size_t)n);
-        s->id_len += (size_t)n;
-        {
-            int end = find_identity_end(s->id_buf, s->id_len);
-            if (end >= 0) {
-                (void)session_finish_identity(ch, s, (size_t)end);
-            }
+        if (n > 0) {
+            e7_pcap_write(ch, s, 0, s->rx, (size_t)n);
         }
-        return;
-    }
-
-#if EDGEHOST_HAVE_LIBNETCONF
-    /* SSH (post-identity) or NETCONF hello/open: feed into libnetconf SM. */
-    if ((s->state == EDGE_E7_SESS_SSH || s->state == EDGE_E7_SESS_HELLO ||
-         s->state == EDGE_E7_SESS_OPEN) &&
-        s->nc) {
-        size_t used = netconf_feed_input(s->nc, s->rx, (size_t)n);
-        (void)used;
-        drain_nc_events(ch, s);
-        session_after_nc_io(ch, s);
+        if (n == 0) {
+            if (s->state == EDGE_E7_SESS_HELLO) {
+                e7_trace(ch, "peer_eof",
+                         s->identity.identity_ok ? s->identity.mac : "",
+                         s->peer,
+                         "peer closed during hello (probe=%s spoke=%u)",
+                         e7_probe_mode_name(s->probe_mode),
+                         (unsigned)s->probe_spoke);
+                probe_advance_on_fail(ch, s);
+            } else if (s->state == EDGE_E7_SESS_POST_ID) {
+                e7_trace(ch, "peer_eof",
+                         s->identity.identity_ok ? s->identity.mac : "",
+                         s->peer,
+                         "peer closed during probe=%s phase=%u spoke=%u%s",
+                         e7_probe_mode_name(s->probe_mode),
+                         (unsigned)s->ssh_phase, (unsigned)s->probe_spoke,
+                         s->probe_spoke
+                             ? ""
+                             : " — identity-only? (NMS sent nothing)");
+                /* transport:ssh — skip the phase that just failed on next dial */
+                if (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport) &&
+                    s->identity.identity_ok) {
+                    edge_e7_runtime_shelf_t *rs =
+                        runtime_find(ch, s->identity.mac);
+                    if (rs) {
+                        /*
+                         * Identity ACK killed the dial → next redial: hold then
+                         * SSH server (skip remaining ACKs). Hold-only EOF →
+                         * still try ACK0 once on the next dial.
+                         */
+                        uint8_t adv = (s->ssh_phase >= EDGE_E7_SSH_PHASE_ACK0)
+                                          ? (uint8_t)EDGE_E7_SSH_PHASE_SSH
+                                          : (uint8_t)EDGE_E7_SSH_PHASE_ACK0;
+                        rs->ssh_field_next = adv;
+                        e7_trace(ch, "ssh_field_advance", s->identity.mac,
+                                 s->peer,
+                                 "next dial resume phase=%u after eof at "
+                                 "phase=%u",
+                                 (unsigned)adv, (unsigned)s->ssh_phase);
+                    }
+                } else {
+                    probe_advance_on_fail(ch, s);
+                }
+            } else if (s->state == EDGE_E7_SESS_SSH) {
+                e7_trace(ch, "peer_eof",
+                         s->identity.identity_ok ? s->identity.mac : "",
+                         s->peer,
+                         "peer closed during same-socket SSH "
+                         "(nms_is_server banner_sent=%d saw_peer_ssh=%d)",
+                         s->ssh_banner_flushed, s->saw_ssh_rx);
+                if (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport) &&
+                    s->identity.identity_ok) {
+                    edge_e7_runtime_shelf_t *rs =
+                        runtime_find(ch, s->identity.mac);
+                    if (rs) {
+                        /* Stay on delayed-SSH after hold for further redials. */
+                        rs->ssh_field_next = EDGE_E7_SSH_PHASE_SSH;
+                    }
+                }
+            } else {
+                e7_trace(ch, "peer_eof",
+                         s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                         "peer closed TCP during %s",
+                         edge_e7_sess_state_name(s->state));
+            }
+            session_close(ch, s);
+            return;
+        }
+        if (session_handle_rx(ch, s, (size_t)n) != 0) {
+            return;
+        }
         if (s->state == EDGE_E7_SESS_EMPTY) {
             return;
         }
-        if (session_flush_tx(s) != 0) {
-            session_close(ch, s);
-            return;
-        }
     }
-#else
-    (void)ch;
-#endif
 }
 
 static void session_on_timeout(edge_e7_callhome_t *ch, edge_e7_session_t *s,
@@ -1435,8 +3107,94 @@ static void session_on_timeout(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         if (mono_ms > s->accepted_ms &&
             mono_ms - s->accepted_ms > EDGE_E7_IDENTITY_TIMEOUT_MS) {
             ch->stats.rejects_bad_identity++;
+            e7_trace(ch, "identity_timeout",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "no complete identity within %ums",
+                     (unsigned)EDGE_E7_IDENTITY_TIMEOUT_MS);
             session_close(ch, s);
         }
+    } else if (s->state == EDGE_E7_SESS_POST_ID) {
+#if EDGEHOST_HAVE_LIBNETCONF
+        uint64_t wait_ms = EDGE_E7_POST_ID_WAIT_MS;
+        int is_ssh_transport =
+            ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport);
+        int is_auto =
+            ch->cfg && e7_transport_is_auto(ch->cfg->e7_transport);
+
+        if (is_ssh_transport) {
+            /* After calix <ack>ok</ack>, wait for E7 SSH server banner. */
+            wait_ms = 10000u;
+        } else if (s->probe_mode == EDGE_E7_PROBE_SILENT) {
+            wait_ms = EDGE_E7_PROBE_SILENT_MS;
+        } else if (s->probe_mode == EDGE_E7_PROBE_VERSION_ACK ||
+                   s->probe_mode == EDGE_E7_PROBE_VERSION_ACK2) {
+            wait_ms = EDGE_E7_PROBE_ACK_WAIT_MS;
+        }
+
+        if (mono_ms > s->identity_ms && mono_ms - s->identity_ms >= wait_ms) {
+            /* --- transport:ssh after calix ack: peer must speak SSH --- */
+            if (is_ssh_transport) {
+                e7_trace(ch, "post_identity_timeout", s->identity.mac, s->peer,
+                         "no peer SSH banner within %ums after <ack>ok</ack>",
+                         (unsigned)wait_ms);
+                session_close(ch, s);
+                return;
+            }
+
+            if (is_auto) {
+                e7_trace(ch, "post_identity_timeout", s->identity.mac, s->peer,
+                         "auto: no peer data — starting SSH client");
+                if (session_begin_after_identity(ch, s, 1) != 0) {
+                    return;
+                }
+                return;
+            }
+            /* Raw probe timeout: cascade on same dial when useful. */
+            if (s->probe_mode == EDGE_E7_PROBE_SILENT) {
+                /*
+                 * E7 stayed silent while we stayed silent — it is waiting for
+                 * NMS. Immediately try identity-layer ACK on this connection
+                 * (do not burn a redial).
+                 */
+                e7_trace(ch, "probe_cascade", s->identity.mac, s->peer,
+                         "silent: no peer bytes in %ums — sending version ACK "
+                         "on same dial",
+                         (unsigned)wait_ms);
+                s->probe_mode = EDGE_E7_PROBE_VERSION_ACK;
+                s->identity_ms = mono_ms;
+                {
+                    edge_e7_runtime_shelf_t *rs =
+                        runtime_find(ch, s->identity.mac);
+                    if (rs) {
+                        rs->probe_mode = EDGE_E7_PROBE_VERSION_ACK;
+                    }
+                }
+                if (session_send_version_ack(ch, s, 0) != 0) {
+                    probe_advance_on_fail(ch, s);
+                    session_close(ch, s);
+                }
+                return;
+            }
+            if (s->probe_mode == EDGE_E7_PROBE_VERSION_ACK ||
+                s->probe_mode == EDGE_E7_PROBE_VERSION_ACK2) {
+                e7_trace(ch, "probe_timeout", s->identity.mac, s->peer,
+                         "no reply to version ACK in %ums — advancing",
+                         (unsigned)wait_ms);
+                probe_advance_on_fail(ch, s);
+                session_close(ch, s);
+                return;
+            }
+            e7_trace(ch, "post_identity_timeout", s->identity.mac, s->peer,
+                     "starting raw NETCONF client hello");
+            s->probe_mode = EDGE_E7_PROBE_NC_CLIENT;
+            if (session_begin_after_identity(ch, s, 0) != 0) {
+                return;
+            }
+        }
+#else
+        (void)mono_ms;
+        session_close(ch, s);
+#endif
     } else if (s->state == EDGE_E7_SESS_SSH || s->state == EDGE_E7_SESS_HELLO) {
         uint64_t base = s->identity_ms ? s->identity_ms : s->accepted_ms;
         if (mono_ms > base && mono_ms - base > EDGE_E7_HELLO_TIMEOUT_MS) {
@@ -1444,6 +3202,12 @@ static void session_on_timeout(edge_e7_callhome_t *ch, edge_e7_session_t *s,
             put_session_json(ch, s,
                              s->state == EDGE_E7_SESS_SSH ? "ssh_timeout"
                                                           : "hello_timeout");
+            e7_trace(ch,
+                     s->state == EDGE_E7_SESS_SSH ? "ssh_timeout"
+                                                  : "hello_timeout",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "no progress within %ums after identity (saw_ssh_rx=%d)",
+                     (unsigned)EDGE_E7_HELLO_TIMEOUT_MS, s->saw_ssh_rx);
             session_close(ch, s);
         }
     }
@@ -1459,11 +3223,24 @@ static void session_pump(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (s->state == EDGE_E7_SESS_EMPTY) {
         return;
     }
-    if (session_flush_tx(s) != 0) {
+    if (session_flush_tx(ch, s) != 0) {
+        e7_trace(ch, "write_err",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "tx flush errno=%d state=%s", errno,
+                 edge_e7_sess_state_name(s->state));
         session_close(ch, s);
         return;
     }
     session_pump_read(ch, s);
+    if (s->state == EDGE_E7_SESS_EMPTY) {
+        return;
+    }
+    if (session_flush_tx(ch, s) != 0) {
+        e7_trace(ch, "write_err",
+                 s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                 "post-read tx flush errno=%d", errno);
+        session_close(ch, s);
+    }
 }
 
 static void try_accept(edge_e7_callhome_t *ch)
@@ -1508,7 +3285,7 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
     if (!opts || !opts->cfg || !opts->cfg->e7_enabled) {
         return NULL;
     }
-    if (e7_transport_is_ssh(opts->cfg->e7_transport)) {
+    if (e7_transport_may_ssh(opts->cfg->e7_transport)) {
 #if !EDGEHOST_E7_SSH_AVAILABLE
         fprintf(stderr,
                 "edgehost: SSH Call Home requires libnetconf built with "
@@ -1573,6 +3350,9 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
         }
     }
 
+    /* Host stream capture (post-accept app bytes) for field forensics. */
+    (void)e7_pcap_open(ch);
+
     /* Enable producer namespaces when store is available. */
     if (ch->state) {
         (void)edge_state_ns_set_enabled(ch->state, "inventory", 1);
@@ -1591,6 +3371,14 @@ void edge_e7_callhome_destroy(edge_e7_callhome_t *ch)
         return;
     }
     edge_e7_callhome_close_all(ch);
+    if (ch->pcap_fp || ch->pcap_text_fp) {
+        fprintf(stderr,
+                "edgehost: e7_callhome capture closed pkts=%llu bytes=%llu "
+                "file=%s\n",
+                (unsigned long long)ch->pcap_pkts,
+                (unsigned long long)ch->pcap_bytes, ch->pcap_path);
+    }
+    e7_pcap_close(ch);
     free(ch->sessions);
     free(ch->dirty);
     free(ch);
@@ -1681,7 +3469,7 @@ int edge_e7_callhome_bind(edge_e7_callhome_t *ch)
     host = ch->cfg->e7_listen_host[0] ? ch->cfg->e7_listen_host : "127.0.0.1";
     port = ch->cfg->e7_listen_port ? ch->cfg->e7_listen_port : 4334u;
 
-    if (e7_transport_is_ssh(ch->cfg->e7_transport)) {
+    if (e7_transport_may_ssh(ch->cfg->e7_transport)) {
 #if !EDGEHOST_E7_SSH_AVAILABLE
         fprintf(stderr,
                 "edgehost: e7_callhome bind: SSH Call Home requires "
@@ -1731,7 +3519,10 @@ int edge_e7_callhome_bind(edge_e7_callhome_t *ch)
     ch->bound_enabled = 1;
     fprintf(stderr, "edgehost: e7_callhome listening on %s:%u (%s)\n", host,
             (unsigned)port,
-            e7_transport_is_ssh(ch->cfg->e7_transport) ? "ssh" : "raw");
+            e7_transport_is_ssh(ch->cfg->e7_transport)
+                ? "ssh"
+                : (e7_transport_is_auto(ch->cfg->e7_transport) ? "auto"
+                                                               : "raw"));
     return 0;
 }
 
@@ -1754,19 +3545,30 @@ int edge_e7_callhome_on_accept(edge_e7_callhome_t *ch, int fd,
     if (set_nonblock(fd) != 0) {
         close(fd);
         ch->stats.rejects_other++;
+        e7_trace(ch, "reject_other", "", "", "set_nonblock failed on accept");
         return -1;
     }
     s = session_alloc(ch);
     if (!s) {
         close(fd);
         ch->stats.rejects_capacity++;
+        e7_trace(ch, "reject_capacity", "", "",
+                 "session table full (max_sessions=%u)", ch->max_sessions);
         return -1;
     }
     s->fd = fd;
     s->state = EDGE_E7_SESS_ACCEPTED;
     s->accepted_ms = mono_now_ms();
+    s->last_nc_state = -1;
     peer_to_str(peer, peer_len, s->peer, sizeof(s->peer));
     ch->stats.accepts++;
+    e7_trace(ch, "accepted", "", s->peer,
+             "TCP accept (transport=%s)",
+             (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport))
+                 ? "ssh"
+                 : ((ch->cfg && e7_transport_is_auto(ch->cfg->e7_transport))
+                        ? "auto"
+                        : "raw"));
     return 0;
 }
 
@@ -1917,10 +3719,18 @@ int edge_e7_callhome_status_json(const edge_e7_callhome_t *ch, char *buf,
         "\"e7_commands_err\":%llu,"
         "\"e7_rejects\":%llu,"
         "\"e7_unconfigured\":%llu,"
+        "\"e7_rejects_bad_identity\":%llu,"
+        "\"e7_rejects_disabled\":%llu,"
+        "\"e7_rejects_capacity\":%llu,"
+        "\"e7_rejects_other\":%llu,"
+        "\"e7_sessions_opened\":%llu,"
         "\"e7_rss_estimate\":%zu,"
         "\"e7_subscriptions_ok\":%llu,"
         "\"max_sessions\":%u,"
-        "\"runtime_shelves\":%u"
+        "\"runtime_shelves\":%u,"
+        "\"transport\":\"%s\","
+        "\"listen\":\"%s:%u\","
+        "\"events_seq\":%llu"
         "}",
         edge_e7_callhome_enabled(ch) ? "true" : "false",
         (unsigned long long)st->accepts,
@@ -1937,10 +3747,160 @@ int edge_e7_callhome_status_json(const edge_e7_callhome_t *ch, char *buf,
         (unsigned long long)st->commands_err,
         (unsigned long long)stats_rejects_sum(st),
         (unsigned long long)st->rejects_not_allowlisted,
+        (unsigned long long)st->rejects_bad_identity,
+        (unsigned long long)st->rejects_disabled,
+        (unsigned long long)st->rejects_capacity,
+        (unsigned long long)st->rejects_other,
+        (unsigned long long)st->sessions_opened,
         rss_est,
         (unsigned long long)st->subscriptions_ok,
-        ch->max_sessions, ch->runtime_count);
+        ch->max_sessions, ch->runtime_count,
+        (ch->cfg && e7_transport_is_ssh(ch->cfg->e7_transport))
+            ? "ssh"
+            : ((ch->cfg && e7_transport_is_auto(ch->cfg->e7_transport)) ? "auto"
+                                                                        : "raw"),
+        ch->bound_host[0] ? ch->bound_host
+                          : (ch->cfg && ch->cfg->e7_listen_host[0]
+                                 ? ch->cfg->e7_listen_host
+                                 : "0.0.0.0"),
+        (unsigned)(ch->bound_port
+                       ? ch->bound_port
+                       : (ch->cfg && ch->cfg->e7_listen_port
+                              ? ch->cfg->e7_listen_port
+                              : 4334u)),
+        (unsigned long long)ch->trace_seq);
     return (n < 0 || (size_t)n >= buf_sz) ? -1 : n;
+}
+
+int edge_e7_callhome_events_json(const edge_e7_callhome_t *ch, uint64_t since_id,
+                                 char *buf, size_t buf_sz)
+{
+    size_t off = 0;
+    uint32_t i;
+    uint32_t n_live = 0;
+    int first;
+    int w;
+    char esc_stage[EDGE_E7_TRACE_STAGE_MAX * 2 + 4];
+    char esc_mac[EDGE_E7_MAC_MAX * 2 + 4];
+    char esc_peer[EDGE_E7_PEER_ADDR_MAX * 2 + 4];
+    char esc_detail[EDGE_E7_TRACE_DETAIL_MAX * 2 + 4];
+    uint64_t now;
+    const edge_e7_callhome_t *c = ch;
+
+    if (!buf || buf_sz < 64) {
+        return -1;
+    }
+    if (!c) {
+        w = snprintf(buf, buf_sz,
+                     "{\"v\":1,\"enabled\":false,\"error\":\"E7_UNAVAILABLE\","
+                     "\"sessions\":[],\"events\":[]}");
+        return (w < 0 || (size_t)w >= buf_sz) ? -1 : w;
+    }
+    now = mono_now_ms();
+
+    w = snprintf(
+        buf + off, buf_sz - off,
+        "{\"v\":1,\"enabled\":%s,\"transport\":\"%s\",\"listen\":\"%s:%u\","
+        "\"next_id\":%llu,\"since_id\":%llu,\"sessions\":[",
+        edge_e7_callhome_enabled(c) ? "true" : "false",
+        (c->cfg && e7_transport_is_ssh(c->cfg->e7_transport))
+            ? "ssh"
+            : ((c->cfg && e7_transport_is_auto(c->cfg->e7_transport)) ? "auto"
+                                                                      : "raw"),
+        c->bound_host[0]
+            ? c->bound_host
+            : (c->cfg && c->cfg->e7_listen_host[0] ? c->cfg->e7_listen_host
+                                                   : "0.0.0.0"),
+        (unsigned)(c->bound_port
+                       ? c->bound_port
+                       : (c->cfg && c->cfg->e7_listen_port
+                              ? c->cfg->e7_listen_port
+                              : 4334u)),
+        (unsigned long long)c->trace_seq, (unsigned long long)since_id);
+    if (w < 0 || (size_t)w >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)w;
+
+    first = 1;
+    for (i = 0; i < c->max_sessions; i++) {
+        const edge_e7_session_t *s = &c->sessions[i];
+        uint64_t age;
+        const char *mac;
+        if (s->state == EDGE_E7_SESS_EMPTY) {
+            continue;
+        }
+        n_live++;
+        age = (s->accepted_ms && now > s->accepted_ms) ? (now - s->accepted_ms)
+                                                       : 0;
+        mac = (s->identity.identity_ok && s->identity.mac[0]) ? s->identity.mac
+                                                              : "";
+        if (json_escape_str(mac, esc_mac, sizeof(esc_mac)) < 0 ||
+            json_escape_str(s->peer, esc_peer, sizeof(esc_peer)) < 0) {
+            return -1;
+        }
+        w = snprintf(buf + off, buf_sz - off,
+                     "%s{\"slot\":%u,\"state\":\"%s\",\"mac\":%s,\"peer\":%s,"
+                     "\"age_ms\":%llu,\"allowlisted\":%s,\"use_ssh\":%s}",
+                     first ? "" : ",", (unsigned)i,
+                     edge_e7_sess_state_name(s->state), esc_mac, esc_peer,
+                     (unsigned long long)age, s->allowlisted ? "true" : "false",
+                     s->use_ssh ? "true" : "false");
+        if (w < 0 || (size_t)w >= buf_sz - off) {
+            return -1;
+        }
+        off += (size_t)w;
+        first = 0;
+    }
+
+    w = snprintf(buf + off, buf_sz - off,
+                 "],\"live_sessions\":%u,\"events\":[", n_live);
+    if (w < 0 || (size_t)w >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)w;
+
+    /* Emit oldest→newest among retained ring entries with id > since_id. */
+    first = 1;
+    if (c->trace_count > 0) {
+        uint32_t start =
+            (c->trace_head + EDGE_E7_TRACE_CAP - c->trace_count) %
+            EDGE_E7_TRACE_CAP;
+        for (i = 0; i < c->trace_count; i++) {
+            const edge_e7_trace_ev_t *ev =
+                &c->trace[(start + i) % EDGE_E7_TRACE_CAP];
+            if (ev->id <= since_id) {
+                continue;
+            }
+            if (json_escape_str(ev->stage, esc_stage, sizeof(esc_stage)) < 0 ||
+                json_escape_str(ev->mac, esc_mac, sizeof(esc_mac)) < 0 ||
+                json_escape_str(ev->peer, esc_peer, sizeof(esc_peer)) < 0 ||
+                json_escape_str(ev->detail, esc_detail, sizeof(esc_detail)) <
+                    0) {
+                return -1;
+            }
+            w = snprintf(buf + off, buf_sz - off,
+                         "%s{\"id\":%llu,\"t_ms\":%llu,\"stage\":%s,\"mac\":%s,"
+                         "\"peer\":%s,\"detail\":%s}",
+                         first ? "" : ",", (unsigned long long)ev->id,
+                         (unsigned long long)ev->t_ms, esc_stage, esc_mac,
+                         esc_peer, esc_detail);
+            if (w < 0 || (size_t)w >= buf_sz - off) {
+                /* Truncate cleanly rather than fail the whole poll. */
+                break;
+            }
+            off += (size_t)w;
+            first = 0;
+        }
+    }
+
+    if (off + 3 > buf_sz) {
+        return -1;
+    }
+    buf[off++] = ']';
+    buf[off++] = '}';
+    buf[off] = '\0';
+    return (int)off;
 }
 
 static int append_shelf_obj(const edge_e7_callhome_t *ch,
@@ -1974,11 +3934,13 @@ static int append_shelf_obj(const edge_e7_callhome_t *ch,
     w = snprintf(buf + *off, buf_sz - *off,
                  "{\"mac\":\"%s\",\"label\":\"%s\",\"enabled\":%s,"
                  "\"from_yaml\":%s,\"session_state\":\"%s\","
-                 "\"serial\":\"%s\",\"model\":\"%s\",\"peer\":\"%s\"}",
+                 "\"serial\":\"%s\",\"model\":\"%s\",\"peer\":\"%s\","
+                 "\"probe_mode\":%u,\"probe\":\"%s\"}",
                  rs->mac, rs->label[0] ? rs->label : "",
                  rs->enabled ? "true" : "false",
                  rs->from_yaml ? "true" : "false", edge_e7_sess_state_name(st),
-                 serial, model, peer);
+                 serial, model, peer, (unsigned)rs->probe_mode,
+                 e7_probe_mode_name(rs->probe_mode));
     if (w < 0 || (size_t)w >= buf_sz - *off) {
         return -1;
     }
@@ -2122,6 +4084,7 @@ int edge_e7_callhome_allowlist_upsert(edge_e7_callhome_t *ch, const char *mac,
         }
         memcpy(rs->mac, norm, sizeof(rs->mac));
         rs->from_yaml = 0;
+        rs->probe_mode = EDGE_E7_PROBE_SILENT;
     }
     if (label) {
         snprintf(rs->label, sizeof(rs->label), "%s", label);

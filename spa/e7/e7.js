@@ -97,8 +97,10 @@
       await me();
       refreshStatus().catch(function () { /* ignore */ });
       refreshShelves().catch(function () { /* ignore */ });
+      startEventsPoll();
     } else {
       setBadge(false, "login failed");
+      stopEventsPoll();
     }
   }
 
@@ -106,8 +108,11 @@
 
   var STATUS_KEYS = [
     "enabled",
+    "transport",
+    "listen",
     "e7_accepts",
     "e7_sessions_open",
+    "e7_sessions_opened",
     "e7_sessions_error",
     "e7_notifications",
     "e7_state_puts",
@@ -120,11 +125,204 @@
     "e7_commands_err",
     "e7_rejects",
     "e7_unconfigured",
+    "e7_rejects_bad_identity",
+    "e7_rejects_disabled",
+    "e7_rejects_capacity",
+    "e7_rejects_other",
     "e7_rss_estimate",
     "e7_subscriptions_ok",
     "max_sessions",
-    "runtime_shelves"
+    "runtime_shelves",
+    "events_seq"
   ];
+
+  /* --- connection progress log --- */
+
+  var eventsSinceId = 0;
+  var eventsTimer = null;
+  var eventsPollMs = 1000;
+
+  function setEventsBadge(on, label) {
+    var b = $("eventsBadge");
+    if (!b) return;
+    b.textContent = label || (on ? "watching" : "log off");
+    b.className = "badge " + (on ? "ok" : "muted");
+  }
+
+  function formatAge(ms) {
+    if (ms == null || ms < 0) return "—";
+    if (ms < 1000) return ms + " ms";
+    if (ms < 60000) return (ms / 1000).toFixed(1) + " s";
+    return (ms / 60000).toFixed(1) + " min";
+  }
+
+  function sessionLabel(state) {
+    var s = String(state || "empty").toLowerCase();
+    if (s === "empty" || s === "") return "Inactive";
+    if (s === "open") return "Open (active)";
+    if (s === "accepted") return "Accepted (TCP)";
+    if (s === "identity") return "Identity preamble";
+    if (s === "ssh") return "SSH handshake";
+    if (s === "hello") return "NETCONF hello";
+    if (s === "error") return "Error";
+    if (s === "closing") return "Closing";
+    return state;
+  }
+
+  function sessionClass(state) {
+    var s = String(state || "").toLowerCase();
+    if (s === "open") return "sess-open";
+    if (s === "error" || s === "closing") return "sess-bad";
+    if (s === "ssh" || s === "hello" || s === "identity" || s === "accepted") {
+      return "sess-warn";
+    }
+    return "";
+  }
+
+  function stageClass(stage) {
+    var s = String(stage || "");
+    if (/reject|fail|timeout|error|overflow|bad|closed/.test(s)) return "sess-bad";
+    if (/open|subscribed|allowlist_ok|identity_ok/.test(s)) return "sess-open";
+    return "sess-warn";
+  }
+
+  function renderLiveSessions(list) {
+    var tbody = $("liveSessBody");
+    if (!tbody) return;
+    if (!list || !list.length) {
+      tbody.innerHTML =
+        "<tr><td colspan=\"6\" class=\"muted-cell\">No in-flight sessions " +
+        "(nothing currently past TCP accept)</td></tr>";
+      return;
+    }
+    tbody.innerHTML = list
+      .map(function (s) {
+        var st = s.state || "";
+        return (
+          "<tr>" +
+          "<td class=\"" +
+          sessionClass(st) +
+          "\">" +
+          esc(sessionLabel(st)) +
+          " <code>" +
+          esc(st) +
+          "</code></td>" +
+          "<td><code>" +
+          esc(s.mac || "—") +
+          "</code></td>" +
+          "<td><code>" +
+          esc(s.peer || "") +
+          "</code></td>" +
+          "<td>" +
+          esc(formatAge(s.age_ms)) +
+          "</td>" +
+          "<td>" +
+          (s.use_ssh ? "yes" : "no") +
+          "</td>" +
+          "<td>" +
+          (s.allowlisted ? "yes" : "no") +
+          "</td>" +
+          "</tr>"
+        );
+      })
+      .join("");
+  }
+
+  function appendEventLines(events) {
+    if (!events || !events.length) return;
+    var el = $("eventsLog");
+    if (!el) return;
+    var i;
+    for (i = 0; i < events.length; i++) {
+      var e = events[i];
+      var line =
+        "#" +
+        (e.id != null ? e.id : "?") +
+        "  " +
+        String(e.stage || "") +
+        (e.mac ? "  mac=" + e.mac : "") +
+        (e.peer ? "  peer=" + e.peer : "") +
+        (e.detail ? "  — " + e.detail : "");
+      var t = new Date().toISOString().slice(11, 19);
+      el.textContent += "[" + t + "] " + line + "\n";
+      if (e.id != null && e.id > eventsSinceId) {
+        eventsSinceId = e.id;
+      }
+    }
+    el.scrollTop = el.scrollHeight;
+  }
+
+  async function refreshEvents(forceFull) {
+    var url = "/api/v1/e7/events";
+    if (forceFull) {
+      eventsSinceId = 0;
+      if ($("eventsLog")) $("eventsLog").textContent = "";
+    }
+    if (!forceFull && eventsSinceId > 0) {
+      url += "?since=" + eventsSinceId;
+    }
+    var r = await fetchText(url);
+    if (!r.ok) {
+      setEventsBadge(false, "HTTP " + r.status);
+      if ($("eventsMeta")) {
+        $("eventsMeta").textContent = "events poll failed HTTP " + r.status;
+      }
+      return;
+    }
+    var j;
+    try {
+      j = JSON.parse(r.body);
+    } catch (err) {
+      setEventsBadge(false, "parse err");
+      return;
+    }
+    renderLiveSessions(j.sessions || []);
+    appendEventLines(j.events || []);
+    if (j.next_id != null && j.next_id > eventsSinceId && !(j.events && j.events.length)) {
+      /* keep cursor even when no new events in this slice */
+      eventsSinceId = j.next_id;
+    }
+    setEventsBadge(true, "watching");
+    if ($("eventsMeta")) {
+      $("eventsMeta").textContent =
+        (j.transport || "?") +
+        " @ " +
+        (j.listen || "?") +
+        " · live=" +
+        (j.live_sessions != null ? j.live_sessions : (j.sessions || []).length) +
+        " · seq=" +
+        (j.next_id != null ? j.next_id : eventsSinceId);
+    }
+  }
+
+  function stopEventsPoll() {
+    if (eventsTimer) {
+      clearInterval(eventsTimer);
+      eventsTimer = null;
+    }
+    setEventsBadge(false, "log off");
+  }
+
+  function startEventsPoll() {
+    stopEventsPoll();
+    if ($("eventsAuto") && !$("eventsAuto").checked) {
+      setEventsBadge(false, "paused");
+      return;
+    }
+    refreshEvents(false).catch(function () { /* ignore */ });
+    eventsTimer = setInterval(function () {
+      if ($("eventsAuto") && !$("eventsAuto").checked) return;
+      refreshEvents(false).catch(function () { /* ignore */ });
+      /* Keep shelf session column fresh while watching */
+      refreshShelves().catch(function () { /* ignore */ });
+    }, eventsPollMs);
+    setEventsBadge(true, "watching");
+  }
+
+  function clearEventsView() {
+    if ($("eventsLog")) $("eventsLog").textContent = "";
+    /* keep server cursor so we only show new events after clear */
+  }
 
   async function refreshStatus() {
     var r = await fetchText("/api/v1/e7/status");
@@ -172,6 +370,9 @@
 
   function shelfRowHtml(s) {
     var mac = s.mac || "";
+    var st = s.session_state || "empty";
+    var stLabel = sessionLabel(st);
+    var stCls = sessionClass(st);
     return (
       "<tr data-mac=\"" +
       esc(mac) +
@@ -188,8 +389,17 @@
       "<td>" +
       (s.enabled ? "<span class=\"badge ok\">yes</span>" : "<span class=\"badge muted\">no</span>") +
       "</td>" +
-      "<td>" +
-      esc(s.session_state || "") +
+      "<td class=\"" +
+      stCls +
+      "\" title=\"" +
+      esc(st) +
+      (s.peer ? " peer=" + s.peer : "") +
+      "\">" +
+      esc(stLabel) +
+      (st !== "empty" && st !== ""
+        ? " <code>" + esc(st) + "</code>"
+        : "") +
+      (s.peer ? "<br/><code class=\"key-cell\">" + esc(s.peer) + "</code>" : "") +
       "</td>" +
       "<td>" +
       esc(s.serial || "") +
@@ -669,11 +879,27 @@
   if ($("btnCmdSubmit")) $("btnCmdSubmit").addEventListener("click", submitCommand);
   if ($("btnCmdPoll")) $("btnCmdPoll").addEventListener("click", pollCommand);
   if ($("shelvesBody")) $("shelvesBody").addEventListener("click", onShelvesClick);
+  if ($("btnEventsRefresh")) {
+    $("btnEventsRefresh").addEventListener("click", function () {
+      refreshEvents(true).catch(function () { /* ignore */ });
+    });
+  }
+  if ($("btnEventsClear")) {
+    $("btnEventsClear").addEventListener("click", clearEventsView);
+  }
+  if ($("eventsAuto")) {
+    $("eventsAuto").addEventListener("change", function () {
+      if ($("eventsAuto").checked) startEventsPoll();
+      else stopEventsPoll();
+    });
+  }
 
   me()
     .then(function (ok) {
       if (ok) {
-        return Promise.all([refreshStatus(), refreshShelves()]);
+        return Promise.all([refreshStatus(), refreshShelves()]).then(function () {
+          startEventsPoll();
+        });
       }
     })
     .catch(function () {

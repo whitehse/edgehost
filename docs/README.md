@@ -19,7 +19,7 @@
 | [prometheus.md](guides/prometheus.md) | `/health` JSON + scrape notes (P1.15) |
 | [lab-e2e.md](guides/lab-e2e.md) | Lab auth + SPA console + packages E2E |
 | [status-map.md](guides/status-map.md) | Login + WebGPU status map (libwebmap demo) |
-| [e7-callhome.md](guides/e7-callhome.md) | E7 Call Home lab (YAML, 4334, SPA `/e7/`, REST) |
+| [e7-callhome.md](guides/e7-callhome.md) | E7 Call Home lab (YAML, 4334, SPA `/e7/`, REST) · combined script `run-status-map-e7.sh` |
 
 ## Designs
 

@@ -178,10 +178,11 @@ int edge_config_validate(const edge_config_t *c, char *err, size_t err_len)
         return -1;
     }
     if (strcmp(c->e7_transport, "raw") != 0 &&
-        strcmp(c->e7_transport, "ssh") != 0) {
+        strcmp(c->e7_transport, "ssh") != 0 &&
+        strcmp(c->e7_transport, "auto") != 0) {
         if (err && err_len) {
             snprintf(err, err_len,
-                     "plugins.e7_callhome.transport invalid (raw|ssh)");
+                     "plugins.e7_callhome.transport invalid (raw|ssh|auto)");
         }
         return -1;
     }

@@ -18,3 +18,5 @@ __pycache__/
 /spa/map/dynamic
 /spa/map/splice_diagrams
 *.edgehost.log
+# Runtime lab data (E7 allowlist durability from run-status-map-e7.sh)
+/var/

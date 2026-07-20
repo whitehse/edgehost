@@ -556,9 +556,9 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
     if (strcmp(key, "plugins.e7_callhome.allowlist_path") == 0) {
         if (copy_str(c->e7_allowlist_path, sizeof(c->e7_allowlist_path), val) !=
             0) {
-            return -1;
+            FAIL("too long");
         }
-        return 1;
+        return 0;
     }
     if (strcmp(key, "plugins.e7_callhome.max_sessions") == 0) {
         if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {

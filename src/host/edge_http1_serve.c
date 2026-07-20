@@ -10,13 +10,15 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "http1.h"
 #include "protocol_events.h"
 
 #define EDGE_HTTP_ACC_MAX (EDGE_STATE_VALUE_MAX + 4096)
-#define EDGE_HTTP_E7_JSON_MAX 16384
+/* Status + events ring (live sessions + progress log) need headroom. */
+#define EDGE_HTTP_E7_JSON_MAX 32768
 
 struct edge_http1_serve {
     http1_ctx_t         *h1;
@@ -468,8 +470,16 @@ static int dispatch_lab_login(edge_http1_serve_t *s, edge_metrics_t *metrics,
         note_response(metrics, 401);
         return 1;
     }
-    if (edge_auth_session_issue(s->auth, "lab", EDGE_ROLE_EMPLOYEE, cookie_val,
-                                sizeof(cookie_val), &issued) != 0) {
+    /*
+     * Lab single-password login is the ops console for this process: grant
+     * employee + employee_admin so E7 allowlist mutations (EDGE_RES_E7_ADMIN)
+     * work from /e7/ without a separate proxy role ladder. Production uses
+     * proxy_headers / OIDC to split employee vs employee_admin.
+     */
+    if (edge_auth_session_issue(
+            s->auth, "lab",
+            (uint32_t)(EDGE_ROLE_EMPLOYEE | EDGE_ROLE_EMPLOYEE_ADMIN),
+            cookie_val, sizeof(cookie_val), &issued) != 0) {
         if (build_response(out, out_cap, 500, "Internal Server Error",
                            "application/json", "{\"error\":\"SESSION\"}", 19,
                            out_len) != 0) {
@@ -487,7 +497,8 @@ static int dispatch_lab_login(edge_http1_serve_t *s, edge_metrics_t *metrics,
         return -1;
     }
     n = snprintf(json, sizeof(json),
-                 "{\"ok\":true,\"sub\":\"%s\",\"roles\":[\"employee\"],\"exp\":%lld}",
+                 "{\"ok\":true,\"sub\":\"%s\",\"roles\":[\"employee\","
+                 "\"employee_admin\"],\"exp\":%lld}",
                  issued.sub, (long long)issued.exp);
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return -1;
@@ -773,7 +784,7 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
  * Parse /api/v1/e7 path into components.
  * @return 1 if e7 path, 0 otherwise.
  * kinds: 0=status, 1=shelves list, 2=shelf, 3=disconnect, 4=commands,
- *        5=command get, 6=onts
+ *        5=command get, 6=onts, 7=events (connection progress log)
  */
 static int path_is_e7(const char *path, int *kind, char *mac_out, size_t mac_sz,
                       char *cmd_out, size_t cmd_sz, char *cursor_out,
@@ -822,6 +833,12 @@ static int path_is_e7(const char *path, int *kind, char *mac_out, size_t mac_sz,
     if (strcmp(p, "status") == 0) {
         if (kind) {
             *kind = 0;
+        }
+        return 1;
+    }
+    if (strcmp(p, "events") == 0) {
+        if (kind) {
+            *kind = 7; /* connection progress log */
         }
         return 1;
     }
@@ -889,11 +906,14 @@ static int path_is_e7(const char *path, int *kind, char *mac_out, size_t mac_sz,
 }
 
 static void e7_parse_query(const char *path, char *cursor_out, size_t cursor_sz,
-                           size_t *limit_out)
+                           size_t *limit_out, uint64_t *since_id_out)
 {
     const char *q;
     if (limit_out) {
         *limit_out = 0;
+    }
+    if (since_id_out) {
+        *since_id_out = 0;
     }
     if (cursor_out && cursor_sz) {
         cursor_out[0] = '\0';
@@ -920,6 +940,14 @@ static void e7_parse_query(const char *path, char *cursor_out, size_t cursor_sz,
             q += 6;
             if (limit_out) {
                 *limit_out = (size_t)strtoul(q, NULL, 10);
+            }
+            while (*q && *q != '&') {
+                q++;
+            }
+        } else if (strncmp(q, "since=", 6) == 0) {
+            q += 6;
+            if (since_id_out) {
+                *since_id_out = (uint64_t)strtoull(q, NULL, 10);
             }
             while (*q && *q != '&') {
                 q++;
@@ -1055,6 +1083,7 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
     char cmd_id[EDGE_E7_CMD_ID_MAX];
     char cursor[EDGE_STATE_KEY_MAX];
     size_t limit = 0;
+    uint64_t since_id = 0;
     edge_auth_resource_t res;
     int gate;
     char jbuf[EDGE_HTTP_E7_JSON_MAX];
@@ -1066,7 +1095,7 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
                     cursor, sizeof(cursor))) {
         return 0;
     }
-    e7_parse_query(s->path, cursor, sizeof(cursor), &limit);
+    e7_parse_query(s->path, cursor, sizeof(cursor), &limit, &since_id);
 
     res = edge_auth_classify(s->method, s->path, 0);
     gate = require_rbac(s, res, NULL, NULL, metrics, out, out_cap, out_len);
@@ -1311,6 +1340,27 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
                 return -1;
             }
             note_response(metrics, 400);
+            return 1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* GET connection progress events + live sessions */
+    if (kind == 7 && strcmp(s->method, "GET") == 0) {
+        jn = edge_e7_callhome_events_json(s->e7, since_id, jbuf, sizeof(jbuf));
+        if (jn < 0) {
+            static const char body[] = "{\"error\":\"EVENTS_FAIL\"}";
+            if (build_response(out, out_cap, 500, "Internal Server Error",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 500);
             return 1;
         }
         if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,

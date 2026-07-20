@@ -25,6 +25,13 @@ cmake -B build -S . && cmake --build build && ctest --test-dir build --output-on
 # docs: docs/guides/status-map.md
 # browser: http://127.0.0.1:18080/  → login → /map/
 
+# status map + Calix E7 Call Home (map + /e7/ admin, Call Home 0.0.0.0:4334):
+./scripts/run-status-map-e7.sh
+# E7_HOST=0.0.0.0 E7_PORT=4334 ./scripts/run-status-map-e7.sh   # Call Home bind
+# EDGEHOST_HOST=127.0.0.1 EDGEHOST_PORT=18080                    # HTTP SPA bind
+# docs: docs/guides/status-map.md · docs/guides/e7-callhome.md
+# browser: /map/ status map · /e7/ shelves, sessions, ONTs, commands
+
 # lab_password manual:
 #   EDGEHOST_LAB_PASSWORD + EDGEHOST_SESSION_HMAC
 #   ./build/edgehost --config config/edgehost.lab.yaml

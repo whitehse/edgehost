@@ -14,8 +14,8 @@
  * SIGHUP: edge_e7_callhome_apply_config with reload_policy merge|replace_all.
  *
  * Requires EDGEHOST_HAVE_LIBNETCONF (sibling libnetconf). Without it, create
- * returns NULL. transport=ssh requires EDGEHOST_E7_SSH_AVAILABLE (libassh
- * linked at configure time; PR-8).
+ * returns NULL. transport=ssh requires EDGEHOST_E7_SSH_AVAILABLE
+ * (libchssh preferred, or legacy libnetconf+libassh).
  */
 #ifndef EDGE_E7_CALLHOME_H
 #define EDGE_E7_CALLHOME_H
@@ -38,13 +38,16 @@ extern "C" {
 #endif
 
 /**
- * SSH Call Home (RFC 8071 + libnetconf libassh). Set to 1 by CMake when
- * libnetconf and libassh are both found. When 0, transport: ssh create/bind
- * fail with a clear stderr message. Prefer #if EDGEHOST_E7_SSH_AVAILABLE
- * over hardcoding 0.
+ * SSH Call Home available (CMake). Prefer libchssh (EDGEHOST_E7_CHSSH_AVAILABLE);
+ * legacy path is libnetconf+libassh. When 0, transport: ssh create/bind fails.
  */
 #ifndef EDGEHOST_E7_SSH_AVAILABLE
 #define EDGEHOST_E7_SSH_AVAILABLE 0
+#endif
+
+/** 1 when sibling libchssh is linked (preferred SSH Call Home transport). */
+#ifndef EDGEHOST_E7_CHSSH_AVAILABLE
+#define EDGEHOST_E7_CHSSH_AVAILABLE 0
 #endif
 
 /** Session table capacity (design: ~150, default max_sessions 160). */
@@ -65,12 +68,19 @@ extern "C" {
 #define EDGE_E7_CMD_TABLE_MAX 64
 /** Runtime allowlist capacity (YAML seed + REST upserts). */
 #define EDGE_E7_RUNTIME_SHELVES_MAX EDGE_CONFIG_E7_SHELVES_MAX
+/** In-memory connection progress ring (GET /api/v1/e7/events). */
+#define EDGE_E7_TRACE_CAP 64
+/** Stage token max (e.g. "identity_ok", "ssh_timeout"). */
+#define EDGE_E7_TRACE_STAGE_MAX 32
+/** Free-form detail max (peer notes, hex dumps, reject reason). */
+#define EDGE_E7_TRACE_DETAIL_MAX 200
 
 typedef enum {
     EDGE_E7_SESS_EMPTY = 0,
     EDGE_E7_SESS_ACCEPTED,
     EDGE_E7_SESS_IDENTITY, /* reading Calix identity preamble */
-    EDGE_E7_SESS_SSH,      /* production only; unused in raw lab */
+    EDGE_E7_SESS_POST_ID,  /* identity ok; choosing/waiting transport */
+    EDGE_E7_SESS_SSH,      /* SSH Call Home handshake (NMS = SSH server) */
     EDGE_E7_SESS_HELLO,    /* NETCONF hellos in progress */
     EDGE_E7_SESS_OPEN,     /* netconf SESSION_OPEN */
     EDGE_E7_SESS_ERROR,
@@ -106,6 +116,18 @@ typedef struct {
     char label[EDGE_CONFIG_E7_SHELF_ID_MAX];
     int  enabled; /* 1 allow subscribe; 0 present but disabled */
     int  from_yaml;
+    /**
+     * Post-identity probe strategy for the next dial (raw Call Home).
+     * Advanced on peer_eof before SESSION_OPEN so successive E7 retries
+     * explore silent / identity-ACK / client-hello / server-hello.
+     */
+    uint8_t probe_mode;
+    /**
+     * transport:ssh field ladder start phase for the next dial
+     * (EDGE_E7_SSH_PHASE_*). Advanced when peer closes during hold/ACK so
+     * later redials skip failed identity ACKs and still try delayed SSH.
+     */
+    uint8_t ssh_field_next;
 } edge_e7_runtime_shelf_t;
 
 typedef struct edge_e7_callhome edge_e7_callhome_t;
@@ -224,6 +246,16 @@ size_t edge_e7_session_rss_estimate(void);
  */
 int edge_e7_callhome_status_json(const edge_e7_callhome_t *ch, char *buf,
                                  size_t buf_sz);
+
+/**
+ * Build GET /api/v1/e7/events JSON: live in-flight sessions + ring of
+ * connection progress events (accept → identity → ssh → hello → open / reject).
+ *
+ * @p since_id: only include events with id > since_id (0 = all retained).
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_e7_callhome_events_json(const edge_e7_callhome_t *ch, uint64_t since_id,
+                                 char *buf, size_t buf_sz);
 
 /**
  * Build GET /api/v1/e7/shelves JSON (config allowlist + live session).

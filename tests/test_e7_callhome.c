@@ -198,7 +198,8 @@ static void *lab_peer_thread(void *arg)
         return NULL;
     }
 
-    for (i = 0; i < 200 && !open; i++) {
+    /* Allow silent-probe cascade (~1.5s) before NMS may send NETCONF hello. */
+    for (i = 0; i < 500 && !open; i++) {
         ssize_t rn;
         netconf_event_t ev;
 

@@ -49,7 +49,11 @@
       <li><strong>Packages</strong> — <code>/packages/</code> (auth-gated catalog + fixtures)</li>
       <li><strong>State / WS</strong> — <code>/api/v1/state/*</code>, <code>/api/v1/stream</code></li>
     </ul>
-    <p class="hint">Start with <code>./scripts/run-status-map.sh</code> (links demo tiles, raises file size limits).</p>
+    <p class="hint">
+      Status map only: <code>./scripts/run-status-map.sh</code>.
+      Map + E7 Call Home: <code>./scripts/run-status-map-e7.sh</code>
+      (links demo tiles, enables Call Home on :4334, SPA at <code>/e7/</code>).
+    </p>
   </section>
 
   <script src="/app.js"></script>

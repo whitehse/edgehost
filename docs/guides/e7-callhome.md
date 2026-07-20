@@ -9,7 +9,9 @@ REST under **`/api/v1/e7/`**.
 |-----|------|
 | [Design](../designs/e7-netconf-callhome.md) | Full architecture, K-decisions, PR plan |
 | [ADR-018](../decisions/018-e7-netconf-callhome.md) | Accepted lab decisions summary |
-| `config/edgehost.e7-lab.yaml` | **Lab YAML** — enable this file |
+| `config/edgehost.e7-lab.yaml` | **Lab YAML** (E7 only) |
+| `config/edgehost.status-map-e7.yaml` | **Map + E7** combined lab YAML |
+| `./scripts/run-status-map-e7.sh` | Start script: map tiles + E7 SPA |
 
 ---
 
@@ -75,6 +77,26 @@ Default `config/edgehost.lab.yaml` / `edgehost.example.yaml` keep
 
 ## Start the server
 
+### Recommended: status map + E7 admin
+
+One process with the **WebGPU status map** and **E7 Call Home** screens:
+
+```bash
+cd ~/edgehost
+./scripts/run-status-map-e7.sh
+# config template: config/edgehost.status-map-e7.yaml
+# runtime YAML:    var/edgehost.status-map-e7.runtime.yaml (E7_HOST / E7_PORT applied)
+# links libwebmap demo tiles, lab auth env, allowlist at ./var/e7_allowlist.txt
+#
+# Call Home bind (default all interfaces):
+#   E7_HOST=0.0.0.0 E7_PORT=4334 ./scripts/run-status-map-e7.sh
+# Bind only one NIC:
+#   E7_HOST=192.0.2.10 ./scripts/run-status-map-e7.sh
+# HTTP SPA still defaults to 127.0.0.1 (EDGEHOST_HOST / EDGEHOST_PORT).
+```
+
+### E7-only lab (no map asset linking)
+
 ```bash
 cd ~/edgehost
 export EDGEHOST_LAB_PASSWORD=lab
@@ -92,10 +114,21 @@ Browser:
 
 | URL | Purpose |
 |-----|---------|
-| http://127.0.0.1:18080/ | Company home (link to E7) |
-| http://127.0.0.1:18080/e7/ | **E7 Call Home SPA** (status, shelves table, ONTs, commands) |
+| http://127.0.0.1:18080/ | Company home (links to map + E7) |
+| http://127.0.0.1:18080/map/ | **Status map** (WebGPU; `run-status-map-e7.sh`) |
+| http://127.0.0.1:18080/e7/ | **E7 Call Home SPA** (status, **connection progress log**, shelves, ONTs, commands) |
 | http://127.0.0.1:18080/lab/ | Generic lab console |
 | http://127.0.0.1:18080/health | Process health JSON (no auth) |
+
+**Connection progress (debug Inactive shelves):** while logged in, the SPA polls
+`GET /api/v1/e7/events?since=<id>` and shows:
+
+- **In-flight sessions** — TCP accepted peers mid identity / SSH / hello
+- **Event log** — ring of stages: `accepted` → `identity` → `identity_ok` →
+  `allowlist_ok` | `reject_unconfigured` → `ssh` → `nc_state` → `hello` →
+  `open` → `subscribe` / timeouts / rejects
+
+Shelf table **Session** column maps `empty` → **Inactive** until NETCONF opens.
 
 Password: `lab` (lab-login cookie).
 
@@ -139,12 +172,14 @@ apply paths and SPA/REST until redacted field samples enable `calix.e7.*`.
 ## REST table (`/api/v1/e7/*`)
 
 Auth: lab session cookie. **employee+** for reads; **employee_admin** for
-mutations (lab password session typically grants admin in lab mode — check
+mutations. Lab password login (`POST /auth/lab-login`) grants both
+`employee` and `employee_admin` so the `/e7/` SPA can upsert shelves (check
 `/auth/me`).
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/v1/e7/status` | Call Home metrics (accepts, sessions, rejects, coalesce, …) |
+| `GET` | `/api/v1/e7/events?since=` | Connection progress ring + in-flight sessions (SPA log) |
 | `GET` | `/api/v1/e7/shelves` | Allowlist + live session summary |
 | `GET` | `/api/v1/e7/shelves/{mac}` | Detail (identity + session) |
 | `PUT` | `/api/v1/e7/shelves/{mac}` | Runtime allowlist upsert (file if `allowlist_path`) |
@@ -179,7 +214,8 @@ Static under `spa/e7/`. Features:
 - **Allowlist durability** banner (`allowlist_path` file or YAML seed;
   updated)
 - Status metrics table (`GET /api/v1/e7/status`)
-- Shelves table (MAC, label, enabled, session, serial/model)
+- **Connection progress** log + in-flight sessions (`GET /api/v1/e7/events`)
+- Shelves table (MAC, label, enabled, session, serial/model) — `empty` shown as **Inactive**
 - Upsert / disconnect / delete
 - ONT list + command placeholder
 

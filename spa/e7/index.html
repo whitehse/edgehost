@@ -29,6 +29,7 @@
     <div class="row">
       <button type="button" id="btnLogin">Login</button>
       <button type="button" id="btnMe">GET /auth/me</button>
+      <a class="btn secondary" href="/map/">Status map</a>
       <a class="btn secondary" href="/lab/">Lab console</a>
       <a class="btn secondary" href="/">Home</a>
     </div>
@@ -48,6 +49,46 @@
       </table>
     </div>
     <pre id="statusOut" class="compact hidden"></pre>
+  </section>
+
+  <section class="card" id="connLogCard">
+    <h2>Connection progress</h2>
+    <p class="hint" style="margin:0 0 0.5rem">
+      Live Call Home path: TCP accept → Calix identity (MAC) → allowlist →
+      SSH (sysadmin) → NETCONF hello → open → subscription.
+      Polls <code>GET /api/v1/e7/events?since=…</code> every second while logged in.
+      Shelves that never leave <strong>Inactive</strong> almost always fail in this log
+      (wrong MAC, disabled, identity timeout, SSH auth, etc.).
+    </p>
+    <div class="row" style="margin-top:0.35rem">
+      <button type="button" id="btnEventsRefresh">Refresh now</button>
+      <button type="button" id="btnEventsClear" class="ghost">Clear log view</button>
+      <label class="check-label" style="margin:0">
+        <input id="eventsAuto" type="checkbox" checked/> Auto-refresh
+      </label>
+      <span id="eventsBadge" class="badge muted">log off</span>
+      <span id="eventsMeta" class="hint" style="margin:0"></span>
+    </div>
+    <h3 class="subhead">In-flight sessions</h3>
+    <div class="table-wrap">
+      <table class="data" id="liveSessTable">
+        <thead>
+          <tr>
+            <th>State</th>
+            <th>MAC</th>
+            <th>Peer</th>
+            <th>Age</th>
+            <th>SSH</th>
+            <th>Allow</th>
+          </tr>
+        </thead>
+        <tbody id="liveSessBody">
+          <tr><td colspan="6" class="muted-cell">No in-flight sessions</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3 class="subhead">Event log</h3>
+    <pre id="eventsLog" class="log events-log" aria-live="polite"></pre>
   </section>
 
   <section class="card">

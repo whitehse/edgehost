@@ -7,10 +7,10 @@
 #   export EDGEHOST_SESSION_HMAC='dev-hmac-key-32-bytes-minimum!!'
 #   ./build/edgehost --config config/edgehost.e7-lab.yaml --host 127.0.0.1 --port 18080
 #
-# Call Home (raw lab): identity preamble (MAC) → NETCONF CLIENT hello → OPEN →
-# create-subscription → lab.v1 apply → coalesced STATE_CHANGED.
-# SSH lab (when EDGEHOST_E7_SSH_AVAILABLE=1): set transport: ssh + ssh_password
-# (identity still raw TCP before SSH; NMS is SSH server / NETCONF client).
+# Call Home (SSH lab): identity preamble (MAC) → SSH (sysadmin/sysadmin) →
+# NETCONF CLIENT hello → OPEN → create-subscription → lab.v1 apply →
+# coalesced STATE_CHANGED. Requires EDGEHOST_E7_SSH_AVAILABLE=1 (libassh).
+# Identity preamble is still plain TCP before SSH; NMS is SSH server / NETCONF client.
 # SPA: http://127.0.0.1:18080/e7/  REST: /api/v1/e7/*
 # Security: never use 0.0.0.0 + transport raw without lab_insecure_raw: true.
 
@@ -72,13 +72,10 @@ plugins:
     enabled: true
     listen_host: 127.0.0.1
     listen_port: 4334
-    transport: raw
-    # SSH lab (requires libassh + libnetconf HAVE_LIBASSH):
-    # transport: ssh
-    # ssh_password: lab
-    # ssh_username: netconf          # optional expected user
-    # host_key_path: ""              # empty = ephemeral ed25519
-    # ssh_allow_none_auth: false
+    # After cleartext identity: NMS is SSH *client* (E7 is SSH server).
+    transport: ssh
+    ssh_username: sysadmin
+    ssh_password: sysadmin
     lab_insecure_raw: false
     reload_policy: merge
     auto_subscribe_unknown: false

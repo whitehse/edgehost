@@ -10,6 +10,16 @@ cd ~/edgehost
 ./scripts/run-status-map.sh
 ```
 
+**Map + Calix E7 Call Home** (same map, plus configure/monitor SPA and
+Call Home listener — default **0.0.0.0:4334**):
+
+```bash
+./scripts/run-status-map-e7.sh
+# E7_HOST=0.0.0.0 E7_PORT=4334 ./scripts/run-status-map-e7.sh
+# config: config/edgehost.status-map-e7.yaml → var/…runtime.yaml
+# E7 guide: docs/guides/e7-callhome.md
+```
+
 Browser (WebGPU required — Chrome/Edge recommended):
 
 1. Open `http://127.0.0.1:18080/`
@@ -21,6 +31,7 @@ Also:
 | URL | Purpose |
 |-----|---------|
 | `/map/` | Status map (session required in UI) |
+| `/e7/` | E7 Call Home configure + monitor (status-map-e7 script) |
 | `/lab/` | Phase-1 API console (health, state, WS, packages) |
 | `/health` | Process metrics JSON (no auth) |
 
