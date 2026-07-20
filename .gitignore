@@ -17,6 +17,11 @@ __pycache__/
 /spa/map/weather
 /spa/map/dynamic
 /spa/map/splice_diagrams
+# Linked by run-status-map-junos.sh / run-explain.sh from ~/libanim (local paths)
+/spa/explain/fixtures/
+/spa/explain/player/demo.js
+/spa/explain/player/index.html
+/spa/explain/templates/two_port_tap.tmpl
 *.edgehost.log
 # Runtime lab data (E7 allowlist durability from run-status-map-e7.sh)
 /var/
