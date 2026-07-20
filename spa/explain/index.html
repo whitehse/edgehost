@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>edgehost — fiber explain</title>
+  <link rel="stylesheet" href="/app.css"/>
+  <link rel="stylesheet" href="./player/demo.css"/>
+  <style>
+    .explain-layout { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; }
+    @media (max-width: 900px) { .explain-layout { grid-template-columns: 1fr; } }
+    #auth-gate { max-width: 28rem; margin: 2rem auto; }
+    .hidden { display: none !important; }
+    #wrap.hidden { display: none !important; }
+  </style>
+</head>
+<body class="home">
+  <header id="topbar" class="hidden">
+    <h1>Fiber explain</h1>
+    <span id="userBadge" class="badge muted"></span>
+    <nav class="row" style="margin-left:auto;gap:.5rem">
+      <a class="btn secondary" href="/">Home</a>
+      <a class="btn secondary" href="/map/">Map</a>
+      <a class="btn secondary" href="/e7/">E7</a>
+    </nav>
+  </header>
+
+  <section id="auth-gate" class="card">
+    <h2>Employee sign-in</h2>
+    <p class="hint">Lab password required to open interactive fiber explainers.</p>
+    <label>Password
+      <input id="labPw" type="password" value="lab" autocomplete="current-password"/>
+    </label>
+    <div class="row">
+      <button type="button" id="btnLogin">Log in</button>
+    </div>
+    <pre id="gateOut" class="compact"></pre>
+  </section>
+
+  <div id="wrap" class="hidden">
+    <section class="card">
+      <h2>Template render (server + libanim)</h2>
+      <p class="hint">
+        POST <code>/api/v1/explain/render</code> fills a
+        <code>{{param}}</code> template and validates with
+        <code>anim_load_plan</code>. AI tools (libharness) should emit template id + params, not freeform C.
+      </p>
+      <div class="row">
+        <label>Template
+          <select id="tmplSelect"></select>
+        </label>
+        <button type="button" id="btnRender" class="primary">Fill &amp; play</button>
+      </div>
+      <label>Params (JSON object)
+        <textarea id="paramsJson" rows="8">{
+{
+  "olt_label": "OLT-A",
+  "splitter_label": "1:32",
+  "ont_label": "ONT-12",
+  "narr0": "Downstream light leaves OLT-A toward the splitter.",
+  "narr1": "Measured loss at the 1:32 exceeds design budget."
+}</textarea>
+      </label>
+      <pre id="apiOut" class="compact"></pre>
+    </section>
+
+    <section class="card explain-layout">
+      <div>
+        <div class="stage-stack">
+          <canvas id="stage" width="960" height="540"></canvas>
+          <canvas id="overlay" width="960" height="540"></canvas>
+        </div>
+        <div class="transport">
+          <button id="btnPlay" type="button">Play</button>
+          <button id="btnPause" type="button">Pause</button>
+          <button id="btnRestart" type="button">Restart</button>
+          <label class="seek">
+            <span>Seek</span>
+            <input id="seek" type="range" min="0" max="1000" value="0"/>
+          </label>
+          <span id="timeLabel" class="time">0 / 0 ms</span>
+        </div>
+        <p id="modeLabel" class="mode">Engine: …</p>
+      </div>
+      <div>
+        <h2>Narration</h2>
+        <div id="narration" class="narration" role="status">Sign in, pick a template, render.</div>
+        <p class="hint">
+          Player assets come from libanim demo (linked by
+          <code>scripts/run-explain.sh</code>).
+        </p>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+  <script type="module" src="./explain_boot.js"></script>
+</body>
+</html>

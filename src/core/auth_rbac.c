@@ -379,6 +379,7 @@ const char *edge_auth_resource_name(edge_auth_resource_t r)
     case EDGE_RES_OPENAI:       return "OPENAI";
     case EDGE_RES_E7_GET:       return "E7_GET";
     case EDGE_RES_E7_ADMIN:     return "E7_ADMIN";
+    case EDGE_RES_EXPLAIN:      return "EXPLAIN";
     default:                    return "NONE";
     }
 }
@@ -429,6 +430,7 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
         case EDGE_RES_OPENAI:
         case EDGE_RES_E7_GET:
         case EDGE_RES_E7_ADMIN:
+        case EDGE_RES_EXPLAIN:
             return EDGE_AUTH_ALLOW;
         default:
             return EDGE_AUTH_DENY;
@@ -444,6 +446,7 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
         case EDGE_RES_PACKAGES:
         case EDGE_RES_OPENAI:
         case EDGE_RES_E7_GET:
+        case EDGE_RES_EXPLAIN:
             return EDGE_AUTH_ALLOW;
         case EDGE_RES_E7_ADMIN:
             return EDGE_AUTH_DENY;
@@ -869,6 +872,13 @@ edge_auth_resource_t edge_auth_classify(const char *method, const char *path,
         if (strcmp(method, "PUT") == 0 || strcmp(method, "DELETE") == 0 ||
             strcmp(method, "POST") == 0) {
             return EDGE_RES_E7_ADMIN;
+        }
+    }
+    /* Fiber explain: /api/v1/explain and /api/v1/explain/... */
+    if (strncmp(path, "/api/v1/explain", 15) == 0 &&
+        (path[15] == '\0' || path[15] == '/' || path[15] == '?')) {
+        if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0) {
+            return EDGE_RES_EXPLAIN;
         }
     }
     return EDGE_RES_NONE;

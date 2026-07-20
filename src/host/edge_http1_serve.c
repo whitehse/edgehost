@@ -5,6 +5,7 @@
 
 #include "edge_http1_serve.h"
 
+#include "edge_explain.h"
 #include "edge_state_notify.h"
 #include "edge_static.h"
 
@@ -1117,6 +1118,111 @@ static void e7_parse_shelf_body(const char *body, size_t blen, char *label_out,
     }
 }
 
+static int explain_templates_root(const edge_http1_serve_t *s, char *path,
+                                  size_t path_sz)
+{
+    if (!s || !s->roots.spa_root || !s->roots.spa_root[0] || !path ||
+        path_sz < 16) {
+        return -1;
+    }
+    if (snprintf(path, path_sz, "%s/explain/templates", s->roots.spa_root) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int path_is_explain_templates(const char *path)
+{
+    return path &&
+           (strcmp(path, "/api/v1/explain/templates") == 0 ||
+            strncmp(path, "/api/v1/explain/templates?", 26) == 0);
+}
+
+static int path_is_explain_render(const char *path)
+{
+    return path &&
+           (strcmp(path, "/api/v1/explain/render") == 0 ||
+            strncmp(path, "/api/v1/explain/render?", 23) == 0);
+}
+
+static int dispatch_explain(edge_http1_serve_t *s, edge_metrics_t *metrics,
+                            char *out, size_t out_cap, size_t *out_len)
+{
+    int gate;
+    char root[512];
+    char jbuf[EDGE_HTTP_E7_JSON_MAX];
+    int jn;
+
+    if (strncmp(s->path, "/api/v1/explain", 15) != 0) {
+        return 0;
+    }
+
+    gate = require_rbac(s, EDGE_RES_EXPLAIN, NULL, NULL, metrics, out, out_cap,
+                        out_len);
+    if (gate != 0) {
+        return gate;
+    }
+
+    if (explain_templates_root(s, root, sizeof(root)) != 0) {
+        static const char body[] = "{\"error\":\"SPA_ROOT_UNSET\"}";
+        if (build_response(out, out_cap, 503, "Service Unavailable",
+                           "application/json", body, sizeof(body) - 1,
+                           out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 503);
+        return 1;
+    }
+
+    if (path_is_explain_templates(s->path) && strcmp(s->method, "GET") == 0) {
+        jn = edge_explain_list_templates_json(root, jbuf, sizeof(jbuf));
+        if (jn < 0) {
+            return -1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    if (path_is_explain_render(s->path) && strcmp(s->method, "POST") == 0) {
+        const char *body = NULL;
+        size_t blen = 0;
+        char *big = NULL;
+        const size_t big_cap = 131072;
+        get_body(s, &body, &blen);
+        big = (char *)malloc(big_cap);
+        if (!big) {
+            return -1;
+        }
+        jn = edge_explain_render_json(root, body ? body : "", blen, big, big_cap);
+        if (jn < 0) {
+            free(big);
+            return -1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", big,
+                           (size_t)jn, out_len) != 0) {
+            free(big);
+            return -1;
+        }
+        note_response(metrics, 200);
+        free(big);
+        return 1;
+    }
+
+    {
+        static const char body[] = "{\"error\":\"not_found\"}";
+        if (build_response(out, out_cap, 404, "Not Found", "application/json",
+                           body, sizeof(body) - 1, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 404);
+        return 1;
+    }
+}
+
 static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
                        size_t out_cap, size_t *out_len)
 {
@@ -1563,6 +1669,15 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
     if (strncmp(s->path, "/api/v1/e7", 10) == 0 &&
         (s->path[10] == '\0' || s->path[10] == '/' || s->path[10] == '?')) {
         st = dispatch_e7(s, metrics, out, out_cap, out_len);
+        if (st != 0) {
+            return st;
+        }
+    }
+
+    /* Fiber explain templates / render (employee) */
+    if (strncmp(s->path, "/api/v1/explain", 15) == 0 &&
+        (s->path[15] == '\0' || s->path[15] == '/' || s->path[15] == '?')) {
+        st = dispatch_explain(s, metrics, out, out_cap, out_len);
         if (st != 0) {
             return st;
         }

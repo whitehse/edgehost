@@ -69,7 +69,9 @@ typedef enum {
      * E7 Call Home REST: PUT/DELETE shelves, disconnect, POST commands
      * (employee_admin only).
      */
-    EDGE_RES_E7_ADMIN
+    EDGE_RES_E7_ADMIN,
+    /** Fiber explain templates / plan render (employee+). */
+    EDGE_RES_EXPLAIN
 } edge_auth_resource_t;
 
 typedef struct {

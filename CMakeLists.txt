@@ -39,6 +39,7 @@ find_package(Libharness QUIET)
 find_package(Libslack QUIET)
 find_package(Libteams QUIET)
 find_package(Libwebmap QUIET)
+find_package(Libanim QUIET)
 # Optional: E7 Call Home NETCONF SM + Call Home SSH (libchssh preferred).
 find_package(Libchssh QUIET)
 find_package(Libnetconf QUIET)
@@ -217,11 +218,12 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-# --- Host: HTTP/1 serve + metrics + static + sidecar/notify ---
+# --- Host: HTTP/1 serve + metrics + static + sidecar/notify + explain ---
 # (WS hub + state_notify live in edgehost_plugins so plugin state_put can fan-out)
 add_library(edgehost_http STATIC
   src/host/edge_metrics.c
   src/host/edge_http1_serve.c
+  src/host/edge_explain.c
   src/host/static_files.c
   src/host/pq_sidecar.c
   src/host/notify_apply.c
@@ -232,6 +234,15 @@ target_include_directories(edgehost_http PUBLIC
 )
 # edgehost_e7: /api/v1/e7/* REST dispatch (PR-5)
 target_link_libraries(edgehost_http PUBLIC edgecore edgehost_plugins edgehost_e7)
+if(Libanim_FOUND AND LIBANIM_LIBRARY)
+  target_compile_definitions(edgehost_http PUBLIC EDGEHOST_HAVE_LIBANIM=1)
+  target_include_directories(edgehost_http PUBLIC ${LIBANIM_INCLUDE_DIRS})
+  target_link_libraries(edgehost_http PUBLIC ${LIBANIM_LIBRARY})
+  message(STATUS "  libanim    FOUND=1 ROOT=${LIBANIM_ROOT} LIB=${LIBANIM_LIBRARY}")
+else()
+  target_compile_definitions(edgehost_http PUBLIC EDGEHOST_HAVE_LIBANIM=0)
+  message(STATUS "  libanim    FOUND=0 (explain render validates only when sibling built)")
+endif()
 if(TARGET Shaggy::shaggy)
   target_link_libraries(edgehost_http PUBLIC Shaggy::shaggy)
 elseif(SHAGGY_LIBRARY)
