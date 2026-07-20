@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>edgehost — documentation</title>
+  <link rel="stylesheet" href="/app.css"/>
+  <link rel="stylesheet" href="/explain/player/demo.css"/>
+  <style>
+    .doc-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.9fr);
+      gap: 1rem;
+      padding: 0 1rem 2rem;
+    }
+    @media (max-width: 960px) {
+      .doc-layout { grid-template-columns: 1fr; }
+    }
+    #auth-gate { max-width: 28rem; margin: 2rem auto; }
+    .hidden { display: none !important; }
+    .chapters { list-style: none; padding: 0; margin: 0; }
+    .chapters li {
+      border-left: 3px solid var(--line, #243049);
+      padding: 0.45rem 0.65rem;
+      margin: 0.35rem 0;
+      color: var(--muted, #9aa8c7);
+      font-size: 0.92rem;
+      cursor: pointer;
+    }
+    .chapters li.active {
+      border-color: var(--accent, #4f8cff);
+      color: var(--ink, #e8eefc);
+      background: rgba(79, 140, 255, 0.08);
+    }
+    .doc-prose h2 { margin-top: 0; }
+    .doc-prose p, .doc-prose li { line-height: 1.5; color: var(--muted, #9aa8c7); }
+    .doc-prose strong { color: var(--ink, #e8eefc); }
+    .stage-stack { position: relative; }
+    #overlay {
+      position: absolute; inset: 0; pointer-events: none; width: 100%; height: auto;
+    }
+    #stage { width: 100%; height: auto; display: block; }
+    header.doc-top {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;
+      padding: 1rem 1.25rem 0.5rem;
+    }
+    header.doc-top h1 { margin: 0; font-size: 1.25rem; }
+    header.doc-top nav { margin-left: auto; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  </style>
+</head>
+<body class="home">
+  <section id="auth-gate" class="card">
+    <h2>Employee documentation</h2>
+    <p class="hint">Sign in to view plant documentation and interactive lessons.</p>
+    <label>Password
+      <input id="labPw" type="password" value="lab" autocomplete="current-password"/>
+    </label>
+    <div class="row">
+      <button type="button" id="btnLogin">Log in</button>
+    </div>
+    <pre id="gateOut" class="compact"></pre>
+  </section>
+
+  <div id="wrap" class="hidden">
+    <header class="doc-top">
+      <h1>Documentation</h1>
+      <span id="userBadge" class="badge ok"></span>
+      <nav>
+        <a class="btn secondary" href="/">Home</a>
+        <a class="btn secondary" href="/explain/">Explain lab</a>
+        <a class="btn secondary" href="/map/">Map</a>
+        <a class="btn secondary" href="/e7/">E7</a>
+      </nav>
+    </header>
+
+    <div class="doc-layout">
+      <section class="card">
+        <h2>2-port optical tap</h2>
+        <p class="hint">
+          Interactive lesson (libanim). Play through downstream split, insertion loss,
+          ONT receive window, upstream aggregation, and rural design motivations.
+        </p>
+        <div class="stage-stack">
+          <canvas id="stage" width="960" height="540" aria-label="Tap lesson animation"></canvas>
+          <canvas id="overlay" width="960" height="540" aria-hidden="true"></canvas>
+        </div>
+        <div class="transport">
+          <button id="btnPlay" type="button">Play</button>
+          <button id="btnPause" type="button">Pause</button>
+          <button id="btnRestart" type="button">Restart</button>
+          <label class="seek">
+            <span>Seek</span>
+            <input id="seek" type="range" min="0" max="1000" value="0"/>
+          </label>
+          <span id="timeLabel" class="time">0 / 0 ms</span>
+        </div>
+        <p id="modeLabel" class="mode">Engine: …</p>
+        <div id="narration" class="narration" role="status" aria-live="polite">
+          Loading lesson…
+        </div>
+      </section>
+
+      <aside>
+        <section class="card">
+          <h2>Chapters</h2>
+          <ul class="chapters" id="chapters">
+            <li data-ms="0">1 · What is a 2-port tap</li>
+            <li data-ms="3500">2 · Downstream on the feeder</li>
+            <li data-ms="8000">3 · Asymmetric drop / through</li>
+            <li data-ms="12000">4 · Drop vs next span</li>
+            <li data-ms="15500">5 · Insertion loss</li>
+            <li data-ms="19000">6 · ONT Rx design window</li>
+            <li data-ms="24000">7 · Upstream aggregates at OLT</li>
+            <li data-ms="32000">8 · Why rural designs use taps</li>
+          </ul>
+        </section>
+
+        <section class="card doc-prose">
+          <h2>Key ideas</h2>
+          <ul>
+            <li><strong>Through</strong> keeps most power on the feeder; <strong>drop</strong> peels a smaller fraction to the premise.</li>
+            <li><strong>Asymmetry</strong> is intentional — unlike a balanced 1:N hut split.</li>
+            <li><strong>Insertion loss</strong> (dB) accumulates on every span, connector, and the tap itself.</li>
+            <li><strong>Rx window</strong> — design so ONT light lands between min and max with margin.</li>
+            <li><strong>Upstream</strong> — ONT bursts rejoin the feeder and are recovered at the OLT (optical tree + MAC scheduling).</li>
+            <li><strong>Rural</strong> — long linear routes and sparse homes favor cascaded taps over wasting budget on dense star splits.</li>
+          </ul>
+          <p class="hint">
+            Full write-up ships with libanim
+            (<code>docs/guides/two-port-tap.md</code>). Percent labels are teaching aids;
+            use vendor dB tables and measured Rx for live plant.
+          </p>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script type="module" src="./documentation.js"></script>
+</body>
+</html>

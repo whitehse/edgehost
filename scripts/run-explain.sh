@@ -76,6 +76,9 @@ if [[ -d "$ANIM/fixtures/templates" ]]; then
 fi
 link_or_refresh "$ANIM/fixtures/optical_path.anim" "$EXPLAIN_DIR/fixtures/optical_path.anim"
 link_or_refresh "$ANIM/fixtures/outage_story.anim" "$EXPLAIN_DIR/fixtures/outage_story.anim"
+link_or_refresh "$ANIM/fixtures/two_port_tap.anim" "$EXPLAIN_DIR/fixtures/two_port_tap.anim"
+mkdir -p "$ROOT/spa/documentation/lessons"
+link_or_refresh "$ANIM/fixtures/two_port_tap.anim" "$ROOT/spa/documentation/lessons/two_port_tap.anim"
 
 if [[ ! -x "$ROOT/build/edgehost" ]]; then
   if [[ "$NO_BUILD" == "1" ]]; then

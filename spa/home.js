@@ -75,6 +75,10 @@
         location.href = "/explain/";
         return;
       }
+      if (next === "documentation" || next === "docs") {
+        location.href = "/documentation/";
+        return;
+      }
       await me();
     } else {
       setBadge(false, "login failed");
