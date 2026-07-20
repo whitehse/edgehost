@@ -27,6 +27,9 @@
 #if EDGEHOST_E7_CHSSH_AVAILABLE
 #include "chssh.h"
 #endif
+#if EDGEHOST_HAVE_LIBYANG
+#include "yang.h"
+#endif
 
 #define EDGE_E7_RX_CAP           (64 * 1024)
 #define EDGE_E7_TX_CAP           (64 * 1024)
@@ -217,6 +220,10 @@ struct edge_e7_callhome {
     char     pcap_path[512];
     char     pcap_text_path[512];
     uint32_t pcap_seq_c2s; /* synthetic TCP seq NMS→E7 */
+#if EDGEHOST_HAVE_LIBYANG
+    yang_ctx_t *yang;           /* shared schema registry for all sessions */
+    char        yang_cache_dir[512]; /* e.g. var/yang */
+#endif
     uint32_t pcap_seq_s2c; /* E7→NMS */
     uint64_t pcap_pkts;
     uint64_t pcap_bytes;
@@ -1544,6 +1551,262 @@ static void e7_event_xml_peek(const char *xml, size_t xml_len, char *out,
     out[o] = '\0';
 }
 
+#if EDGEHOST_HAVE_LIBYANG
+/** Read entire file into malloc buffer; caller frees. */
+static char *e7_read_file(const char *path, size_t *out_len)
+{
+    FILE *f;
+    long sz;
+    char *buf;
+    if (!path || !path[0]) {
+        return NULL;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    sz = ftell(f);
+    if (sz <= 0) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    buf[sz] = '\0';
+    if (out_len) {
+        *out_len = (size_t)sz;
+    }
+    return buf;
+}
+
+static int e7_yang_try_load_path(edge_e7_callhome_t *ch, const char *path)
+{
+    char *text;
+    size_t len = 0;
+    int rc;
+    if (!ch || !ch->yang || !path) {
+        return -1;
+    }
+    text = e7_read_file(path, &len);
+    if (!text) {
+        return -1;
+    }
+    rc = yang_load_module_text(ch->yang, text, len);
+    free(text);
+    if (rc == 0) {
+        e7_trace(ch, "yang_loaded", "", "", "loaded %s", path);
+        fprintf(stderr, "edgehost: yang_loaded path=%s\n", path);
+    }
+    return rc;
+}
+
+/** Try cache filenames for a module id. */
+static int e7_yang_try_load_module(edge_e7_callhome_t *ch,
+                                   const yang_module_id_t *id)
+{
+    char path[1024];
+    int n;
+    if (!ch || !id || !id->name[0]) {
+        return -1;
+    }
+    if (id->revision[0]) {
+        n = snprintf(path, sizeof(path), "%s/%s@%s.yang", ch->yang_cache_dir,
+                     id->name, id->revision);
+        if (n > 0 && (size_t)n < sizeof(path) &&
+            e7_yang_try_load_path(ch, path) == 0) {
+            return 0;
+        }
+    }
+    n = snprintf(path, sizeof(path), "%s/%s.yang", ch->yang_cache_dir,
+                 id->name);
+    if (n > 0 && (size_t)n < sizeof(path) &&
+        e7_yang_try_load_path(ch, path) == 0) {
+        return 0;
+    }
+    /* Sibling libyang test fixtures (dev). */
+    n = snprintf(path, sizeof(path),
+                 "/home/dwhite/libyang/tests/fixtures/%s-mini.yang", id->name);
+    if (n > 0 && (size_t)n < sizeof(path) &&
+        e7_yang_try_load_path(ch, path) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+static void e7_yang_drain(edge_e7_callhome_t *ch, const char *mac,
+                          const char *peer)
+{
+    yang_event_t yev;
+    if (!ch || !ch->yang) {
+        return;
+    }
+    while (yang_next_event(ch->yang, &yev)) {
+        if (yev.type == YANG_EVENT_MODULE_NEEDED) {
+            e7_trace(ch, "yang_needed", mac ? mac : "", peer ? peer : "",
+                     "module=%s revision=%s ns=%s", yev.u.needed.name,
+                     yev.u.needed.revision[0] ? yev.u.needed.revision : "-",
+                     yev.u.needed.namespace_uri[0] ? yev.u.needed.namespace_uri
+                                                   : "-");
+            fprintf(stderr,
+                    "edgehost: yang_needed module=%s revision=%s\n",
+                    yev.u.needed.name,
+                    yev.u.needed.revision[0] ? yev.u.needed.revision : "-");
+            if (e7_yang_try_load_module(ch, &yev.u.needed) != 0) {
+                e7_trace(ch, "yang_missing", mac ? mac : "", peer ? peer : "",
+                         "no cache for %s@%s (host get-schema later)",
+                         yev.u.needed.name,
+                         yev.u.needed.revision[0] ? yev.u.needed.revision : "");
+            }
+        } else if (yev.type == YANG_EVENT_MODULE_LOADED) {
+            e7_trace(ch, "yang_loaded", mac ? mac : "", peer ? peer : "",
+                     "module=%s revision=%s", yev.u.loaded.name,
+                     yev.u.loaded.revision[0] ? yev.u.loaded.revision : "-");
+        } else if (yev.type == YANG_EVENT_SCHEMA_READY) {
+            e7_trace(ch, "yang_ready", mac ? mac : "", peer ? peer : "",
+                     "modules_loaded=%zu pending=%zu",
+                     yev.u.ready.modules_loaded, yev.u.ready.modules_pending);
+            fprintf(stderr,
+                    "edgehost: yang_ready modules=%zu pending=%zu\n",
+                    yev.u.ready.modules_loaded, yev.u.ready.modules_pending);
+        } else if (yev.type == YANG_EVENT_MODULE_ERROR) {
+            e7_trace(ch, "yang_error", mac ? mac : "", peer ? peer : "", "%s",
+                     yev.u.module_error.message);
+        }
+    }
+}
+
+static void e7_yang_on_hello(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                             const netconf_hello_t *hello)
+{
+    const char *uris[NETCONF_MAX_CAPABILITIES];
+    size_t n = 0, i;
+    const char *mac;
+    const char *peer;
+    if (!ch || !ch->yang || !hello) {
+        return;
+    }
+    mac = (s && s->identity.identity_ok) ? s->identity.mac : "";
+    peer = (s && s->peer[0]) ? s->peer : "";
+    for (i = 0; i < hello->capability_count && n < NETCONF_MAX_CAPABILITIES;
+         i++) {
+        if (hello->capabilities[i].uri[0]) {
+            uris[n++] = hello->capabilities[i].uri;
+        }
+    }
+    e7_trace(ch, "yang_hello", mac, peer, "observing %zu module-capable URIs",
+             n);
+    fprintf(stderr, "edgehost: yang_hello mac=%s caps=%zu\n",
+            mac[0] ? mac : "-", n);
+    (void)yang_observe_capabilities(ch->yang, uris, n);
+    /* Drain MODULE_NEEDED → try cache load → LOADED / SCHEMA_READY. */
+    e7_yang_drain(ch, mac, peer);
+}
+
+/**
+ * Log notification as hierarchical path=value lines (schema-aware when loaded).
+ */
+static void e7_yang_log_paths(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                              const netconf_notification_t *n)
+{
+    yang_path_value_t leaves[YANG_DECODE_MAX_LEAVES];
+    size_t count = 0, i;
+    char notif[YANG_NAME_MAX];
+    char mod[YANG_NAME_MAX];
+    char etime[64];
+    const char *mac;
+    const char *peer;
+    const yang_ctx_t *yctx;
+
+    if (!ch || !n || n->xml_len == 0) {
+        return;
+    }
+    mac = (s && s->identity.identity_ok) ? s->identity.mac : "";
+    peer = (s && s->peer[0]) ? s->peer : "";
+    yctx = ch->yang;
+    if (yang_decode_notification(yctx, n->xml, n->xml_len, leaves,
+                                 YANG_DECODE_MAX_LEAVES, &count, notif,
+                                 sizeof(notif), mod, sizeof(mod), etime,
+                                 sizeof(etime)) != 0) {
+        return;
+    }
+    e7_trace(ch, "event_paths", mac, peer,
+             "notif=%s module=%s eventTime=%s leaves=%zu",
+             notif[0] ? notif : "?", mod[0] ? mod : "-",
+             etime[0] ? etime : "-", count);
+    fprintf(stderr,
+            "edgehost: e7_event_paths mac=%s notif=%s module=%s eventTime=%s "
+            "leaves=%zu\n",
+            mac[0] ? mac : "-", notif[0] ? notif : "?", mod[0] ? mod : "-",
+            etime[0] ? etime : "-", count);
+    if (ch->pcap_text_fp) {
+        fprintf(ch->pcap_text_fp,
+                "# PATHS mac=%s notif=%s module=%s eventTime=%s leaves=%zu\n",
+                mac[0] ? mac : "-", notif[0] ? notif : "?",
+                mod[0] ? mod : "-", etime[0] ? etime : "-", count);
+    }
+    for (i = 0; i < count; i++) {
+        e7_trace(ch, "event_path", mac, peer, "%s = %s", leaves[i].path,
+                 leaves[i].value);
+        fprintf(stderr, "edgehost: e7_path mac=%s %s = %s\n",
+                mac[0] ? mac : "-", leaves[i].path, leaves[i].value);
+        if (ch->pcap_text_fp) {
+            fprintf(ch->pcap_text_fp, "# PATH %s = %s\n", leaves[i].path,
+                    leaves[i].value);
+        }
+    }
+    if (ch->pcap_text_fp) {
+        fflush(ch->pcap_text_fp);
+    }
+}
+
+static void e7_yang_init(edge_e7_callhome_t *ch)
+{
+    yang_config_t ycfg;
+    if (!ch) {
+        return;
+    }
+    memset(&ycfg, 0, sizeof(ycfg));
+    ch->yang = yang_create(&ycfg);
+    snprintf(ch->yang_cache_dir, sizeof(ch->yang_cache_dir), "var/yang");
+    if (!ch->yang) {
+        fprintf(stderr, "edgehost: yang_create failed\n");
+        return;
+    }
+    /* Preload common fixtures from cache if present. */
+    {
+        static const char *seed[] = {
+            "calix-exa-base@2020-01-01.yang",
+            "calix-exa-base.yang",
+            "ietf-interfaces@2018-02-20.yang",
+            "ietf-interfaces.yang",
+            NULL};
+        size_t i;
+        char path[640];
+        for (i = 0; seed[i]; i++) {
+            snprintf(path, sizeof(path), "%s/%s", ch->yang_cache_dir, seed[i]);
+            (void)e7_yang_try_load_path(ch, path);
+        }
+        e7_yang_drain(ch, "", "");
+    }
+    fprintf(stderr, "edgehost: libyang ready cache=%s modules=%zu\n",
+            ch->yang_cache_dir, yang_module_count(ch->yang));
+}
+#endif /* EDGEHOST_HAVE_LIBYANG */
+
 static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                             const netconf_notification_t *n)
 {
@@ -1581,6 +1844,11 @@ static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         }
         fflush(ch->pcap_text_fp);
     }
+
+#if EDGEHOST_HAVE_LIBYANG
+    /* Hierarchical path form (primary operator view). */
+    e7_yang_log_paths(ch, s, n);
+#endif
 
     if (!ch->state || !s->identity.identity_ok) {
         return;
@@ -1736,6 +2004,15 @@ static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     while (s->nc && netconf_next_event(s->nc, &ev) == 1) {
         if (ev.type == NETCONF_EVENT_NOTIFICATION) {
             on_notification(ch, s, &ev.data.notification);
+        } else if (ev.type == NETCONF_EVENT_HELLO_RECEIVED) {
+#if EDGEHOST_HAVE_LIBYANG
+            e7_yang_on_hello(ch, s, &ev.data.hello);
+#else
+            e7_trace(ch, "hello_rx",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "peer hello caps=%zu (libyang not linked)",
+                     ev.data.hello.capability_count);
+#endif
         } else if (ev.type == NETCONF_EVENT_RPC_OK ||
                    ev.type == NETCONF_EVENT_RPC_REPLY) {
             on_rpc_reply(ch, s, &ev.data.rpc_reply);
@@ -3508,6 +3785,10 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
     /* Host stream capture (post-accept app bytes) for field forensics. */
     (void)e7_pcap_open(ch);
 
+#if EDGEHOST_HAVE_LIBYANG
+    e7_yang_init(ch);
+#endif
+
     /* Enable producer namespaces when store is available. */
     if (ch->state) {
         (void)edge_state_ns_set_enabled(ch->state, "inventory", 1);
@@ -3534,6 +3815,12 @@ void edge_e7_callhome_destroy(edge_e7_callhome_t *ch)
                 (unsigned long long)ch->pcap_bytes, ch->pcap_path);
     }
     e7_pcap_close(ch);
+#if EDGEHOST_HAVE_LIBYANG
+    if (ch->yang) {
+        yang_destroy(ch->yang);
+        ch->yang = NULL;
+    }
+#endif
     free(ch->sessions);
     free(ch->dirty);
     free(ch);
