@@ -3217,11 +3217,20 @@ static int session_chssh_process(edge_e7_callhome_t *ch, edge_e7_session_t *s)
             break;
         case CHSSH_EVENT_CHANNEL_DATA:
             if (s->nc && ev.u.data.len > 0) {
+                /* Progress log: sample every ~256 KiB during get-config. */
                 if (count_inflight_cmds(ch, s->slot) > 0) {
-                    fprintf(stderr,
-                            "edgehost: e7_ch_data mac=%s len=%zu inflight_cmds=%d\n",
-                            s->identity.mac[0] ? s->identity.mac : "-",
-                            ev.u.data.len, count_inflight_cmds(ch, s->slot));
+                    static uint64_t s_ch_bytes;
+                    static uint32_t s_ch_n;
+                    s_ch_bytes += (uint64_t)ev.u.data.len;
+                    s_ch_n++;
+                    if ((s_ch_n & 63u) == 1u) {
+                        fprintf(stderr,
+                                "edgehost: e7_ch_data mac=%s chunk=%zu "
+                                "total_rx≈%llu KiB (sample)\n",
+                                s->identity.mac[0] ? s->identity.mac : "-",
+                                ev.u.data.len,
+                                (unsigned long long)(s_ch_bytes / 1024u));
+                    }
                 }
                 (void)netconf_feed_input(s->nc, ev.u.data.data, ev.u.data.len);
                 drain_nc_events(ch, s);
@@ -4391,15 +4400,23 @@ static int session_handle_rx(edge_e7_callhome_t *ch, edge_e7_session_t *s,
 static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     int guard;
+    int max_iters = 64;
 
     if (s->fd < 0 || !s->rx) {
         return;
     }
     /*
      * Drain the socket aggressively. Tick-only I/O (~200 ms) is too slow for
-     * SSH KEX if we process a single read and leave responses buffered.
+     * SSH KEX and multi-MB get-config if we process one read then sleep.
+     *
+     * After each RX batch, flush TX immediately so SSH CHANNEL_WINDOW_ADJUST
+     * reaches the peer before we wait for the next tick — otherwise large
+     * transfers crawl at ~4 KiB per 200–1000 ms.
      */
-    for (guard = 0; guard < 64; guard++) {
+    if (count_inflight_cmds(ch, s->slot) > 0) {
+        max_iters = 512; /* large get-config: keep draining while data is ready */
+    }
+    for (guard = 0; guard < max_iters; guard++) {
         ssize_t n = read(s->fd, s->rx, EDGE_E7_RX_CAP);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -4485,6 +4502,14 @@ static void session_pump_read(edge_e7_callhome_t *ch, edge_e7_session_t *s)
             return;
         }
         if (s->state == EDGE_E7_SESS_EMPTY) {
+            return;
+        }
+        /* Push WINDOW_ADJUST / SSH ciphertext now so peer can send more. */
+        if (session_flush_tx(ch, s) != 0) {
+            e7_trace(ch, "write_err",
+                     s->identity.identity_ok ? s->identity.mac : "", s->peer,
+                     "tx flush mid-read errno=%d", errno);
+            session_close(ch, s);
             return;
         }
     }
@@ -5098,6 +5123,20 @@ void edge_e7_callhome_poll(edge_e7_callhome_t *ch, uint64_t mono_ms)
 void edge_e7_callhome_on_tick(edge_e7_callhome_t *ch, uint64_t mono_ms)
 {
     edge_e7_callhome_poll(ch, mono_ms);
+}
+
+int edge_e7_callhome_has_inflight_cmds(const edge_e7_callhome_t *ch)
+{
+    uint32_t i;
+    if (!ch) {
+        return 0;
+    }
+    for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
+        if (ch->cmds[i].used && !ch->cmds[i].complete) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void edge_e7_callhome_close_all(edge_e7_callhome_t *ch)

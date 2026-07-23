@@ -227,6 +227,13 @@ void edge_e7_callhome_poll(edge_e7_callhome_t *ch, uint64_t mono_ms);
 void edge_e7_callhome_on_tick(edge_e7_callhome_t *ch, uint64_t mono_ms);
 
 /**
+ * 1 if any incomplete command (e.g. get-config capture) is in flight.
+ * Host I/O loop uses this to shorten the wait so large replies are not
+ * paced at the default ~200 ms tick.
+ */
+int edge_e7_callhome_has_inflight_cmds(const edge_e7_callhome_t *ch);
+
+/**
  * Close all sessions and the listen socket (optional; destroy also closes).
  * Does not free the object.
  */

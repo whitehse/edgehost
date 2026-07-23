@@ -1111,9 +1111,18 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         int res;
 
         ts.tv_sec = 0;
-        /* Tighten poll while CPU profiling so host_tick can sample ~100Hz. */
-        ts.tv_nsec = edge_debug_cpu_profiling() ? (10L * 1000L * 1000L)
-                                               : (200L * 1000L * 1000L);
+        /*
+         * Default 200 ms wait is fine for idle Call Home. During get-config
+         * capture, drop to 2 ms so we re-read as soon as WINDOW_ADJUST lets
+         * the peer send the next SSH packets (avoids multi-minute crawls).
+         */
+        if (edge_debug_cpu_profiling()) {
+            ts.tv_nsec = 10L * 1000L * 1000L;
+        } else if (srv.e7 && edge_e7_callhome_has_inflight_cmds(srv.e7)) {
+            ts.tv_nsec = 2L * 1000L * 1000L;
+        } else {
+            ts.tv_nsec = 200L * 1000L * 1000L;
+        }
         rc = io_uring_wait_cqe_timeout(&srv.ring, &cqe, &ts);
         srv.mono_ms = mono_now_ms();
         edge_debug_cpu_on_tick(srv.mono_ms);
@@ -1136,7 +1145,10 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             /* P1.11: periodic pqproxy metrics scrape */
             if (srv.pq_cfg.enabled && srv.store) {
                 static uint64_t tick;
-                tick += 200; /* approx wait timeout ms */
+                /* approx wait: 2 ms when capturing, else 200 ms */
+                tick += (srv.e7 && edge_e7_callhome_has_inflight_cmds(srv.e7))
+                            ? 2u
+                            : 200u;
                 if (tick - srv.last_scrape_ms >=
                     (uint64_t)srv.pq_cfg.scrape_interval_ms) {
                     srv.last_scrape_ms = tick;
