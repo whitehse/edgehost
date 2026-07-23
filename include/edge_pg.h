@@ -54,9 +54,26 @@ void edge_pg_close(edge_pg_conn_t *c);
 
 /**
  * Run one simple Query; fill @p out (caller edge_pg_result_clear).
+ * SQL must fit in 64 KiB wire buffer (use edge_pg_exec_large for bigger).
  * @return 0 ok (check out->ok), -1 transport/protocol error.
  */
 int edge_pg_exec(edge_pg_conn_t *c, const char *sql, edge_pg_result_t *out);
+
+/**
+ * Same as edge_pg_exec but allocates the Query message (multi-MB SQL ok).
+ * Response DataRow cells still capped by EDGE_PG_CELL_MAX when reading.
+ * @return 0 ok (check out->ok), -1 transport/protocol error.
+ */
+int edge_pg_exec_large(edge_pg_conn_t *c, const char *sql, size_t sql_len,
+                       edge_pg_result_t *out);
+
+/**
+ * Choose a dollar-quote tag that does not appear in @p body.
+ * Writes e.g. "$ehcfg$" into @p tag (including $).
+ * @return 0 ok, -1 if no unique tag found.
+ */
+int edge_pg_dollar_tag(const char *body, size_t body_len, char *tag,
+                       size_t tag_sz);
 
 void edge_pg_result_clear(edge_pg_result_t *r);
 

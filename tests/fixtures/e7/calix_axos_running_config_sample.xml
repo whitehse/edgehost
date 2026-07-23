@@ -1,0 +1,540 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Redacted Calix AXOS-R24.3 sample derived from live get-config -->
+<config>
+  <product>
+    <version>AXOS-R24.3.0</version>
+    <schema-version>40.0.0</schema-version>
+  </product>
+  <onts>
+<ont>
+
+            <ont-id>13227</ont-id>
+
+            <profile-id>803G</profile-id>
+
+            <reg-id>13227</reg-id>
+
+            <serial-number>A7158F</serial-number>
+
+            <subscriber-id>12849401</subscriber-id>
+
+            <location/>
+
+            <battery-present>false</battery-present>
+
+            <vendor-id>CXNK</vendor-id>
+
+            <internal-index>154</internal-index>
+
+            <service-stats-group>
+
+                <group>cco-13227</group>
+
+                <samplingPoint>
+
+                    <name>calix-pon-ont-util-total-sampler</name>
+
+                </samplingPoint>
+
+            </service-stats-group>
+
+            <rmon-session>
+
+                <bin-duration>fifteen-minutes</bin-duration>
+
+                <bin-count>60</bin-count>
+
+                <samplingPoint>
+
+                    <name>calix-olt-ont-bin-sampler</name>
+
+                </samplingPoint>
+
+            </rmon-session>
+
+            <interface>
+
+                <ont-ethernet>
+
+                    <port>g1</port>
+
+                    <subscriber-id>12849401</subscriber-id>
+
+                    <vlan>
+
+                        <vlan-id>2023</vlan-id>
+
+                        <c-vlan>
+
+                            <vlan-id>154</vlan-id>
+
+                            <policy-map>
+
+                                <name>1G_1G</name>
+
+                                <class-map-ethernet>
+
+                                    <name>DEFAULT_Untagged</name>
+
+                                    <flow>
+
+                                        <flow-id>1</flow-id>
+
+                                    </flow>
+
+                                    <egress>
+
+                                        <egress-mode>shaper</egress-mode>
+
+                                    </egress>
+
+                                    <ingress>
+
+                                        <meter-type>meter-mef</meter-type>
+
+                                    </ingress>
+
+                                </class-map-ethernet>
+
+                            </policy-map>
+
+                        </c-vlan>
+
+                    </vlan>
+
+                </ont-ethernet>
+
+                <ont-ua>
+
+                    <id>1</id>
+
+                </ont-ua>
+
+                <pots>
+
+                    <port>p1</port>
+
+                </pots>
+
+            </interface>
+
+            <samplingPoint>
+
+                <name>calix-pon-optic-sampler</name>
+
+            </samplingPoint>
+
+        </ont>
+<ont>
+
+            <ont-id>1127</ont-id>
+
+            <profile-id>803G</profile-id>
+
+            <serial-number>DFB757</serial-number>
+
+            <vendor-id>CXNK</vendor-id>
+
+            <internal-index>221</internal-index>
+
+            <service-stats-group>
+
+                <group>cco-1127</group>
+
+                <samplingPoint>
+
+                    <name>calix-pon-ont-util-total-sampler</name>
+
+                </samplingPoint>
+
+            </service-stats-group>
+
+            <rmon-session>
+
+                <bin-duration>fifteen-minutes</bin-duration>
+
+                <bin-count>60</bin-count>
+
+                <samplingPoint>
+
+                    <name>calix-olt-ont-bin-sampler</name>
+
+                </samplingPoint>
+
+            </rmon-session>
+
+            <interface>
+
+                <ont-ethernet>
+
+                    <port>g1</port>
+
+                    <alarm-suppression>ENABLED</alarm-suppression>
+
+                </ont-ethernet>
+
+                <ont-ua>
+
+                    <id>1</id>
+
+                </ont-ua>
+
+                <pots>
+
+                    <port>p1</port>
+
+                </pots>
+
+            </interface>
+
+            <samplingPoint>
+
+                <name>calix-pon-optic-sampler</name>
+
+            </samplingPoint>
+
+        </ont>
+<ont>
+
+            <ont-id>237</ont-id>
+
+            <profile-id>844G</profile-id>
+
+            <serial-number>7DD174</serial-number>
+
+            <vendor-id>CXNK</vendor-id>
+
+            <internal-index>66</internal-index>
+
+            <service-stats-group>
+
+                <group>cco-237</group>
+
+                <samplingPoint>
+
+                    <name>calix-pon-ont-util-total-sampler</name>
+
+                </samplingPoint>
+
+            </service-stats-group>
+
+            <rmon-session>
+
+                <bin-duration>fifteen-minutes</bin-duration>
+
+                <bin-count>60</bin-count>
+
+                <samplingPoint>
+
+                    <name>calix-olt-ont-bin-sampler</name>
+
+                </samplingPoint>
+
+            </rmon-session>
+
+            <interface>
+
+                <ont-ethernet>
+
+                    <port>g1</port>
+
+                    <alarm-suppression>ENABLED</alarm-suppression>
+
+                    <role>rg</role>
+
+                </ont-ethernet>
+
+                <ont-ethernet>
+
+                    <port>g2</port>
+
+                    <alarm-suppression>ENABLED</alarm-suppression>
+
+                    <role>rg</role>
+
+                </ont-ethernet>
+
+                <ont-ethernet>
+
+                    <port>g3</port>
+
+                    <alarm-suppression>ENABLED</alarm-suppression>
+
+                    <role>rg</role>
+
+                </ont-ethernet>
+
+                <ont-ethernet>
+
+                    <port>g4</port>
+
+                    <alarm-suppression>ENABLED</alarm-suppression>
+
+                    <role>rg</role>
+
+                </ont-ethernet>
+
+                <ont-ua>
+
+                    <id>1</id>
+
+                </ont-ua>
+
+                <ont-ua>
+
+                    <id>2</id>
+
+                </ont-ua>
+
+                <pots>
+
+                    <port>p1</port>
+
+                </pots>
+
+                <pots>
+
+                    <port>p2</port>
+
+                </pots>
+
+                <rg>
+
+                    <port>G1</port>
+
+                    <subscriber-id>13389701</subscriber-id>
+
+                    <vlan>
+
+                        <vlan-id>2023</vlan-id>
+
+                        <c-vlan>
+
+                            <vlan-id>65</vlan-id>
+
+                            <policy-map>
+
+                                <name>1G_1G_RG</name>
+
+                                <class-map-ethernet>
+
+                                    <name>RG_VLAN</name>
+
+                                    <flow>
+
+                                        <flow-id>1</flow-id>
+
+                                    </flow>
+
+                                    <egress>
+
+                                        <egress-mode>shaper</egress-mode>
+
+                                    </egress>
+
+                                    <ingress>
+
+                                        <meter-type>meter-mef</meter-type>
+
+                                    </ingress>
+
+                                </class-map-ethernet>
+
+                            </policy-map>
+
+                            <rg-mgmt-profile>844G</rg-mgmt-profile>
+
+                        </c-vlan>
+
+                    </vlan>
+
+                </rg>
+
+                <full-bridge>
+
+                    <port>F1</port>
+
+                </full-bridge>
+
+            </interface>
+
+            <samplingPoint>
+
+                <name>calix-pon-optic-sampler</name>
+
+            </samplingPoint>
+
+        </ont>
+<ont>
+
+            <ont-id>1454</ont-id>
+
+            <profile-id>803G</profile-id>
+
+            <reg-id>1454</reg-id>
+
+            <serial-number>760581</serial-number>
+
+            <subscriber-id>9274502</subscriber-id>
+
+            <location/>
+
+            <battery-present>false</battery-present>
+
+            <vendor-id>CXNK</vendor-id>
+
+            <internal-index>3</internal-index>
+
+            <service-stats-group>
+
+                <group>cco-1454</group>
+
+                <samplingPoint>
+
+                    <name>calix-pon-ont-util-total-sampler</name>
+
+                </samplingPoint>
+
+            </service-stats-group>
+
+            <rmon-session>
+
+                <bin-duration>fifteen-minutes</bin-duration>
+
+                <bin-count>60</bin-count>
+
+                <samplingPoint>
+
+                    <name>calix-olt-ont-bin-sampler</name>
+
+                </samplingPoint>
+
+            </rmon-session>
+
+            <interface>
+
+                <ont-ethernet>
+
+                    <port>g1</port>
+
+                    <subscriber-id>9274502</subscriber-id>
+
+                    <vlan>
+
+                        <vlan-id>2023</vlan-id>
+
+                        <c-vlan>
+
+                            <vlan-id>3</vlan-id>
+
+                            <policy-map>
+
+                                <name>1G_1G</name>
+
+                                <class-map-ethernet>
+
+                                    <name>DEFAULT_Untagged</name>
+
+                                    <flow>
+
+                                        <flow-id>1</flow-id>
+
+                                    </flow>
+
+                                    <egress>
+
+                                        <egress-mode>shaper</egress-mode>
+
+                                    </egress>
+
+                                    <ingress>
+
+                                        <meter-type>meter-mef</meter-type>
+
+                                    </ingress>
+
+                                </class-map-ethernet>
+
+                            </policy-map>
+
+                        </c-vlan>
+
+                    </vlan>
+
+                </ont-ethernet>
+
+                <ont-ua>
+
+                    <id>1</id>
+
+                    <vlan>
+
+                        <vlan-id>1033</vlan-id>
+
+                        <policy-map>
+
+                            <name>Voice</name>
+
+                            <class-map-ethernet>
+
+                                <name>DEFAULT_Untagged</name>
+
+                                <flow>
+
+                                    <flow-id>1</flow-id>
+
+                                </flow>
+
+                                <egress>
+
+                                    <egress-mode>shaper</egress-mode>
+
+                                </egress>
+
+                                <ingress>
+
+                                    <meter-type>meter-mef</meter-type>
+
+                                </ingress>
+
+                            </class-map-ethernet>
+
+                        </policy-map>
+
+                    </vlan>
+
+                    <sip-profile>Alizanza</sip-profile>
+
+                </ont-ua>
+
+                <pots>
+
+                    <port>p1</port>
+
+                    <sip-service>
+
+                        <ont-ua>1</ont-ua>
+
+                        <uri>Iw9wepY62v595R0ZosXRevKru</uri>
+
+                        <user>Iw9wepY62v595R0ZosXRevKru</user>
+
+                        <password>$1001$U2FsdGVkX18LwT3e4b8MIMbyWMk3w8VgoW1/u0+2bFdhwf1o</password>
+
+                        <dial-plan>POTS</dial-plan>
+
+                    </sip-service>
+
+                </pots>
+
+            </interface>
+
+            <samplingPoint>
+
+                <name>calix-pon-optic-sampler</name>
+
+            </samplingPoint>
+
+        </ont>
+  </onts>
+</config>

@@ -362,6 +362,38 @@ int edge_e7_callhome_onts_json(const edge_e7_callhome_t *ch, const char *mac,
                                const char *cursor, size_t limit, char *buf,
                                size_t buf_sz);
 
+/**
+ * Submit get-config capture (same as command_submit op=get-config).
+ * Marks the command for inventory + disk/PG pipeline.
+ */
+int edge_e7_callhome_config_capture(edge_e7_callhome_t *ch, const char *mac,
+                                    char *cmd_id_out, size_t cmd_id_sz,
+                                    int *http_status);
+
+/**
+ * Latest config capture meta from net.pon e7/{mac}/config/meta, or disk.
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_e7_callhome_config_meta_json(const edge_e7_callhome_t *ch,
+                                      const char *mac, char *buf, size_t buf_sz);
+
+/**
+ * Provisioned ONT inventory (account/FSAN/eth services) from latest capture.
+ * Reads var/e7_config/{mac}/latest_inventory.json when present.
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_e7_callhome_config_onts_json(const edge_e7_callhome_t *ch,
+                                      const char *mac, const char *q,
+                                      char *buf, size_t buf_sz);
+
+/**
+ * Path to latest full config JSON file (NUL-terminated). For download.
+ * @return 0 ok, -1 missing.
+ */
+int edge_e7_callhome_config_full_path(const edge_e7_callhome_t *ch,
+                                      const char *mac, char *path_out,
+                                      size_t path_sz);
+
 /** Session state name for JSON (static string). */
 const char *edge_e7_sess_state_name(edge_e7_sess_state_t st);
 

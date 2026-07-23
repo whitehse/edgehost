@@ -2,6 +2,14 @@
 (function () {
   function $(id) { return document.getElementById(id); }
 
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
   function setText(id, text) {
     var el = $(id);
     if (el) el.textContent = text;
@@ -830,6 +838,163 @@
     if (ws) ws.close();
   }
 
+  /* --- config inventory (get-config capture) --- */
+
+  var cfgInventory = [];
+
+  function cfgMac() {
+    return ($("cfgMac") && $("cfgMac").value.trim()) || selectedMac() ||
+      ($("cmdMac") && $("cmdMac").value.trim()) || "";
+  }
+
+  function formatPorts(ports) {
+    if (!ports || !ports.length) return "—";
+    return ports
+      .map(function (p) {
+        var svcs = (p.services || [])
+          .map(function (s) {
+            var bits = [s.kind || s.name || "svc"];
+            if (s.vlan) bits.push("vlan " + s.vlan);
+            if (s.profile) bits.push(s.profile);
+            return bits.join(" · ");
+          })
+          .join("; ");
+        return (p.port || "?") + (svcs ? ": " + svcs : " (no svc)");
+      })
+      .join(" | ");
+  }
+
+  function renderCfgOnts() {
+    var tbody = $("cfgOntsBody");
+    if (!tbody) return;
+    var q = ($("cfgSearch") && $("cfgSearch").value.trim().toLowerCase()) || "";
+    var rows = cfgInventory.filter(function (o) {
+      if (!q) return true;
+      var blob = [o.account, o.fsan, o.ont_id, o.pon_id, o.model]
+        .join(" ")
+        .toLowerCase();
+      return blob.indexOf(q) >= 0;
+    });
+    if (!rows.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="6" class="muted-cell">' +
+        (cfgInventory.length ? "No match" : "No inventory yet") +
+        "</td></tr>";
+      return;
+    }
+    tbody.innerHTML = rows
+      .map(function (o) {
+        return (
+          "<tr>" +
+          "<td>" +
+          escapeHtml(o.account || "—") +
+          "</td>" +
+          "<td><code>" +
+          escapeHtml(o.fsan || "—") +
+          "</code></td>" +
+          "<td>" +
+          escapeHtml(o.ont_id || "—") +
+          "</td>" +
+          "<td>" +
+          escapeHtml(o.pon_id || "—") +
+          "</td>" +
+          "<td>" +
+          escapeHtml(o.model || "—") +
+          "</td>" +
+          "<td class=\"hint\">" +
+          escapeHtml(formatPorts(o.ports)) +
+          "</td>" +
+          "</tr>"
+        );
+      })
+      .join("");
+  }
+
+  function updateCfgDownload() {
+    var mac = cfgMac();
+    var a = $("cfgDownload");
+    if (!a) return;
+    if (!mac) {
+      a.removeAttribute("href");
+      return;
+    }
+    a.href = "/api/v1/e7/shelves/" + macPath(mac) + "/config/full";
+  }
+
+  async function captureConfig() {
+    var mac = cfgMac();
+    if (!mac) {
+      setText("cfgOut", "MAC required (select a shelf or enter MAC)");
+      return;
+    }
+    updateCfgDownload();
+    var r = await fetchText(
+      "/api/v1/e7/shelves/" + macPath(mac) + "/config/capture",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+    );
+    setText("cfgOut", "POST capture HTTP " + r.status + "\n" + r.body);
+    if (r.ok || r.status === 202) {
+      try {
+        var j = JSON.parse(r.body);
+        if (j.cmd_id && $("cfgCmdId")) $("cfgCmdId").value = j.cmd_id;
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  async function pollConfigCapture() {
+    var mac = cfgMac();
+    var cmdId = $("cfgCmdId") ? $("cfgCmdId").value.trim() : "";
+    if (!mac || !cmdId) {
+      setText("cfgOut", "MAC and cmd_id required");
+      return;
+    }
+    var r = await fetchText(
+      "/api/v1/e7/shelves/" + macPath(mac) + "/commands/" + encodeURIComponent(cmdId)
+    );
+    setText("cfgOut", "GET cmd HTTP " + r.status + "\n" + r.body);
+    if (r.ok) {
+      try {
+        var j = JSON.parse(r.body);
+        if (j.status === "ok") {
+          await loadConfigInventory();
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  async function loadConfigInventory() {
+    var mac = cfgMac();
+    if (!mac) {
+      setText("cfgOut", "MAC required");
+      return;
+    }
+    updateCfgDownload();
+    var r = await fetchText(
+      "/api/v1/e7/shelves/" + macPath(mac) + "/config/onts"
+    );
+    if (!r.ok) {
+      setText("cfgOut", "GET config/onts HTTP " + r.status + "\n" + r.body);
+      cfgInventory = [];
+      renderCfgOnts();
+      return;
+    }
+    try {
+      var j = JSON.parse(r.body);
+      cfgInventory = j.onts || [];
+      setText(
+        "cfgOut",
+        "Loaded " + cfgInventory.length + " provisioned ONT(s) for " + mac
+      );
+      renderCfgOnts();
+    } catch (e) {
+      setText("cfgOut", "parse error\n" + r.body);
+    }
+  }
+
   /* --- commands --- */
 
   async function submitCommand() {
@@ -909,6 +1074,10 @@
   if ($("btnWsClose")) $("btnWsClose").addEventListener("click", wsClose);
   if ($("btnCmdSubmit")) $("btnCmdSubmit").addEventListener("click", submitCommand);
   if ($("btnCmdPoll")) $("btnCmdPoll").addEventListener("click", pollCommand);
+  if ($("btnCfgCapture")) $("btnCfgCapture").addEventListener("click", captureConfig);
+  if ($("btnCfgLoad")) $("btnCfgLoad").addEventListener("click", loadConfigInventory);
+  if ($("btnCfgPoll")) $("btnCfgPoll").addEventListener("click", pollConfigCapture);
+  if ($("cfgSearch")) $("cfgSearch").addEventListener("input", renderCfgOnts);
   if ($("shelvesBody")) $("shelvesBody").addEventListener("click", onShelvesClick);
   if ($("btnEventsRefresh")) {
     $("btnEventsRefresh").addEventListener("click", function () {

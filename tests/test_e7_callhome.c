@@ -324,7 +324,7 @@ static void test_profile_and_rss(void)
 
     edge_e7_netconf_profile(&cfg);
     assert(cfg.event_queue_size == 8);
-    assert(cfg.max_rpc_size == 256 * 1024);
+    assert(cfg.max_rpc_size == 2 * 1024 * 1024); /* config capture headroom */
     assert(cfg.max_notification_size == 64 * 1024);
     assert(cfg.max_output_size == 256 * 1024);
     est = edge_e7_session_rss_estimate();

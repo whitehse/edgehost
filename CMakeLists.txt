@@ -143,6 +143,7 @@ target_link_libraries(edgehost_plugins PUBLIC edgecore edgehost_tls edgehost_all
 add_library(edgehost_e7 STATIC
   src/host/e7_event_apply.c
   src/host/e7_callhome.c
+  src/host/e7_config_xml.c
 )
 target_include_directories(edgehost_e7 PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -150,8 +151,10 @@ target_include_directories(edgehost_e7 PUBLIC
 )
 # state_notify + ws hub live in edgehost_plugins (put_and_notify / K16)
 # clickhouse optional enqueue from notification path
+# edgehost_ca: edge_pg for get-config → Postgres jsonb store
 target_link_libraries(edgehost_e7 PUBLIC
-  edgecore edgehost_plugins edgehost_alloc edgehost_clickhouse OpenSSL::Crypto)
+  edgecore edgehost_plugins edgehost_alloc edgehost_clickhouse edgehost_ca
+  OpenSSL::Crypto)
 if(Libnetconf_FOUND)
   target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_HAVE_LIBNETCONF=1)
   if(TARGET Libnetconf::netconf)
@@ -411,6 +414,9 @@ target_link_libraries(edgehost_sidecar_test PRIVATE
 add_executable(edgehost_e7_event_apply_test tests/test_e7_event_apply.c)
 target_link_libraries(edgehost_e7_event_apply_test PRIVATE edgehost_e7)
 
+add_executable(edgehost_e7_config_xml_test tests/test_e7_config_xml.c)
+target_link_libraries(edgehost_e7_config_xml_test PRIVATE edgehost_e7)
+
 add_executable(edgehost_junos_identity_test tests/test_junos_identity.c)
 target_link_libraries(edgehost_junos_identity_test PRIVATE edgehost_e7 OpenSSL::Crypto)
 
@@ -446,7 +452,10 @@ add_test(NAME edgehost_openai_proxy COMMAND edgehost_openai_test)
 add_test(NAME edgehost_plugin_stubs COMMAND edgehost_stubs_test)
 add_test(NAME edgehost_tls_server COMMAND edgehost_tls_test)
 add_test(NAME edgehost_sidecar_notify COMMAND edgehost_sidecar_test)
-add_test(NAME edgehost_e7_event_apply COMMAND edgehost_e7_event_apply_test)
+add_test(NAME edgehost_e7_event_apply COMMAND edgehost_e7_event_apply_test
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME edgehost_e7_config_xml COMMAND edgehost_e7_config_xml_test
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 add_test(NAME edgehost_junos_identity COMMAND edgehost_junos_identity_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME edgehost_e7_callhome COMMAND edgehost_e7_callhome_test

@@ -197,12 +197,53 @@
     <pre id="wsOut" class="log"></pre>
   </section>
 
+  <section class="card" id="configInvCard">
+    <h2>Config inventory</h2>
+    <p class="hint">
+      Capture running config via NETCONF <code>get-config</code>
+      (<code>POST …/config/capture</code>). edgehost stores JSON under
+      <code>var/e7_config/</code> and Postgres (<code>e7_shelf_config</code> /
+      <code>e7_ont_provision</code>), then lists account · FSAN · eth services.
+      Requires an <strong>OPEN</strong> Call Home session.
+    </p>
+    <label>MAC <input id="cfgMac" type="text" placeholder="(uses selected if empty)" autocomplete="off"/></label>
+    <div class="row">
+      <button type="button" id="btnCfgCapture">Capture running config</button>
+      <button type="button" id="btnCfgLoad" class="ghost">Load inventory</button>
+      <button type="button" id="btnCfgPoll" class="ghost">Poll capture</button>
+      <a class="btn secondary" id="cfgDownload" href="#" target="_blank" rel="noopener">Download full JSON</a>
+    </div>
+    <label>cmd_id <input id="cfgCmdId" type="text" placeholder="c00000001" autocomplete="off"/></label>
+    <label>Search (account / FSAN)
+      <input id="cfgSearch" type="text" placeholder="A-10428 or CXNK…" autocomplete="off"/>
+    </label>
+    <pre id="cfgOut" class="compact"></pre>
+    <div class="table-wrap">
+      <table class="data" id="cfgOntsTable">
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>FSAN</th>
+            <th>ONT</th>
+            <th>PON</th>
+            <th>Model</th>
+            <th>Eth ports / services</th>
+          </tr>
+        </thead>
+        <tbody id="cfgOntsBody">
+          <tr><td colspan="6" class="muted-cell">Capture or load inventory</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="card">
-    <h2>Command (placeholder)</h2>
+    <h2>Command (advanced)</h2>
     <p class="hint">
       POST <code>/api/v1/e7/shelves/{mac}/commands</code> with
       <code>{"op":"get-config"}</code> or <code>{"rpc_xml":"…"}</code>
-      (employee_admin; open session required). Poll GET …/commands/{cmd_id}.
+      (employee_admin; open session required). Prefer <strong>Config inventory</strong>
+      above for analyzed ONT/account/service views.
     </p>
     <label>MAC <input id="cmdMac" type="text" placeholder="(uses selected if empty)" autocomplete="off"/></label>
     <label>Body JSON

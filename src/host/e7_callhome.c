@@ -7,6 +7,8 @@
 
 #include "edge_e7_callhome.h"
 #include "edge_clickhouse.h"
+#include "edge_e7_config.h"
+#include "edge_pg.h"
 #include "edge_state_notify.h"
 #include "host_alloc.h"
 
@@ -21,6 +23,7 @@ static int json_escape_str(const char *in, char *out, size_t out_sz);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -86,10 +89,13 @@ enum {
 };
 
 /* Per-session host buffers + reduced libnetconf profile (Appendix A). */
-#define EDGE_E7_NC_MAX_RPC       (256 * 1024)
+/* Raised for get-config capture; large reply body is heap (libnetconf). */
+#define EDGE_E7_NC_MAX_RPC       (2 * 1024 * 1024)
 #define EDGE_E7_NC_MAX_NOTIF     (64 * 1024)
 #define EDGE_E7_NC_MAX_OUTPUT    (256 * 1024)
 #define EDGE_E7_NC_EVENT_Q       8
+/** Directory under CWD for mirrored config JSON (var/e7_config/...). */
+#define EDGE_E7_CONFIG_DIR       "var/e7_config"
 
 #define EDGE_E7_DIRTY_NS_MAX     32
 
@@ -179,6 +185,7 @@ typedef struct {
     char     mac[EDGE_E7_MAC_MAX];
     char     cmd_id[EDGE_E7_CMD_ID_MAX];
     uint64_t deadline_ms;
+    int      is_get_config; /* 1 → run inventory + disk/PG pipeline */
 } edge_e7_cmd_slot_t;
 
 struct edge_e7_callhome {
@@ -2402,8 +2409,325 @@ static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     }
 }
 
+#if EDGEHOST_HAVE_LIBNETCONF
+static int mkdir_p_parent(const char *path)
+{
+    char tmp[512];
+    size_t len;
+    size_t i;
+    if (!path) {
+        return -1;
+    }
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    len = strlen(tmp);
+    for (i = 1; i < len; i++) {
+        if (tmp[i] == '/') {
+            tmp[i] = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+                return -1;
+            }
+            tmp[i] = '/';
+        }
+    }
+    return 0;
+}
+
+static int write_file_all(const char *path, const char *data, size_t len)
+{
+    FILE *fp;
+    size_t w;
+    if (mkdir_p_parent(path) != 0) {
+        return -1;
+    }
+    fp = fopen(path, "w");
+    if (!fp) {
+        return -1;
+    }
+    w = fwrite(data, 1, len, fp);
+    fclose(fp);
+    return w == len ? 0 : -1;
+}
+
+/**
+ * get-config pipeline: inventory extract, XML→JSON, disk mirror, optional PG.
+ * Returns meta fields via out_* (buffers owned by caller).
+ */
+static void config_capture_pipeline(edge_e7_callhome_t *ch,
+                                    edge_e7_cmd_slot_t *cmd, char *xml,
+                                    size_t xml_len, int reply_ok,
+                                    int xml_truncated, char *summary_out,
+                                    size_t summary_sz, int *ont_count_out,
+                                    int *pg_ok_out, int *disk_ok_out)
+{
+    edge_e7_cfg_inventory_t *inv = NULL;
+    char *json = NULL;
+    size_t json_len = 0;
+    char mac_key[EDGE_E7_MAC_MAX];
+    char dir[512];
+    char path_json[576];
+    char path_inv[576];
+    char path_xml[576];
+    char iso[40];
+    time_t now = time(NULL);
+    struct tm tm;
+    int i;
+
+    if (ont_count_out) {
+        *ont_count_out = 0;
+    }
+    if (pg_ok_out) {
+        *pg_ok_out = 0;
+    }
+    if (disk_ok_out) {
+        *disk_ok_out = 0;
+    }
+    if (summary_out && summary_sz) {
+        summary_out[0] = '\0';
+    }
+    if (!ch || !cmd || !xml || xml_len == 0 || !reply_ok) {
+        return;
+    }
+    if (edge_e7_mac_to_key_seg(cmd->mac, mac_key, sizeof(mac_key)) != 0) {
+        return;
+    }
+    gmtime_r(&now, &tm);
+    strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tm);
+
+    inv = (edge_e7_cfg_inventory_t *)calloc(1, sizeof(*inv));
+    if (!inv) {
+        return;
+    }
+    (void)edge_e7_config_extract_inventory(xml, xml_len, inv);
+    if (xml_truncated) {
+        inv->truncated = 1;
+        snprintf(inv->warnings, sizeof(inv->warnings), "xml truncated");
+    }
+    if (ont_count_out) {
+        *ont_count_out = inv->ont_count;
+    }
+    if (summary_out && summary_sz) {
+        (void)edge_e7_cfg_summary_json(inv, summary_out, summary_sz);
+    }
+
+    (void)edge_e7_xml_to_json(xml, xml_len, &json, &json_len);
+
+    snprintf(dir, sizeof(dir), "%s/%s", EDGE_E7_CONFIG_DIR, mac_key);
+    snprintf(path_json, sizeof(path_json), "%s/latest.json", dir);
+    snprintf(path_inv, sizeof(path_inv), "%s/latest_inventory.json", dir);
+    snprintf(path_xml, sizeof(path_xml), "%s/latest.xml", dir);
+    if (write_file_all(path_xml, xml, xml_len) == 0) {
+        if (disk_ok_out) {
+            *disk_ok_out = 1;
+        }
+    }
+    if (json && json_len > 0) {
+        if (write_file_all(path_json, json, json_len) == 0) {
+            if (disk_ok_out) {
+                *disk_ok_out = 1;
+            }
+        }
+    }
+    {
+        char *inv_json = NULL;
+        size_t inv_cap = 65536;
+        int n;
+        inv_json = (char *)malloc(inv_cap);
+        if (inv_json) {
+            n = edge_e7_cfg_inventory_json(inv, cmd->mac, iso, inv_json, inv_cap);
+            if (n < 0) {
+                free(inv_json);
+                inv_cap = 512 * 1024;
+                inv_json = (char *)malloc(inv_cap);
+                if (inv_json) {
+                    n = edge_e7_cfg_inventory_json(inv, cmd->mac, iso, inv_json,
+                                                   inv_cap);
+                }
+            }
+            if (inv_json && n > 0) {
+                (void)write_file_all(path_inv, inv_json, (size_t)n);
+            }
+            free(inv_json);
+        }
+    }
+
+    /* Compact per-ONT state keys for SPA/WS (optional). */
+    if (ch->state) {
+        char key[EDGE_STATE_KEY_MAX];
+        char val[EDGE_STATE_VALUE_DEFAULT];
+        char meta_key[EDGE_STATE_KEY_MAX];
+        int n;
+        for (i = 0; i < inv->ont_count && i < 256; i++) {
+            char ont_key[EDGE_E7_AID_MAX];
+            if (edge_e7_aid_to_key_seg(inv->onts[i].ont_id, ont_key,
+                                       sizeof(ont_key)) != 0) {
+                continue;
+            }
+            n = snprintf(key, sizeof(key), "e7/%s/ontcfg/%s", mac_key, ont_key);
+            if (n < 0 || (size_t)n >= sizeof(key)) {
+                continue;
+            }
+            n = edge_e7_cfg_ont_json(&inv->onts[i], cmd->mac, iso, val,
+                                     sizeof(val));
+            if (n > 0) {
+                if (edge_state_put_and_notify(ch->state, ch->hub, "net.pon", key,
+                                              val, (size_t)n, NULL,
+                                              0) == EDGE_STATE_OK) {
+                    ch->stats.state_puts++;
+                    ch->stats.ws_fanouts++;
+                }
+            }
+        }
+        n = snprintf(meta_key, sizeof(meta_key), "e7/%s/config/meta", mac_key);
+        if (n > 0 && (size_t)n < sizeof(meta_key) && summary_out) {
+            char meta[EDGE_STATE_VALUE_DEFAULT];
+            n = snprintf(meta, sizeof(meta),
+                         "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\","
+                         "\"captured_at\":\"%s\",\"xml_len\":%zu,"
+                         "\"json_len\":%zu,\"truncated\":%s,\"summary\":%s}",
+                         cmd->cmd_id, cmd->mac, iso, xml_len, json_len,
+                         (inv->truncated || xml_truncated) ? "true" : "false",
+                         summary_out[0] ? summary_out : "{}");
+            if (n > 0 && (size_t)n < sizeof(meta)) {
+                if (edge_state_put_and_notify(ch->state, ch->hub, "net.pon",
+                                              meta_key, meta, (size_t)n, NULL,
+                                              0) == EDGE_STATE_OK) {
+                    ch->stats.state_puts++;
+                    ch->stats.ws_fanouts++;
+                }
+            }
+        }
+    }
+
+    /* Postgres: full config jsonb + ont provision rows (best-effort). */
+    if (json && json_len > 0) {
+        edge_pg_config_t pgc;
+        edge_pg_conn_t *pg;
+        edge_pg_result_t res;
+        char tag[32];
+        char stag[32];
+        char *sql = NULL;
+        size_t sql_cap;
+        char sum[512];
+        const char *sum_body;
+
+        edge_pg_config_defaults(&pgc);
+        if (ch->cfg && ch->cfg->ca_pg_sock[0]) {
+            strncpy(pgc.sock_path, ch->cfg->ca_pg_sock, sizeof(pgc.sock_path) - 1);
+            pgc.sock_path[sizeof(pgc.sock_path) - 1] = '\0';
+            if (ch->cfg->ca_pg_database[0]) {
+                strncpy(pgc.database, ch->cfg->ca_pg_database,
+                        sizeof(pgc.database) - 1);
+                pgc.database[sizeof(pgc.database) - 1] = '\0';
+            }
+            if (ch->cfg->ca_pg_user[0]) {
+                strncpy(pgc.user, ch->cfg->ca_pg_user, sizeof(pgc.user) - 1);
+                pgc.user[sizeof(pgc.user) - 1] = '\0';
+            }
+            if (ch->cfg->ca_pg_password[0]) {
+                strncpy(pgc.password, ch->cfg->ca_pg_password,
+                        sizeof(pgc.password) - 1);
+                pgc.password[sizeof(pgc.password) - 1] = '\0';
+            }
+        }
+        pgc.timeout_ms = 30000;
+        (void)edge_e7_cfg_summary_json(inv, sum, sizeof(sum));
+        sum_body = sum[0] ? sum : "{}";
+        if (edge_pg_dollar_tag(json, json_len, tag, sizeof(tag)) != 0 ||
+            edge_pg_dollar_tag(sum_body, strlen(sum_body), stag,
+                               sizeof(stag)) != 0) {
+            free(json);
+            free(inv);
+            return;
+        }
+        sql_cap = json_len + strlen(sum_body) + 1024;
+        sql = (char *)malloc(sql_cap);
+        if (sql) {
+            int n = snprintf(
+                sql, sql_cap,
+                "INSERT INTO edgehost.e7_shelf_config "
+                "(shelf_id,vendor,source,cmd_id,xml_bytes,json_bytes,truncated,"
+                "config,summary) VALUES ("
+                "'%s','calix','get-config/running','%s',%zu,%zu,%s,"
+                "%s%s%s::jsonb,%s%s%s::jsonb)",
+                cmd->mac, cmd->cmd_id, xml_len, json_len,
+                (inv->truncated || xml_truncated) ? "true" : "false", tag, json,
+                tag, stag, sum_body, stag);
+            if (n > 0 && (size_t)n < sql_cap) {
+                pg = edge_pg_connect(&pgc);
+                if (pg) {
+                    memset(&res, 0, sizeof(res));
+                    if (edge_pg_exec_large(pg, sql, (size_t)n, &res) == 0 &&
+                        res.ok) {
+                        if (pg_ok_out) {
+                            *pg_ok_out = 1;
+                        }
+                        for (i = 0; i < inv->ont_count; i++) {
+                            char ont_json[1200];
+                            char row_sql[2048];
+                            char ptag[32];
+                            edge_e7_cfg_ont_t *o = &inv->onts[i];
+                            const char *parr;
+                            char ports_json[900];
+                            int pn = edge_e7_cfg_ont_json(o, NULL, NULL, ont_json,
+                                                          sizeof(ont_json));
+                            ports_json[0] = '\0';
+                            if (pn > 0 &&
+                                (parr = strstr(ont_json, "\"ports\":")) != NULL) {
+                                size_t j;
+                                int depth = 0;
+                                int started = 0;
+                                parr += 8;
+                                snprintf(ports_json, sizeof(ports_json), "%s",
+                                         parr);
+                                for (j = 0; ports_json[j]; j++) {
+                                    if (ports_json[j] == '[') {
+                                        depth++;
+                                        started = 1;
+                                    } else if (ports_json[j] == ']') {
+                                        depth--;
+                                        if (started && depth == 0) {
+                                            ports_json[j + 1] = '\0';
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (ports_json[0] == '\0') {
+                                snprintf(ports_json, sizeof(ports_json), "[]");
+                            }
+                            if (edge_pg_dollar_tag(ports_json, strlen(ports_json),
+                                                   ptag, sizeof(ptag)) != 0) {
+                                continue;
+                            }
+                            snprintf(
+                                row_sql, sizeof(row_sql),
+                                "INSERT INTO edgehost.e7_ont_provision "
+                                "(shelf_id,ont_id,fsan,account,pon_id,model,"
+                                "admin_state,ports,config_id) VALUES ("
+                                "'%s','%s','%s','%s','%s','%s','%s',"
+                                "%s%s%s::jsonb,"
+                                "(SELECT id FROM edgehost.e7_shelf_config WHERE "
+                                "cmd_id='%s' ORDER BY id DESC LIMIT 1))",
+                                cmd->mac, o->ont_id, o->fsan, o->account,
+                                o->pon_id, o->model, o->admin_state, ptag,
+                                ports_json, ptag, cmd->cmd_id);
+                            edge_pg_result_clear(&res);
+                            (void)edge_pg_exec(pg, row_sql, &res);
+                        }
+                    }
+                    edge_pg_result_clear(&res);
+                    edge_pg_close(pg);
+                }
+            }
+            free(sql);
+        }
+    }
+    free(json);
+    free(inv);
+}
+
 static void command_store_result(edge_e7_callhome_t *ch, edge_e7_cmd_slot_t *cmd,
-                                 const netconf_rpc_reply_t *reply)
+                                 netconf_rpc_reply_t *reply)
 {
     char mac_key[EDGE_E7_MAC_MAX];
     char key[EDGE_STATE_KEY_MAX];
@@ -2411,60 +2735,58 @@ static void command_store_result(edge_e7_callhome_t *ch, edge_e7_cmd_slot_t *cmd
     int n;
     int ok;
     edge_state_err_t e;
-    size_t xml_copy;
-    size_t max_xml;
+    char *xml = NULL;
+    size_t xml_len = 0;
+    int truncated = 0;
+    char summary[512];
+    int ont_count = 0;
+    int pg_ok = 0;
+    int disk_ok = 0;
 
     if (!ch || !cmd || !reply) {
         return;
     }
     ok = reply->is_ok && !reply->has_errors;
+    truncated = reply->xml_truncated ? 1 : 0;
+    xml = netconf_rpc_reply_take_xml(reply, &xml_len);
+    /* take_xml leaves no large ptr; release is no-op */
+
     if (edge_e7_mac_to_key_seg(cmd->mac, mac_key, sizeof(mac_key)) != 0) {
+        free(xml);
         return;
     }
     n = snprintf(key, sizeof(key), "e7/%s/cmd/%s", mac_key, cmd->cmd_id);
     if (n < 0 || (size_t)n >= sizeof(key)) {
+        free(xml);
         return;
     }
-    /* Compact result; truncate xml if needed for value budget. */
-    max_xml = sizeof(json) > 256 ? sizeof(json) - 200 : 64;
-    xml_copy = reply->xml_len < max_xml ? reply->xml_len : max_xml;
+
+    summary[0] = '\0';
+    if (cmd->is_get_config && xml && xml_len > 0 && ok) {
+        config_capture_pipeline(ch, cmd, xml, xml_len, ok, truncated, summary,
+                                sizeof(summary), &ont_count, &pg_ok, &disk_ok);
+    }
+
+    /* Compact command result — never embed full config XML in state. */
     n = snprintf(json, sizeof(json),
                  "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\",\"message_id\":%u,"
                  "\"status\":\"%s\",\"is_ok\":%s,\"has_errors\":%s,"
-                 "\"xml_len\":%zu,\"xml\":",
+                 "\"xml_len\":%zu,\"truncated\":%s,\"get_config\":%s,"
+                 "\"ont_count\":%d,\"disk\":%s,\"pg\":%s%s%s}",
                  cmd->cmd_id, cmd->mac, (unsigned)cmd->message_id,
                  ok ? "ok" : "error", ok ? "true" : "false",
-                 reply->has_errors ? "true" : "false", reply->xml_len);
-    if (n < 0 || (size_t)n + xml_copy + 4 >= sizeof(json)) {
+                 reply->has_errors ? "true" : "false", xml_len,
+                 truncated ? "true" : "false",
+                 cmd->is_get_config ? "true" : "false", ont_count,
+                 disk_ok ? "true" : "false", pg_ok ? "true" : "false",
+                 summary[0] ? ",\"summary\":" : "",
+                 summary[0] ? summary : "");
+    free(xml);
+    if (n < 0 || (size_t)n >= sizeof(json)) {
         n = snprintf(json, sizeof(json),
-                     "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\",\"message_id\":%u,"
-                     "\"status\":\"%s\",\"xml_truncated\":true}",
-                     cmd->cmd_id, cmd->mac, (unsigned)cmd->message_id,
-                     ok ? "ok" : "error");
-    } else {
-        /* Append JSON string of xml (escape minimal: no quotes expected often) */
-        size_t pos = (size_t)n;
-        size_t i;
-        json[pos++] = '"';
-        for (i = 0; i < xml_copy && pos + 2 < sizeof(json); i++) {
-            char c = reply->xml[i];
-            if (c == '"' || c == '\\') {
-                if (pos + 3 >= sizeof(json)) {
-                    break;
-                }
-                json[pos++] = '\\';
-            }
-            if ((unsigned char)c < 0x20) {
-                continue;
-            }
-            json[pos++] = c;
-        }
-        if (pos + 2 < sizeof(json)) {
-            json[pos++] = '"';
-            json[pos++] = '}';
-            json[pos] = '\0';
-            n = (int)pos;
-        }
+                     "{\"v\":1,\"cmd_id\":\"%s\",\"status\":\"%s\","
+                     "\"meta_truncated\":true}",
+                     cmd->cmd_id, ok ? "ok" : "error");
     }
     if (n < 0) {
         return;
@@ -2482,11 +2804,13 @@ static void command_store_result(edge_e7_callhome_t *ch, edge_e7_cmd_slot_t *cmd
         ch->stats.commands_err++;
     }
 }
+#endif /* EDGEHOST_HAVE_LIBNETCONF */
 
 static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
-                         const netconf_rpc_reply_t *reply)
+                         netconf_rpc_reply_t *reply)
 {
     uint32_t i;
+    int matched = 0;
 
     if (!ch || !s || !reply) {
         return;
@@ -2508,8 +2832,12 @@ static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         if (cmd->shelf_slot == s->slot &&
             cmd->message_id == reply->message_id) {
             command_store_result(ch, cmd, reply);
+            matched = 1;
             break;
         }
+    }
+    if (!matched) {
+        netconf_rpc_reply_release(reply);
     }
 }
 
@@ -2529,7 +2857,9 @@ static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
                      ev.data.hello.capability_count);
 #endif
         } else if (ev.type == NETCONF_EVENT_RPC_OK ||
-                   ev.type == NETCONF_EVENT_RPC_REPLY) {
+                   ev.type == NETCONF_EVENT_RPC_REPLY ||
+                   ev.type == NETCONF_EVENT_GET_CONFIG_REPLY ||
+                   ev.type == NETCONF_EVENT_GET_REPLY) {
             on_rpc_reply(ch, s, &ev.data.rpc_reply);
         } else if (ev.type == NETCONF_EVENT_SSH_AUTHENTICATED) {
             e7_trace(ch, "ssh_auth_ok",
@@ -5317,8 +5647,13 @@ int edge_e7_callhome_command_submit(edge_e7_callhome_t *ch, const char *mac,
 
     if (rpc_xml && rpc_len > 0) {
         mid = netconf_send_rpc(s->nc, rpc_xml, rpc_len);
+        if (rpc_len >= 10 &&
+            (strstr(rpc_xml, "get-config") || strstr(rpc_xml, "get_config"))) {
+            cmd->is_get_config = 1;
+        }
     } else if (op && strcmp(op, "get-config") == 0) {
         mid = netconf_get_config(s->nc, "running", NULL);
+        cmd->is_get_config = 1;
     } else if (op && strcmp(op, "get") == 0) {
         mid = netconf_get(s->nc, NULL);
     } else {
@@ -5344,7 +5679,9 @@ int edge_e7_callhome_command_submit(edge_e7_callhome_t *ch, const char *mac,
     cmd->message_id = (uint32_t)mid;
     cmd->shelf_slot = s->slot;
     memcpy(cmd->mac, norm, sizeof(cmd->mac));
-    cmd->deadline_ms = mono_now_ms() + 15000u;
+    /* Large get-config may need more than the default 15s command window. */
+    cmd->deadline_ms =
+        mono_now_ms() + (cmd->is_get_config ? 120000u : 15000u);
     cmd->complete = 0;
     /* Pending stub in net.pon so GET can find it immediately. */
     {
@@ -5496,4 +5833,140 @@ int edge_e7_callhome_onts_json(const edge_e7_callhome_t *ch, const char *mac,
     buf[off++] = '}';
     buf[off] = '\0';
     return (int)off;
+}
+
+int edge_e7_callhome_config_capture(edge_e7_callhome_t *ch, const char *mac,
+                                    char *cmd_id_out, size_t cmd_id_sz,
+                                    int *http_status)
+{
+    return edge_e7_callhome_command_submit(ch, mac, NULL, 0, "get-config",
+                                           cmd_id_out, cmd_id_sz, http_status);
+}
+
+int edge_e7_callhome_config_full_path(const edge_e7_callhome_t *ch,
+                                      const char *mac, char *path_out,
+                                      size_t path_sz)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char path[576];
+    struct stat st;
+    (void)ch;
+    if (!mac || !path_out || path_sz < 8) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0 ||
+        edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) != 0) {
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/%s/latest.json", EDGE_E7_CONFIG_DIR,
+             mac_key);
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return -1;
+    }
+    snprintf(path_out, path_sz, "%s", path);
+    return 0;
+}
+
+int edge_e7_callhome_config_meta_json(const edge_e7_callhome_t *ch,
+                                      const char *mac, char *buf, size_t buf_sz)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char key[EDGE_STATE_KEY_MAX];
+    size_t vlen = 0;
+    edge_state_err_t e;
+    int n;
+    char path[576];
+    struct stat st;
+
+    if (!ch || !mac || !buf || buf_sz < 16) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0 ||
+        edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) != 0) {
+        return -1;
+    }
+    n = snprintf(key, sizeof(key), "e7/%s/config/meta", mac_key);
+    if (n > 0 && (size_t)n < sizeof(key) && ch->state) {
+        e = edge_state_get(ch->state, "net.pon", key, buf, buf_sz, &vlen);
+        if (e == EDGE_STATE_OK && vlen > 0) {
+            if (vlen + 1 < buf_sz) {
+                buf[vlen] = '\0';
+            }
+            return (int)vlen;
+        }
+    }
+    snprintf(path, sizeof(path), "%s/%s/latest.json", EDGE_E7_CONFIG_DIR,
+             mac_key);
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        n = snprintf(buf, buf_sz,
+                     "{\"v\":1,\"mac\":\"%s\",\"disk_path\":\"%s\","
+                     "\"json_bytes\":%lld,\"source\":\"disk\"}",
+                     norm, path, (long long)st.st_size);
+        return (n > 0 && (size_t)n < buf_sz) ? n : -1;
+    }
+    return -1;
+}
+
+int edge_e7_callhome_config_onts_json(const edge_e7_callhome_t *ch,
+                                      const char *mac, const char *q,
+                                      char *buf, size_t buf_sz)
+{
+    char norm[EDGE_E7_MAC_MAX];
+    char mac_key[EDGE_E7_MAC_MAX];
+    char path[576];
+    FILE *fp;
+    long sz;
+    size_t nread;
+    (void)ch;
+    (void)q;
+    if (!mac || !buf || buf_sz < 8) {
+        return -1;
+    }
+    if (edge_e7_mac_normalize(mac, norm, sizeof(norm)) != 0 ||
+        edge_e7_mac_to_key_seg(norm, mac_key, sizeof(mac_key)) != 0) {
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/%s/latest_inventory.json",
+             EDGE_E7_CONFIG_DIR, mac_key);
+    fp = fopen(path, "r");
+    if (!fp) {
+        int n = snprintf(buf, buf_sz, "{\"onts\":[],\"mac\":\"%s\"}", norm);
+        return (n > 0 && (size_t)n < buf_sz) ? n : -1;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    sz = ftell(fp);
+    if (sz < 0 || fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    if ((size_t)sz + 64 >= buf_sz) {
+        fclose(fp);
+        return -1;
+    }
+    {
+        int n = snprintf(buf, buf_sz, "{\"mac\":\"%s\",\"onts\":", norm);
+        size_t off;
+        if (n < 0) {
+            fclose(fp);
+            return -1;
+        }
+        off = (size_t)n;
+        nread = fread(buf + off, 1, (size_t)sz, fp);
+        fclose(fp);
+        if (nread != (size_t)sz) {
+            return -1;
+        }
+        off += nread;
+        if (off + 2 >= buf_sz) {
+            return -1;
+        }
+        buf[off++] = '}';
+        buf[off] = '\0';
+        return (int)off;
+    }
 }

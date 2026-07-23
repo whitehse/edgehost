@@ -793,7 +793,9 @@ static int dispatch_state(edge_http1_serve_t *s, edge_metrics_t *metrics,
  * Parse /api/v1/e7 path into components.
  * @return 1 if e7 path, 0 otherwise.
  * kinds: 0=status, 1=shelves list, 2=shelf, 3=disconnect, 4=commands,
- *        5=command get, 6=onts, 7=events (connection progress log)
+ *        5=command get, 6=onts, 7=events (connection progress log),
+ *        8=config capture POST, 9=config meta GET, 10=config onts GET,
+ *        11=config full GET
  */
 static int path_is_e7(const char *path, int *kind, char *mac_out, size_t mac_sz,
                       char *cmd_out, size_t cmd_sz, char *cursor_out,
@@ -900,6 +902,31 @@ static int path_is_e7(const char *path, int *kind, char *mac_out, size_t mac_sz,
             memcpy(cmd_out, cid, clen + 1);
             if (kind) {
                 *kind = 5;
+            }
+            return 1;
+        }
+        if (strcmp(rest, "config/capture") == 0) {
+            if (kind) {
+                *kind = 8;
+            }
+            return 1;
+        }
+        if (strcmp(rest, "config") == 0) {
+            if (kind) {
+                *kind = 9;
+            }
+            return 1;
+        }
+        if (strcmp(rest, "config/onts") == 0 ||
+            strncmp(rest, "config/onts?", 12) == 0) {
+            if (kind) {
+                *kind = 10;
+            }
+            return 1;
+        }
+        if (strcmp(rest, "config/full") == 0) {
+            if (kind) {
+                *kind = 11;
             }
             return 1;
         }
@@ -2029,6 +2056,161 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
                            (size_t)jn, out_len) != 0) {
             return -1;
         }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* POST config/capture — get-config + inventory pipeline */
+    if (kind == 8 && strcmp(s->method, "POST") == 0) {
+        char out_cmd[EDGE_E7_CMD_ID_MAX];
+        int http_st = 400;
+        if (edge_e7_callhome_config_capture(s->e7, mac, out_cmd, sizeof(out_cmd),
+                                            &http_st) != 0) {
+            const char *eb;
+            const char *reason = "Bad Request";
+            if (http_st == 409) {
+                eb = "{\"error\":\"NO_SESSION\"}";
+                reason = "Conflict";
+            } else if (http_st == 503) {
+                eb = "{\"error\":\"SESSION_NOT_OPEN\"}";
+                reason = "Service Unavailable";
+            } else if (http_st == 429) {
+                eb = "{\"error\":\"TOO_MANY_COMMANDS\"}";
+                reason = "Too Many Requests";
+            } else {
+                eb = "{\"error\":\"BAD_COMMAND\"}";
+                http_st = 400;
+            }
+            if (build_response(out, out_cap, http_st, reason, "application/json",
+                               eb, strlen(eb), out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, http_st);
+            return 1;
+        }
+        jn = snprintf(jbuf, sizeof(jbuf),
+                      "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\","
+                      "\"status\":\"pending\",\"op\":\"get-config\"}",
+                      out_cmd, mac);
+        if (build_response(out, out_cap, 202, "Accepted", "application/json",
+                           jbuf, (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 202);
+        return 1;
+    }
+
+    /* GET config meta */
+    if (kind == 9 && strcmp(s->method, "GET") == 0) {
+        jn = edge_e7_callhome_config_meta_json(s->e7, mac, jbuf, sizeof(jbuf));
+        if (jn < 0) {
+            static const char body[] = "{\"error\":\"NO_CONFIG\"}";
+            if (build_response(out, out_cap, 404, "Not Found",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 404);
+            return 1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* GET config/onts — provisioned inventory */
+    if (kind == 10 && strcmp(s->method, "GET") == 0) {
+        static char invbuf[262144];
+        jn = edge_e7_callhome_config_onts_json(s->e7, mac, NULL, invbuf,
+                                               sizeof(invbuf));
+        if (jn < 0) {
+            static const char body[] = "{\"error\":\"TOO_LARGE_OR_BAD\"}";
+            if (build_response(out, out_cap, 500, "Internal Server Error",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 500);
+            return 1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", invbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    /* GET config/full — serve mirrored JSON file */
+    if (kind == 11 && strcmp(s->method, "GET") == 0) {
+        char fpath[576];
+        FILE *fp;
+        long fsz;
+        char *fbuf;
+        size_t nr;
+        if (edge_e7_callhome_config_full_path(s->e7, mac, fpath,
+                                              sizeof(fpath)) != 0) {
+            static const char body[] = "{\"error\":\"NO_CONFIG\"}";
+            if (build_response(out, out_cap, 404, "Not Found",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 404);
+            return 1;
+        }
+        fp = fopen(fpath, "r");
+        if (!fp) {
+            static const char body[] = "{\"error\":\"NO_CONFIG\"}";
+            if (build_response(out, out_cap, 404, "Not Found",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 404);
+            return 1;
+        }
+        if (fseek(fp, 0, SEEK_END) != 0) {
+            fclose(fp);
+            return -1;
+        }
+        fsz = ftell(fp);
+        if (fsz < 0 || fsz > 8 * 1024 * 1024) {
+            fclose(fp);
+            static const char body[] = "{\"error\":\"TOO_LARGE\"}";
+            if (build_response(out, out_cap, 413, "Payload Too Large",
+                               "application/json", body, sizeof(body) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 413);
+            return 1;
+        }
+        if (fseek(fp, 0, SEEK_SET) != 0) {
+            fclose(fp);
+            return -1;
+        }
+        fbuf = (char *)malloc((size_t)fsz + 1);
+        if (!fbuf) {
+            fclose(fp);
+            return -1;
+        }
+        nr = fread(fbuf, 1, (size_t)fsz, fp);
+        fclose(fp);
+        if (nr != (size_t)fsz) {
+            free(fbuf);
+            return -1;
+        }
+        fbuf[fsz] = '\0';
+        if (build_response(out, out_cap, 200, "OK", "application/json", fbuf,
+                           (size_t)fsz, out_len) != 0) {
+            free(fbuf);
+            return -1;
+        }
+        free(fbuf);
         note_response(metrics, 200);
         return 1;
     }

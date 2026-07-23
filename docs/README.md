@@ -22,6 +22,7 @@
 | [lab-e2e.md](guides/lab-e2e.md) | Lab auth + SPA console + packages E2E |
 | [status-map.md](guides/status-map.md) | Login + WebGPU status map (libwebmap demo) |
 | [e7-callhome.md](guides/e7-callhome.md) | Call Home lab (Calix + Junos, 4334, SPA `/e7/`) · `run-status-map-e7.sh` / `run-status-map-junos.sh` |
+| [e7-config-inventory.md](guides/e7-config-inventory.md) | get-config capture → JSON / ONT account · FSAN · eth services |
 
 ## Designs
 

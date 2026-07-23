@@ -412,10 +412,44 @@ int edge_pg_escape_literal(const char *in, char *out, size_t out_sz)
     return 0;
 }
 
-int edge_pg_exec(edge_pg_conn_t *c, const char *sql, edge_pg_result_t *out)
+int edge_pg_dollar_tag(const char *body, size_t body_len, char *tag,
+                       size_t tag_sz)
 {
-    uint8_t qbuf[65536];
-    size_t slen;
+    int n;
+    char cand[32];
+    if (!tag || tag_sz < 8) {
+        return -1;
+    }
+    for (n = 0; n < 64; n++) {
+        int k = snprintf(cand, sizeof(cand), "$ehcfg%d$", n);
+        size_t i;
+        int hit = 0;
+        if (k < 0) {
+            return -1;
+        }
+        if (!body || body_len == 0) {
+            snprintf(tag, tag_sz, "%s", cand);
+            return 0;
+        }
+        for (i = 0; i + (size_t)k <= body_len; i++) {
+            if (memcmp(body + i, cand, (size_t)k) == 0) {
+                hit = 1;
+                break;
+            }
+        }
+        if (!hit) {
+            snprintf(tag, tag_sz, "%s", cand);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int edge_pg_exec_wire(edge_pg_conn_t *c, const char *sql, size_t slen,
+                             edge_pg_result_t *out)
+{
+    uint8_t *qbuf = NULL;
+    size_t qcap;
     size_t o = 0;
     char type;
     uint8_t body[65536];
@@ -425,9 +459,10 @@ int edge_pg_exec(edge_pg_conn_t *c, const char *sql, edge_pg_result_t *out)
         return -1;
     }
     edge_pg_result_clear(out);
-    slen = strlen(sql);
-    if (1 + 4 + slen + 1 > sizeof(qbuf)) {
-        snprintf(out->err, sizeof(out->err), "SQL too long");
+    qcap = 1 + 4 + slen + 1;
+    qbuf = (uint8_t *)host_alloc_kind(EDGE_MEM_OTHER, qcap);
+    if (!qbuf) {
+        snprintf(out->err, sizeof(out->err), "OOM query buffer");
         return -1;
     }
     qbuf[o++] = 'Q';
@@ -438,8 +473,11 @@ int edge_pg_exec(edge_pg_conn_t *c, const char *sql, edge_pg_result_t *out)
     qbuf[o++] = 0;
     if (write_all(c->fd, qbuf, o, c->cfg.timeout_ms) != 0) {
         snprintf(out->err, sizeof(out->err), "write query failed");
+        host_free(qbuf);
         return -1;
     }
+    host_free(qbuf);
+    qbuf = NULL;
 
     for (;;) {
         if (read_message(c, &type, body, sizeof(body), &blen) != 0) {
@@ -547,10 +585,27 @@ int edge_pg_exec(edge_pg_conn_t *c, const char *sql, edge_pg_result_t *out)
             continue;
         }
         if (type == 'Z') {
-            return out->ok || out->n_rows > 0 || out->err[0] == '\0' ? 0 : 0;
+            return 0;
         }
         if (type == 'I' || type == 'n' || type == 'N' || type == 'A') {
             continue;
         }
     }
+}
+
+int edge_pg_exec(edge_pg_conn_t *c, const char *sql, edge_pg_result_t *out)
+{
+    if (!sql) {
+        return -1;
+    }
+    return edge_pg_exec_wire(c, sql, strlen(sql), out);
+}
+
+int edge_pg_exec_large(edge_pg_conn_t *c, const char *sql, size_t sql_len,
+                       edge_pg_result_t *out)
+{
+    if (!sql) {
+        return -1;
+    }
+    return edge_pg_exec_wire(c, sql, sql_len, out);
 }
