@@ -89,8 +89,11 @@ enum {
 };
 
 /* Per-session host buffers + reduced libnetconf profile (Appendix A). */
-/* Raised for get-config capture; large reply body is heap (libnetconf). */
-#define EDGE_E7_NC_MAX_RPC       (2 * 1024 * 1024)
+/*
+ * max_rpc_size caps NETCONF *input* (replies). Live AXOS running-config can
+ * exceed 2 MiB on busy shelves; large body is heap-backed in libnetconf.
+ */
+#define EDGE_E7_NC_MAX_RPC       (8 * 1024 * 1024)
 #define EDGE_E7_NC_MAX_NOTIF     (64 * 1024)
 #define EDGE_E7_NC_MAX_OUTPUT    (256 * 1024)
 #define EDGE_E7_NC_EVENT_Q       8
@@ -1964,11 +1967,13 @@ static int session_append_tx(edge_e7_session_t *s, const uint8_t *data, size_t n
     return 0;
 }
 
+static int session_drain_chssh(edge_e7_callhome_t *ch, edge_e7_session_t *s);
+
 static int session_drain_output(edge_e7_session_t *s)
 {
     uint8_t tmp[8192];
     size_t n;
-    if (!s->nc) {
+    if (!s || !s->nc) {
         return 0;
     }
     for (;;) {
@@ -1992,6 +1997,18 @@ static int session_drain_output(edge_e7_session_t *s)
             return -1;
         }
     }
+#if EDGEHOST_E7_CHSSH_AVAILABLE
+    /*
+     * channel_send only queues SSH ciphertext; push it to the host TX
+     * buffer so the next session_flush_tx (or caller) puts get-config on
+     * the wire immediately — not after the next keepalive/RX.
+     */
+    if (s->use_chssh && s->chssh && s->chssh_ready) {
+        if (session_drain_chssh(NULL, s) != 0) {
+            return -1;
+        }
+    }
+#endif
     return 0;
 }
 
@@ -2759,10 +2776,21 @@ static void command_store_result(edge_e7_callhome_t *ch, edge_e7_cmd_slot_t *cmd
     if (!ch || !cmd || !reply) {
         return;
     }
-    ok = reply->is_ok && !reply->has_errors;
+    /*
+     * get-config success is an <rpc-reply><data>… (no <ok/>). Treat any
+     * non-error reply body as success so inventory pipeline runs.
+     */
+    ok = !reply->has_errors &&
+         (reply->is_ok || netconf_rpc_reply_xml_len(reply) > 0);
     truncated = reply->xml_truncated ? 1 : 0;
     xml = netconf_rpc_reply_take_xml(reply, &xml_len);
     /* take_xml leaves no large ptr; release is no-op */
+
+    fprintf(stderr,
+            "edgehost: e7_cmd_result id=%s mac=%s mid=%u ok=%d err=%d "
+            "xml_len=%zu get_config=%d\n",
+            cmd->cmd_id, cmd->mac, (unsigned)cmd->message_id, ok,
+            reply->has_errors ? 1 : 0, xml_len, cmd->is_get_config);
 
     if (edge_e7_mac_to_key_seg(cmd->mac, mac_key, sizeof(mac_key)) != 0) {
         free(xml);
@@ -2824,10 +2852,19 @@ static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
 {
     uint32_t i;
     int matched = 0;
+    size_t rlen;
 
     if (!ch || !s || !reply) {
         return;
     }
+    rlen = netconf_rpc_reply_xml_len(reply);
+    fprintf(stderr,
+            "edgehost: e7_rpc_reply mac=%s mid=%u is_ok=%d has_err=%d "
+            "xml_len=%zu\n",
+            s->identity.mac[0] ? s->identity.mac : "-",
+            (unsigned)reply->message_id, reply->is_ok ? 1 : 0,
+            reply->has_errors ? 1 : 0, rlen);
+
     if (s->sub_sent && !s->sub_ok && s->sub_msg_id > 0 &&
         reply->message_id == (uint32_t)s->sub_msg_id) {
         s->sub_ok = 1;
@@ -2837,6 +2874,7 @@ static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                  "create-subscription ok msg_id=%u",
                  (unsigned)reply->message_id);
     }
+    /* Exact message-id match first. */
     for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
         edge_e7_cmd_slot_t *cmd = &ch->cmds[i];
         if (!cmd->used || cmd->complete) {
@@ -2847,6 +2885,33 @@ static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
             command_store_result(ch, cmd, reply);
             matched = 1;
             break;
+        }
+    }
+    /*
+     * Fallback: some peers omit/alter message-id on large get-config replies.
+     * If exactly one in-flight get-config on this shelf, bind the reply to it.
+     */
+    if (!matched && rlen > 0) {
+        edge_e7_cmd_slot_t *only = NULL;
+        int n_pending = 0;
+        for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
+            edge_e7_cmd_slot_t *cmd = &ch->cmds[i];
+            if (!cmd->used || cmd->complete || cmd->shelf_slot != s->slot) {
+                continue;
+            }
+            if (cmd->is_get_config) {
+                only = cmd;
+                n_pending++;
+            }
+        }
+        if (n_pending == 1 && only) {
+            fprintf(stderr,
+                    "edgehost: e7_cmd_mid_fallback id=%s expect_mid=%u "
+                    "reply_mid=%u xml_len=%zu\n",
+                    only->cmd_id, (unsigned)only->message_id,
+                    (unsigned)reply->message_id, rlen);
+            command_store_result(ch, only, reply);
+            matched = 1;
         }
     }
     if (!matched) {
@@ -2871,6 +2936,7 @@ static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 #endif
         } else if (ev.type == NETCONF_EVENT_RPC_OK ||
                    ev.type == NETCONF_EVENT_RPC_REPLY ||
+                   ev.type == NETCONF_EVENT_RPC_ERROR ||
                    ev.type == NETCONF_EVENT_GET_CONFIG_REPLY ||
                    ev.type == NETCONF_EVENT_GET_REPLY) {
             on_rpc_reply(ch, s, &ev.data.rpc_reply);
@@ -2896,6 +2962,48 @@ static void drain_nc_events(edge_e7_callhome_t *ch, edge_e7_session_t *s)
                      "%s",
                      ev.data.error.message[0] ? ev.data.error.message
                                               : "NETCONF_EVENT_ERROR");
+            fprintf(stderr, "edgehost: e7_nc_error mac=%s peer=%s %s\n",
+                    s->identity.mac[0] ? s->identity.mac : "-",
+                    s->peer[0] ? s->peer : "-",
+                    ev.data.error.message[0] ? ev.data.error.message
+                                             : "NETCONF_EVENT_ERROR");
+            /* Fail in-flight commands on this shelf (e.g. max_rpc exceeded). */
+            {
+                uint32_t ci;
+                for (ci = 0; ci < EDGE_E7_CMD_TABLE_MAX; ci++) {
+                    edge_e7_cmd_slot_t *cmd = &ch->cmds[ci];
+                    char mac_key[EDGE_E7_MAC_MAX];
+                    char key[EDGE_STATE_KEY_MAX];
+                    char json[512];
+                    int n;
+                    if (!cmd->used || cmd->complete ||
+                        cmd->shelf_slot != s->slot) {
+                        continue;
+                    }
+                    if (edge_e7_mac_to_key_seg(cmd->mac, mac_key,
+                                               sizeof(mac_key)) != 0) {
+                        continue;
+                    }
+                    n = snprintf(key, sizeof(key), "e7/%s/cmd/%s", mac_key,
+                                 cmd->cmd_id);
+                    if (n < 0 || (size_t)n >= sizeof(key)) {
+                        continue;
+                    }
+                    n = snprintf(json, sizeof(json),
+                                 "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\","
+                                 "\"message_id\":%u,\"status\":\"error\","
+                                 "\"error\":\"netconf_input_or_protocol\"}",
+                                 cmd->cmd_id, cmd->mac,
+                                 (unsigned)cmd->message_id);
+                    if (n > 0 && ch->state) {
+                        (void)edge_state_put_and_notify(
+                            ch->state, ch->hub, "net.pon", key, json,
+                            (size_t)n, NULL, 0);
+                    }
+                    cmd->complete = 1;
+                    ch->stats.commands_err++;
+                }
+            }
         }
         /* QUEUE_OVERFLOW: count later */
     }
@@ -2932,6 +3040,7 @@ static void session_trace_nc_state(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 static int session_flush_tx(edge_e7_callhome_t *ch, edge_e7_session_t *s);
 static int session_drain_output(edge_e7_session_t *s);
 static void session_after_nc_io(edge_e7_callhome_t *ch, edge_e7_session_t *s);
+static int count_inflight_cmds(const edge_e7_callhome_t *ch, int shelf_slot);
 static void e7_pcap_write(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                           int to_peer, const uint8_t *data, size_t len);
 static void e7_pcap_dial_summary(edge_e7_callhome_t *ch, edge_e7_session_t *s,
@@ -3020,7 +3129,7 @@ static int session_try_send_hello(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 }
 
 #if EDGEHOST_E7_CHSSH_AVAILABLE
-/** Drain libchssh wire output into session TX buffer. */
+/** Drain libchssh wire output into session TX buffer. @p ch may be NULL. */
 static int session_drain_chssh(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 {
     uint8_t tmp[8192];
@@ -3035,9 +3144,11 @@ static int session_drain_chssh(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         }
         if (!s->first_tx_logged) {
             s->first_tx_logged = 1;
-            e7_trace_bytes(ch, "first_tx",
-                           s->identity.identity_ok ? s->identity.mac : "",
-                           s->peer, "SSH (libchssh)", tmp, n);
+            if (ch) {
+                e7_trace_bytes(ch, "first_tx",
+                               s->identity.identity_ok ? s->identity.mac : "",
+                               s->peer, "SSH (libchssh)", tmp, n);
+            }
         }
         if (session_append_tx(s, tmp, n) != 0) {
             return -1;
@@ -3106,6 +3217,12 @@ static int session_chssh_process(edge_e7_callhome_t *ch, edge_e7_session_t *s)
             break;
         case CHSSH_EVENT_CHANNEL_DATA:
             if (s->nc && ev.u.data.len > 0) {
+                if (count_inflight_cmds(ch, s->slot) > 0) {
+                    fprintf(stderr,
+                            "edgehost: e7_ch_data mac=%s len=%zu inflight_cmds=%d\n",
+                            s->identity.mac[0] ? s->identity.mac : "-",
+                            ev.u.data.len, count_inflight_cmds(ch, s->slot));
+                }
                 (void)netconf_feed_input(s->nc, ev.u.data.data, ev.u.data.len);
                 drain_nc_events(ch, s);
                 session_after_nc_io(ch, s);
@@ -3163,6 +3280,13 @@ static int session_start_chssh(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     ccfg.lab_mode = 0;
     ccfg.hold_ident = 0;
     ccfg.accept_any_hostkey = 1;
+    /*
+     * Large get-config replies need a generous SSH channel window or the
+     * peer stalls after the first ~window of CHANNEL_DATA (RFC 4254).
+     * Default libchssh 256 KiB is too small for multi-MB AXOS running-config.
+     */
+    ccfg.max_channel_size = 4u * 1024u * 1024u;
+    ccfg.max_output_size = 4u * 1024u * 1024u;
     if (ch->cfg->e7_ssh_username[0]) {
         user = ch->cfg->e7_ssh_username;
     }
@@ -4514,6 +4638,54 @@ static void session_maybe_keepalive(edge_e7_callhome_t *ch, edge_e7_session_t *s
 }
 #endif
 
+/** Mark timed-out in-flight commands for this shelf complete (error). */
+static void session_cmd_timeouts(edge_e7_callhome_t *ch, edge_e7_session_t *s,
+                                 uint64_t mono_ms)
+{
+    uint32_t i;
+    if (!ch || !s) {
+        return;
+    }
+    for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
+        edge_e7_cmd_slot_t *cmd = &ch->cmds[i];
+        char mac_key[EDGE_E7_MAC_MAX];
+        char key[EDGE_STATE_KEY_MAX];
+        char json[320];
+        int n;
+        if (!cmd->used || cmd->complete || cmd->shelf_slot != s->slot) {
+            continue;
+        }
+        if (cmd->deadline_ms == 0 || mono_ms < cmd->deadline_ms) {
+            continue;
+        }
+        if (edge_e7_mac_to_key_seg(cmd->mac, mac_key, sizeof(mac_key)) != 0) {
+            cmd->complete = 1;
+            ch->stats.commands_err++;
+            continue;
+        }
+        n = snprintf(key, sizeof(key), "e7/%s/cmd/%s", mac_key, cmd->cmd_id);
+        if (n > 0 && (size_t)n < sizeof(key)) {
+            n = snprintf(json, sizeof(json),
+                         "{\"v\":1,\"cmd_id\":\"%s\",\"mac\":\"%s\","
+                         "\"message_id\":%u,\"status\":\"error\","
+                         "\"error\":\"timeout\"}",
+                         cmd->cmd_id, cmd->mac, (unsigned)cmd->message_id);
+            if (n > 0 && ch->state) {
+                (void)edge_state_put_and_notify(ch->state, ch->hub, "net.pon",
+                                                key, json, (size_t)n, NULL, 0);
+            }
+        }
+        fprintf(stderr,
+                "edgehost: e7_cmd_timeout id=%s mac=%s mid=%u get_config=%d\n",
+                cmd->cmd_id, cmd->mac, (unsigned)cmd->message_id,
+                cmd->is_get_config);
+        e7_trace(ch, "cmd_timeout", cmd->mac, s->peer, "cmd_id=%s mid=%u",
+                 cmd->cmd_id, (unsigned)cmd->message_id);
+        cmd->complete = 1;
+        ch->stats.commands_err++;
+    }
+}
+
 static void session_pump(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                          uint64_t mono_ms)
 {
@@ -4524,6 +4696,7 @@ static void session_pump(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     if (s->state == EDGE_E7_SESS_EMPTY) {
         return;
     }
+    session_cmd_timeouts(ch, s, mono_ms);
     if (session_flush_tx(ch, s) != 0) {
         e7_trace(ch, "write_err",
                  s->identity.identity_ok ? s->identity.mac : "", s->peer,
@@ -5658,6 +5831,40 @@ int edge_e7_callhome_command_submit(edge_e7_callhome_t *ch, const char *mac,
         return -1;
     }
 
+    /* Drop older incomplete get-config cmds on this shelf (avoid pile-up). */
+    {
+        uint32_t j;
+        for (j = 0; j < EDGE_E7_CMD_TABLE_MAX; j++) {
+            edge_e7_cmd_slot_t *old = &ch->cmds[j];
+            if (old == cmd || !old->used || old->complete) {
+                continue;
+            }
+            if (old->shelf_slot == s->slot && old->is_get_config) {
+                char mk[EDGE_E7_MAC_MAX];
+                char k[EDGE_STATE_KEY_MAX];
+                char js[256];
+                int nn;
+                if (edge_e7_mac_to_key_seg(old->mac, mk, sizeof(mk)) == 0) {
+                    nn = snprintf(k, sizeof(k), "e7/%s/cmd/%s", mk,
+                                  old->cmd_id);
+                    if (nn > 0 && (size_t)nn < sizeof(k)) {
+                        nn = snprintf(js, sizeof(js),
+                                      "{\"v\":1,\"cmd_id\":\"%s\",\"status\":"
+                                      "\"error\",\"error\":\"superseded\"}",
+                                      old->cmd_id);
+                        if (nn > 0 && ch->state) {
+                            (void)edge_state_put_and_notify(
+                                ch->state, ch->hub, "net.pon", k, js,
+                                (size_t)nn, NULL, 0);
+                        }
+                    }
+                }
+                old->complete = 1;
+                ch->stats.commands_err++;
+            }
+        }
+    }
+
     if (rpc_xml && rpc_len > 0) {
         mid = netconf_send_rpc(s->nc, rpc_xml, rpc_len);
         if (rpc_len >= 10 &&
@@ -5685,7 +5892,24 @@ int edge_e7_callhome_command_submit(edge_e7_callhome_t *ch, const char *mac,
         ch->stats.commands_err++;
         return -1;
     }
-    (void)session_drain_output(s);
+    /* Queue NETCONF → (SSH channel) → host TX buffer. */
+    if (session_drain_output(s) != 0) {
+        memset(cmd, 0, sizeof(*cmd));
+        if (http_status) {
+            *http_status = 503;
+        }
+        ch->stats.commands_err++;
+        return -1;
+    }
+    /* Push TX to the Call Home TCP socket now (not wait for next tick). */
+    if (session_flush_tx(ch, s) != 0) {
+        memset(cmd, 0, sizeof(*cmd));
+        if (http_status) {
+            *http_status = 503;
+        }
+        ch->stats.commands_err++;
+        return -1;
+    }
     ch->cmd_seq++;
     snprintf(cmd->cmd_id, sizeof(cmd->cmd_id), "c%08u", ch->cmd_seq);
     snprintf(cmd_id_out, cmd_id_sz, "%s", cmd->cmd_id);
@@ -5694,8 +5918,15 @@ int edge_e7_callhome_command_submit(edge_e7_callhome_t *ch, const char *mac,
     memcpy(cmd->mac, norm, sizeof(cmd->mac));
     /* Large get-config may need more than the default 15s command window. */
     cmd->deadline_ms =
-        mono_now_ms() + (cmd->is_get_config ? 120000u : 15000u);
+        mono_now_ms() + (cmd->is_get_config ? 180000u : 15000u);
     cmd->complete = 0;
+    fprintf(stderr,
+            "edgehost: e7_cmd id=%s mac=%s mid=%d op=%s get_config=%d\n",
+            cmd->cmd_id, norm, mid,
+            (op && op[0]) ? op : (rpc_xml && rpc_xml[0] ? "rpc_xml" : "?"),
+            cmd->is_get_config);
+    e7_trace(ch, "cmd_submit", norm, s->peer, "cmd_id=%s message_id=%d %s",
+             cmd->cmd_id, mid, cmd->is_get_config ? "get-config" : "rpc");
     /* Pending stub in net.pon so GET can find it immediately. */
     {
         char mac_key[EDGE_E7_MAC_MAX];

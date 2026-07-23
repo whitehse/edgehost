@@ -2104,7 +2104,10 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
     if (kind == 9 && strcmp(s->method, "GET") == 0) {
         jn = edge_e7_callhome_config_meta_json(s->e7, mac, jbuf, sizeof(jbuf));
         if (jn < 0) {
-            static const char body[] = "{\"error\":\"NO_CONFIG\"}";
+            static const char body[] =
+                "{\"error\":\"NO_CONFIG\","
+                "\"hint\":\"POST …/config/capture first (OPEN session required);"
+                " then poll …/commands/{cmd_id} until status=ok\"}";
             if (build_response(out, out_cap, 404, "Not Found",
                                "application/json", body, sizeof(body) - 1,
                                out_len) != 0) {
@@ -2153,7 +2156,10 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
         size_t nr;
         if (edge_e7_callhome_config_full_path(s->e7, mac, fpath,
                                               sizeof(fpath)) != 0) {
-            static const char body[] = "{\"error\":\"NO_CONFIG\"}";
+            static const char body[] =
+                "{\"error\":\"NO_CONFIG\","
+                "\"hint\":\"POST …/config/capture then poll until ok;"
+                " files land under var/e7_config/{mac}/latest.json\"}";
             if (build_response(out, out_cap, 404, "Not Found",
                                "application/json", body, sizeof(body) - 1,
                                out_len) != 0) {
@@ -2164,7 +2170,9 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
         }
         fp = fopen(fpath, "r");
         if (!fp) {
-            static const char body[] = "{\"error\":\"NO_CONFIG\"}";
+            static const char body[] =
+                "{\"error\":\"NO_CONFIG\","
+                "\"hint\":\"capture file missing; re-run config/capture\"}";
             if (build_response(out, out_cap, 404, "Not Found",
                                "application/json", body, sizeof(body) - 1,
                                out_len) != 0) {
