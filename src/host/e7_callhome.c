@@ -30,6 +30,7 @@ static int json_escape_str(const char *in, char *out, size_t out_sz);
 
 #if EDGEHOST_HAVE_LIBNETCONF
 #include "netconf.h"
+#include "netconf_rpc.h"
 #endif
 #if EDGEHOST_E7_CHSSH_AVAILABLE
 #include "chssh.h"
@@ -166,6 +167,17 @@ typedef struct {
     uint64_t             last_keepalive_ms; /* last SSH keepalive TX (open) */
     uint64_t             last_activity_ms;  /* last app RX/TX while open */
 
+    /**
+     * Auto get-config capture: on first OPEN (after subscribe when possible)
+     * and when config-change notifications arrive. Debounced so save floods
+     * do not stack concurrent captures.
+     */
+    uint8_t              config_capture_wanted; /* 1 = run when idle */
+    uint8_t              config_capture_on_open_done;
+    uint64_t             config_capture_after_ms; /* mono: not before this */
+    uint64_t             last_config_capture_ms;
+    char                 config_capture_reason[40];
+
 #if EDGEHOST_HAVE_LIBNETCONF
     netconf_ctx_t       *nc;
 #endif
@@ -173,6 +185,19 @@ typedef struct {
     chssh_ctx_t         *chssh;
 #endif
 } edge_e7_session_t;
+
+/** Min gap between auto get-config submissions (ms). */
+#define EDGE_E7_CONFIG_CAPTURE_DEBOUNCE_MS 5000u
+/** Delay after OPEN before first capture (let subscribe settle). */
+#define EDGE_E7_CONFIG_CAPTURE_OPEN_DELAY_MS 1500u
+
+static void session_schedule_config_capture(edge_e7_session_t *s,
+                                           uint64_t mono_ms, uint32_t delay_ms,
+                                           const char *reason);
+static void session_try_config_capture(edge_e7_callhome_t *ch,
+                                       edge_e7_session_t *s, uint64_t mono_ms);
+static int notif_implies_config_change(const char *xml, size_t xml_len);
+static int count_inflight_cmds(const edge_e7_callhome_t *ch, int shelf_slot);
 
 typedef struct {
     int  used;
@@ -1582,6 +1607,11 @@ static void session_close(edge_e7_callhome_t *ch, edge_e7_session_t *s)
     s->ssh_resume = 0;
     s->first_tx_logged = 0;
     s->last_nc_state = -1;
+    s->config_capture_wanted = 0;
+    s->config_capture_on_open_done = 0;
+    s->config_capture_after_ms = 0;
+    s->last_config_capture_ms = 0;
+    s->config_capture_reason[0] = '\0';
     s->cap_t0_ms = 0;
     s->cap_ident_ms = 0;
     s->cap_first_tx_ms = 0;
@@ -2394,6 +2424,17 @@ static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
     e7_yang_log_paths(ch, s, n);
 #endif
 
+    /* Config save / change notifications → re-capture running config. */
+    if (s->identity.identity_ok && s->state == EDGE_E7_SESS_OPEN &&
+        notif_implies_config_change(n->xml, n->xml_len)) {
+        session_schedule_config_capture(s, mono_now_ms(),
+                                        EDGE_E7_CONFIG_CAPTURE_DEBOUNCE_MS,
+                                        "config_event");
+        e7_trace(ch, "config_event", mac, peer,
+                 "scheduled auto get-config (debounce %ums)",
+                 (unsigned)EDGE_E7_CONFIG_CAPTURE_DEBOUNCE_MS);
+    }
+
     if (!ch->state || !s->identity.identity_ok) {
         return;
     }
@@ -2873,6 +2914,11 @@ static void on_rpc_reply(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                  s->identity.identity_ok ? s->identity.mac : "", s->peer,
                  "create-subscription ok msg_id=%u",
                  (unsigned)reply->message_id);
+        /* Prefer capture after subscription is live. */
+        if (!s->config_capture_on_open_done) {
+            session_schedule_config_capture(s, mono_now_ms(), 200u,
+                                            "subscribed");
+        }
     }
     /* Exact message-id match first. */
     for (i = 0; i < EDGE_E7_CMD_TABLE_MAX; i++) {
@@ -3040,7 +3086,6 @@ static void session_trace_nc_state(edge_e7_callhome_t *ch, edge_e7_session_t *s)
 static int session_flush_tx(edge_e7_callhome_t *ch, edge_e7_session_t *s);
 static int session_drain_output(edge_e7_session_t *s);
 static void session_after_nc_io(edge_e7_callhome_t *ch, edge_e7_session_t *s);
-static int count_inflight_cmds(const edge_e7_callhome_t *ch, int shelf_slot);
 static void e7_pcap_write(edge_e7_callhome_t *ch, edge_e7_session_t *s,
                           int to_peer, const uint8_t *data, size_t len);
 static void e7_pcap_dial_summary(edge_e7_callhome_t *ch, edge_e7_session_t *s,
@@ -3517,6 +3562,13 @@ static void session_check_open(edge_e7_callhome_t *ch, edge_e7_session_t *s)
             }
         }
         session_try_subscribe(ch, s);
+        /*
+         * First running-config snapshot for this dial. Delay so create-
+         * subscription can complete (get-config needs a settled session).
+         */
+        session_schedule_config_capture(s, mono_now_ms(),
+                                        EDGE_E7_CONFIG_CAPTURE_OPEN_DELAY_MS,
+                                        "session_open");
     }
 }
 
@@ -4722,6 +4774,8 @@ static void session_pump(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         return;
     }
     session_cmd_timeouts(ch, s, mono_ms);
+    /* Auto get-config (session open / config-change events). */
+    session_try_config_capture(ch, s, mono_ms);
     if (session_flush_tx(ch, s) != 0) {
         e7_trace(ch, "write_err",
                  s->identity.identity_ok ? s->identity.mac : "", s->peer,
@@ -5792,6 +5846,188 @@ static int count_inflight_cmds(const edge_e7_callhome_t *ch, int shelf_slot)
         }
     }
     return n;
+}
+
+/** Case-insensitive substring (ASCII). */
+static int e7_ci_contains(const char *hay, size_t hay_len, const char *needle)
+{
+    size_t nlen;
+    size_t i;
+    if (!hay || !needle || !needle[0]) {
+        return 0;
+    }
+    nlen = strlen(needle);
+    if (nlen > hay_len) {
+        return 0;
+    }
+    for (i = 0; i + nlen <= hay_len; i++) {
+        size_t t;
+        for (t = 0; t < nlen; t++) {
+            unsigned char a = (unsigned char)hay[i + t];
+            unsigned char b = (unsigned char)needle[t];
+            if (a >= 'A' && a <= 'Z') {
+                a = (unsigned char)(a - 'A' + 'a');
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b = (unsigned char)(b - 'A' + 'a');
+            }
+            if (a != b) {
+                break;
+            }
+        }
+        if (t == nlen) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * Heuristic: notification name/category implies shelf config was saved or
+ * changed (Calix EXA/AXOS and generic NETCONF patterns). Avoids matching
+ * mere address paths like /config/system/ont[...].
+ */
+static int notif_implies_config_change(const char *xml, size_t xml_len)
+{
+    char name[96];
+    char category[64];
+    size_t scan_len;
+    size_t i;
+    static const char *const name_keys[] = {
+        "config-change",
+        "configuration-change",
+        "configuration_change",
+        "config-changed",
+        "configuration-changed",
+        "database-change",
+        "db-change",
+        "config-save",
+        "configuration-save",
+        "config-saved",
+        "netconf-config-change",
+        "running-config-change",
+        "system-config-change",
+        "commit",
+        "copy-config",
+        "edit-config",
+        NULL};
+    static const char *const cat_keys[] = {
+        "CONFIGURATION", "DATABASE", NULL};
+
+    if (!xml || xml_len == 0) {
+        return 0;
+    }
+    name[0] = category[0] = '\0';
+#if EDGEHOST_HAVE_LIBNETCONF
+    (void)netconf_xml_extract_tag(xml, xml_len, "name", name, sizeof(name));
+    (void)netconf_xml_extract_tag(xml, xml_len, "category", category,
+                                  sizeof(category));
+#endif
+    for (i = 0; name_keys[i]; i++) {
+        if (name[0] && e7_ci_contains(name, strlen(name), name_keys[i])) {
+            return 1;
+        }
+    }
+    for (i = 0; cat_keys[i]; i++) {
+        if (category[0] &&
+            e7_ci_contains(category, strlen(category), cat_keys[i])) {
+            return 1;
+        }
+    }
+    /*
+     * Fallback: only scan the first ~500 bytes so /config/... addresses in
+     * alarm bodies do not trigger a re-capture.
+     */
+    scan_len = xml_len < 500 ? xml_len : 500;
+    for (i = 0; name_keys[i]; i++) {
+        if (e7_ci_contains(xml, scan_len, name_keys[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void session_schedule_config_capture(edge_e7_session_t *s,
+                                           uint64_t mono_ms, uint32_t delay_ms,
+                                           const char *reason)
+{
+    uint64_t after;
+    if (!s || s->state != EDGE_E7_SESS_OPEN) {
+        return;
+    }
+    after = mono_ms + (uint64_t)delay_ms;
+    if (!s->config_capture_wanted || after > s->config_capture_after_ms) {
+        /* Keep the later of existing delay vs new (debounce extends). */
+        if (!s->config_capture_wanted) {
+            s->config_capture_after_ms = after;
+        } else if (after > s->config_capture_after_ms) {
+            s->config_capture_after_ms = after;
+        }
+    }
+    s->config_capture_wanted = 1;
+    if (reason && reason[0]) {
+        snprintf(s->config_capture_reason, sizeof(s->config_capture_reason),
+                 "%s", reason);
+    }
+}
+
+static void session_try_config_capture(edge_e7_callhome_t *ch,
+                                       edge_e7_session_t *s, uint64_t mono_ms)
+{
+    char cmd_id[EDGE_E7_CMD_ID_MAX];
+    char id[EDGE_E7_DEVICE_ID_MAX];
+    int http_st = 0;
+    const char *reason;
+
+    if (!ch || !s || !s->config_capture_wanted) {
+        return;
+    }
+    if (s->state != EDGE_E7_SESS_OPEN || !s->nc) {
+        return;
+    }
+    if (mono_ms < s->config_capture_after_ms) {
+        return;
+    }
+    /* Prefer OPEN + subscription when allowlisted (field path). */
+    if (s->allowlisted && s->sub_sent && !s->sub_ok) {
+        return;
+    }
+    if (count_inflight_cmds(ch, s->slot) > 0) {
+        return; /* retry next tick */
+    }
+    if (s->last_config_capture_ms > 0 &&
+        mono_ms - s->last_config_capture_ms <
+            EDGE_E7_CONFIG_CAPTURE_DEBOUNCE_MS) {
+        /* Still within global debounce; push after. */
+        s->config_capture_after_ms =
+            s->last_config_capture_ms + EDGE_E7_CONFIG_CAPTURE_DEBOUNCE_MS;
+        return;
+    }
+    id[0] = '\0';
+    if (s->identity.mac[0]) {
+        snprintf(id, sizeof(id), "%s", s->identity.mac);
+    } else if (s->identity.device_id[0]) {
+        snprintf(id, sizeof(id), "%s", s->identity.device_id);
+    } else {
+        return;
+    }
+    reason = s->config_capture_reason[0] ? s->config_capture_reason : "auto";
+    if (edge_e7_callhome_command_submit(ch, id, NULL, 0, "get-config", cmd_id,
+                                        sizeof(cmd_id), &http_st) != 0) {
+        /* Session not ready / busy — keep wanted and retry later. */
+        if (http_st == 429 || http_st == 503) {
+            s->config_capture_after_ms = mono_ms + 1000u;
+        }
+        return;
+    }
+    s->config_capture_wanted = 0;
+    s->config_capture_on_open_done = 1;
+    s->last_config_capture_ms = mono_ms;
+    fprintf(stderr,
+            "edgehost: e7_auto_capture mac=%s reason=%s cmd_id=%s\n", id,
+            reason, cmd_id);
+    e7_trace(ch, "auto_capture", id, s->peer, "reason=%s cmd_id=%s", reason,
+             cmd_id);
 }
 
 static edge_e7_cmd_slot_t *cmd_alloc(edge_e7_callhome_t *ch)

@@ -6,6 +6,24 @@ store it as **JSON**, and enumerate provisioned ONTs with **account number**,
 
 ## Operator flow
 
+### Automatic capture
+
+edgehost submits `get-config` (running) automatically when:
+
+1. **Shelf first connects** — after NETCONF `SESSION_OPEN` (and after
+   create-subscription succeeds when allowlisted), with a short delay so the
+   session is settled.
+2. **Config change / save events** — NETCONF notifications whose name or
+   category looks like a configuration change (e.g. `configuration-change`,
+   `config-save`, category `CONFIGURATION`). Debounced (**5 s**) so a burst of
+   save events becomes one capture.
+
+Log markers: `e7_auto_capture reason=session_open|subscribed|config_event`.
+
+Manual capture still works for on-demand refresh.
+
+### Manual capture
+
 1. Log in on `/e7/` (lab password / employee role).
 2. Wait until the shelf session is **OPEN**.
 3. Open **Config inventory**, select the shelf MAC, click **Capture running config**.
