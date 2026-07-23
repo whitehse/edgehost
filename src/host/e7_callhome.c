@@ -246,10 +246,23 @@ struct edge_e7_callhome {
 
 size_t edge_e7_session_rss_estimate(void)
 {
-    /* output + max input + event queue + host rx/tx (design Appendix A) */
-    size_t event_bytes = (size_t)EDGE_E7_NC_EVENT_Q * 70000u; /* ~netconf_event_t */
-    return (size_t)EDGE_E7_NC_MAX_OUTPUT + (size_t)EDGE_E7_NC_MAX_RPC +
-           event_bytes + (size_t)EDGE_E7_RX_CAP + (size_t)EDGE_E7_TX_CAP;
+    /*
+     * Steady-state per OPEN session (create-time + typical pump):
+     *   - libnetconf output buffer: max_output_size (256 KiB)
+     *   - libnetconf input: starts 8 KiB; grows with feed (not pre-sized to
+     *     max_rpc). Charge a modest steady ceiling, not full get-config size.
+     *   - event queue: 8 × ~netconf_event_t (inline 64 KiB reply slots)
+     *   - host rx/tx scratch
+     *
+     * EDGE_E7_NC_MAX_RPC (2 MiB) is the *cap* for rare get-config growth on
+     * one session (heap-backed large reply). Do not multiply that by
+     * max_sessions or create fails under the 256 MiB lab budget.
+     */
+    size_t event_bytes =
+        (size_t)EDGE_E7_NC_EVENT_Q * 70000u; /* ~netconf_event_t */
+    size_t steady_input = 256u * 1024u;
+    return (size_t)EDGE_E7_NC_MAX_OUTPUT + steady_input + event_bytes +
+           (size_t)EDGE_E7_RX_CAP + (size_t)EDGE_E7_TX_CAP;
 }
 
 int edge_e7_callhome_memory_json(const edge_e7_callhome_t *ch, char *buf,

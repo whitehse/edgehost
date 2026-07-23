@@ -101,7 +101,11 @@ Optional developer check: place a full dump at `/tmp/e7_config.txt` and run
 
 - libnetconf large replies: heap-backed beyond 64 KiB inline; free via
   `netconf_rpc_reply_take_xml` / `release`.
-- E7 session `max_rpc_size`: **2 MiB** (raised for capture).
+- E7 session `max_rpc_size`: **2 MiB** (cap for capture **input** growth).
+- E7 `max_output_size`: **256 KiB** (create-time outbound buffer; not 2 MiB).
+- RSS budget model charges **steady-state** per session (~1.2 MiB), not
+  `2 MiB × max_sessions`, so lab `rss_budget_bytes: 256 MiB` still admits
+  160 sessions. A rare get-config may grow one session’s input toward 2 MiB.
 - Capture command deadline: **120 s**.
 - State store never holds full config XML (meta only).
 
