@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Locations &amp; devices · edgehost</title>
+  <link rel="stylesheet" href="/app.css"/>
+</head>
+<body class="app-shell" data-nav="devices" data-title="Locations &amp; devices"
+      data-subtitle="Customer premise equipment — ONT and home router"
+      data-wide="1">
+
+  <div id="listView">
+    <div class="row" style="margin:0 0 1rem;justify-content:space-between">
+      <div class="search-field" style="flex:1;max-width:22rem">
+        <input id="deviceSearch" type="search" placeholder="Search address, member, ONT, MAC…"
+               autocomplete="off"/>
+      </div>
+      <div class="row" style="margin:0">
+        <span class="badge muted" id="deviceCount">—</span>
+        <button type="button" id="btnRefresh" class="ghost">Refresh</button>
+      </div>
+    </div>
+
+    <div class="device-grid" id="deviceGrid"></div>
+  </div>
+
+  <div id="detailView" class="hidden">
+    <div class="row" style="margin:0 0 1rem">
+      <button type="button" id="btnBack" class="ghost">← All locations</button>
+    </div>
+
+    <section class="card hero">
+      <div class="device-detail-hero">
+        <div class="device-icon-lg" aria-hidden="true">⌂</div>
+        <div style="flex:1;min-width:12rem">
+          <div class="device-kind" style="color:var(--accent-2);font-size:.72rem;text-transform:uppercase;letter-spacing:.07em;font-weight:600">
+            Customer location
+          </div>
+          <h2 id="detailAddress" style="margin:.2rem 0;font-size:1.45rem"></h2>
+          <p class="hint" id="detailMember" style="margin:0"></p>
+          <div class="kv-grid" id="detailKv"></div>
+        </div>
+        <span class="badge" id="detailStatus">—</span>
+      </div>
+    </section>
+
+    <div class="split-2">
+      <section class="card" id="ontCard">
+        <div class="device-head" style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="margin:0">Optical network terminal</h2>
+          <span class="badge" id="ontBadge">—</span>
+        </div>
+        <p class="hint">Access-side ONT at this premise (from Call Home / inventory).</p>
+        <div class="kv-grid" id="ontKv"></div>
+        <div class="row">
+          <a class="btn secondary" id="ontE7Link" href="/e7/">Open in E7</a>
+        </div>
+      </section>
+
+      <section class="card" id="routerCard">
+        <div class="device-head" style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="margin:0">Customer router</h2>
+          <span class="badge" id="routerBadge">—</span>
+        </div>
+        <p class="hint">CPE / gateway on the member LAN (telemetry agent path).</p>
+        <div class="kv-grid" id="routerKv"></div>
+        <div class="row">
+          <a class="btn secondary" href="/lab/">Lab diagnostics</a>
+        </div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Related services</h2>
+      <div class="service-grid">
+        <a class="service-tile" href="/map/">
+          <div class="tile-ico">◎</div>
+          <h3>Status map</h3>
+          <p>See this area in geographic context.</p>
+        </a>
+        <a class="service-tile" href="/e7/">
+          <div class="tile-ico">⬡</div>
+          <h3>E7 Call Home</h3>
+          <p>Shelf sessions and ONT commands.</p>
+        </a>
+        <a class="service-tile" href="/explain/">
+          <div class="tile-ico rose">◇</div>
+          <h3>Fiber explain</h3>
+          <p>Walk the optical path with the team.</p>
+        </a>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+  <script src="/shell.js"></script>
+  <script src="/devices/devices.js"></script>
+</body>
+</html>

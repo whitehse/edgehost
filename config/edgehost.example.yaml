@@ -84,6 +84,38 @@ plugins:
     enabled: false              # P1.11 scrape side-car /metrics
     metrics_url: "http://127.0.0.1:9108/metrics"
     scrape_interval_ms: 5000
+  # ClickHouse async JSONEachRow (E7 events + CPE telemetry proxy).
+  # Schema: sql/clickhouse/001_e7_netconf_events.sql
+  # Guide: docs/guides/clickhouse.md
+  clickhouse:
+    enabled: false
+    host: 127.0.0.1
+    port: 8123
+    database: edgehost
+    user: default               # ClickHouse HTTP user (optional password)
+    # password: ""
+    # use_https: false          # TLS to ClickHouse optional
+    # base_url: "http://127.0.0.1:8123/"
+    events_table: edgehost.e7_netconf_events
+    flush_interval_ms: 1000
+    flush_max_rows: 256
+    flush_max_bytes: 262144
+    timeout_ms: 15000
+    telemetry_proxy: true       # POST /api/v1/telemetry/events
+    # CPE device Basic Auth (optional; empty = rely on lab session / open mode)
+    # telemetry_user: cpe_ingest
+    # telemetry_password: "change-me"
+
+  # Certificate Authority — keys/certs/CRL in Postgres via Unix socket.
+  # Schema: sql/postgres/002_ca.sql · UI: /ca/ · public CRL: /ca/crl.pem
+  ca:
+    enabled: false
+    pg_sock: /var/run/postgresql/.s.PGSQL.5432
+    database: edgehost
+    user: edgehost
+    # password: ""              # empty = trust/peer local auth
+    timeout_ms: 5000
+    default_days: 825           # leaf cert validity
   # E7 NETCONF Call Home (lab foundation). See docs/guides/e7-callhome.md.
   # Lab profile: config/edgehost.e7-lab.yaml (enabled + sample shelf).
   # transport=raw on non-loopback requires lab_insecure_raw: true.
@@ -109,4 +141,10 @@ plugins:
 postgres:
   notify_enabled: false
   listen_channel: map_overlay
+  # ONT current status (just-in-time SPA). Apply sql/postgres/001_ont_status.sql
+  # Writer UPSERTs; trigger NOTIFY channel matches edge_notify_apply schema.
+  ont_status:
+    enabled: false
+    # dsn: "postgresql://edgehost@127.0.0.1/edgehost"
+    channel: ont_status
 

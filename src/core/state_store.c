@@ -610,3 +610,89 @@ size_t edge_state_count(const edge_state_store_t *st, const char *ns)
     const edge_state_ns_t *n = find_ns_const(st, ns);
     return n ? n->count : 0;
 }
+
+uint64_t edge_state_rss_bytes(const edge_state_store_t *st)
+{
+    size_t i;
+    uint64_t total = 0;
+
+    if (!st) {
+        return 0;
+    }
+    total += (uint64_t)sizeof(*st);
+    for (i = 0; i < st->n_ns; i++) {
+        const edge_state_ns_t *n = &st->ns[i];
+        if (!n->entries || n->capacity == 0) {
+            continue;
+        }
+        total += (uint64_t)n->capacity * (uint64_t)sizeof(edge_state_entry_t);
+        /* Each value buffer is max_value+1 (calloc at enable). */
+        total += (uint64_t)n->capacity * (uint64_t)(st->max_value + 1);
+    }
+    return total;
+}
+
+int edge_state_memory_json(const edge_state_store_t *st, char *buf,
+                           size_t buf_sz)
+{
+    size_t i;
+    size_t off = 0;
+    uint64_t total;
+    int n;
+    int first = 1;
+
+    if (!buf || buf_sz < 64) {
+        return -1;
+    }
+    total = edge_state_rss_bytes(st);
+    n = snprintf(buf + off, buf_sz - off,
+                 "{\"id\":\"state\",\"name\":\"State store\","
+                 "\"bytes\":%llu,\"kind\":\"eager_calloc\","
+                 "\"max_value_bytes\":%zu,\"items\":[",
+                 (unsigned long long)total, st ? st->max_value : 0);
+    if (n < 0 || (size_t)n >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)n;
+
+    if (st) {
+        for (i = 0; i < st->n_ns; i++) {
+            const edge_state_ns_t *ns = &st->ns[i];
+            uint64_t entry_b = 0;
+            uint64_t value_b = 0;
+            uint64_t ns_total;
+            if (!ns->registered) {
+                continue;
+            }
+            if (ns->entries && ns->capacity > 0) {
+                entry_b =
+                    (uint64_t)ns->capacity * (uint64_t)sizeof(edge_state_entry_t);
+                value_b =
+                    (uint64_t)ns->capacity * (uint64_t)(st->max_value + 1);
+            }
+            ns_total = entry_b + value_b;
+            n = snprintf(buf + off, buf_sz - off,
+                         "%s{\"id\":\"ns:%s\",\"label\":\"namespace %s\","
+                         "\"bytes\":%llu,\"enabled\":%s,"
+                         "\"capacity\":%zu,\"keys_used\":%zu,"
+                         "\"entry_table_bytes\":%llu,"
+                         "\"value_buffers_bytes\":%llu}",
+                         first ? "" : ",", ns->name, ns->name,
+                         (unsigned long long)ns_total,
+                         ns->enabled ? "true" : "false", ns->capacity,
+                         ns->count, (unsigned long long)entry_b,
+                         (unsigned long long)value_b);
+            if (n < 0 || (size_t)n >= buf_sz - off) {
+                return -1;
+            }
+            off += (size_t)n;
+            first = 0;
+        }
+    }
+    n = snprintf(buf + off, buf_sz - off, "]}");
+    if (n < 0 || (size_t)n >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)n;
+    return (int)off;
+}

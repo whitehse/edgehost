@@ -71,7 +71,12 @@ typedef enum {
      */
     EDGE_RES_E7_ADMIN,
     /** Fiber explain templates / plan render (employee+). */
-    EDGE_RES_EXPLAIN
+    EDGE_RES_EXPLAIN,
+    /**
+     * CPE telemetry proxy: POST /api/v1/telemetry/events (ingest + employee).
+     * Devices authenticate with Basic user/password (plugins.clickhouse.telemetry_*).
+     */
+    EDGE_RES_TELEMETRY
 } edge_auth_resource_t;
 
 typedef struct {

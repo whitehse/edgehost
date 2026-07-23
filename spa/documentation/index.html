@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>edgehost — documentation</title>
+  <title>Documentation · edgehost</title>
   <link rel="stylesheet" href="/app.css"/>
   <link rel="stylesheet" href="/explain/player/demo.css"/>
   <style>
@@ -11,44 +11,40 @@
       display: grid;
       grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.9fr);
       gap: 1rem;
-      padding: 0 1rem 2rem;
     }
     @media (max-width: 960px) {
       .doc-layout { grid-template-columns: 1fr; }
     }
-    #auth-gate { max-width: 28rem; margin: 2rem auto; }
+    #auth-gate { max-width: 28rem; margin: 1rem auto; }
     .hidden { display: none !important; }
     .chapters { list-style: none; padding: 0; margin: 0; }
     .chapters li {
-      border-left: 3px solid var(--line, #243049);
+      border-left: 3px solid var(--border);
       padding: 0.45rem 0.65rem;
       margin: 0.35rem 0;
-      color: var(--muted, #9aa8c7);
+      color: var(--muted);
       font-size: 0.92rem;
       cursor: pointer;
+      border-radius: 0 8px 8px 0;
     }
     .chapters li.active {
-      border-color: var(--accent, #4f8cff);
-      color: var(--ink, #e8eefc);
-      background: rgba(79, 140, 255, 0.08);
+      border-color: var(--accent);
+      color: var(--text);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
     }
     .doc-prose h2 { margin-top: 0; }
-    .doc-prose p, .doc-prose li { line-height: 1.5; color: var(--muted, #9aa8c7); }
-    .doc-prose strong { color: var(--ink, #e8eefc); }
+    .doc-prose p, .doc-prose li { line-height: 1.55; color: var(--muted); }
+    .doc-prose strong { color: var(--text); }
     .stage-stack { position: relative; }
     #overlay {
       position: absolute; inset: 0; pointer-events: none; width: 100%; height: auto;
     }
     #stage { width: 100%; height: auto; display: block; }
-    header.doc-top {
-      display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;
-      padding: 1rem 1.25rem 0.5rem;
-    }
-    header.doc-top h1 { margin: 0; font-size: 1.25rem; }
-    header.doc-top nav { margin-left: auto; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    header.doc-top { display: none; }
   </style>
 </head>
-<body class="home">
+<body class="app-shell home" data-nav="documentation" data-title="Documentation"
+      data-subtitle="Plant lessons and operator references" data-wide="1">
   <section id="auth-gate" class="card">
     <h2>Employee documentation</h2>
     <p class="hint">Sign in to view plant documentation and interactive lessons.</p>
@@ -65,12 +61,6 @@
     <header class="doc-top">
       <h1>Documentation</h1>
       <span id="userBadge" class="badge ok"></span>
-      <nav>
-        <a class="btn secondary" href="/">Home</a>
-        <a class="btn secondary" href="/explain/">Explain lab</a>
-        <a class="btn secondary" href="/map/">Map</a>
-        <a class="btn secondary" href="/e7/">E7</a>
-      </nav>
     </header>
 
     <div class="doc-layout">
@@ -159,6 +149,7 @@
   </div>
 
   <script src="/app.js"></script>
+  <script src="/shell.js"></script>
   <script type="module" src="./documentation.js"></script>
 </body>
 </html>

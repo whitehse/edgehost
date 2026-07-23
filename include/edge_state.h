@@ -126,6 +126,21 @@ int edge_state_list(const edge_state_store_t *st, const char *ns,
 
 size_t edge_state_count(const edge_state_store_t *st, const char *ns);
 
+/**
+ * Approximate RSS of eager entry tables + value buffers currently allocated
+ * (enabled namespaces only). Create-time calloc, not host_alloc — use for
+ * /health subsystem estimates when diagnosing process growth vs fixed tables.
+ */
+uint64_t edge_state_rss_bytes(const edge_state_store_t *st);
+
+/**
+ * Module object JSON for GET /api/v1/debug/memory (no outer array).
+ * Per-namespace eager table + value buffer bytes and key counts.
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_state_memory_json(const edge_state_store_t *st, char *buf,
+                           size_t buf_sz);
+
 const char *edge_state_err_name(edge_state_err_t err);
 
 /** Validate key charset [a-z0-9_./:-]{1,128}. */

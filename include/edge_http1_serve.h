@@ -6,6 +6,8 @@
 #define EDGE_HTTP1_SERVE_H
 
 #include "edge_auth.h"
+#include "edge_ca.h"
+#include "edge_clickhouse.h"
 #include "edge_e7_callhome.h"
 #include "edge_metrics.h"
 #include "edge_plugin_host.h"
@@ -58,6 +60,21 @@ void edge_http1_serve_set_plugin_host(edge_http1_serve_t *s,
  * Attach E7 Call Home engine for /api/v1/e7/ (not owned; may be NULL -> 503).
  */
 void edge_http1_serve_set_e7(edge_http1_serve_t *s, edge_e7_callhome_t *e7);
+
+/** Optional ClickHouse client for CPE telemetry proxy (not owned). */
+void edge_http1_serve_set_clickhouse(edge_http1_serve_t *s,
+                                     edge_clickhouse_t *ch);
+
+/**
+ * Optional Basic Auth credentials for POST /api/v1/telemetry/events.
+ * Pointers not owned; may be NULL (no device Basic Auth).
+ */
+void edge_http1_serve_set_telemetry_auth(edge_http1_serve_t *s,
+                                         const char *username,
+                                         const char *password);
+
+/** Optional Certificate Authority (not owned). */
+void edge_http1_serve_set_ca(edge_http1_serve_t *s, edge_ca_t *ca);
 
 /** DNS / outbound policy for PENDING sync complete. */
 void edge_http1_serve_set_outbound_policy(edge_http1_serve_t *s,

@@ -3,19 +3,16 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>edgehost · E7 Call Home</title>
+  <title>E7 Call Home · edgehost</title>
   <link rel="stylesheet" href="/app.css"/>
 </head>
-<body class="e7">
-  <header>
-    <h1><a href="/" class="home-link">edgehost</a> · E7 Call Home</h1>
+<body class="app-shell e7" data-nav="e7" data-title="E7 Call Home"
+      data-subtitle="Calix access shelves, sessions, ONTs, and commands"
+      data-wide="1">
+  <header class="hidden">
+    <h1>E7 Call Home</h1>
     <span id="authBadge" class="badge muted">not logged in</span>
   </header>
-  <p class="hint nav-links" style="margin:0 0 0.75rem">
-    <a href="/junos/">Junos systems config</a>
-    · <a href="/map/">Map</a>
-    · <a href="/lab/">Lab</a>
-  </p>
 
   <section class="card banner-warn">
     <h2>Allowlist durability</h2>
@@ -220,6 +217,7 @@
   </section>
 
   <script src="/app.js"></script>
+  <script src="/shell.js"></script>
   <script src="/e7/e7.js"></script>
 </body>
 </html>

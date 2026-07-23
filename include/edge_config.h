@@ -135,6 +135,55 @@ typedef struct {
     char postgres_listen_channel[64]; /* default map_overlay */
 
     /**
+     * ClickHouse async writer (plugins.clickhouse.*).
+     * edgehost proxies CPE telemetry + E7 NETCONF events as JSONEachRow.
+     * Schema: sql/clickhouse/001_e7_netconf_events.sql
+     */
+    int      clickhouse_enabled; /* default 0 */
+    char     clickhouse_host[EDGE_CONFIG_HOST_MAX];
+    uint16_t clickhouse_port; /* default 8123 */
+    char     clickhouse_database[64];
+    char     clickhouse_user[64];
+    char     clickhouse_password[128];
+    char     clickhouse_base_url[512]; /* optional full http://host:8123/ */
+    int      clickhouse_use_https;
+    char     clickhouse_events_table[128]; /* default edgehost.e7_netconf_events */
+    uint32_t clickhouse_flush_interval_ms;
+    uint32_t clickhouse_flush_max_rows;
+    size_t   clickhouse_flush_max_bytes;
+    uint32_t clickhouse_timeout_ms;
+    /** CPE telemetry proxy path (POST JSON) when clickhouse enabled. */
+    int      clickhouse_telemetry_proxy; /* default 1 when enabled */
+    /**
+     * Optional Basic Auth for POST /api/v1/telemetry/events.
+     * When username is set, devices must send Authorization: Basic …
+     * (or a lab employee session). Empty username → open when auth.mode=open,
+     * else requires employee session.
+     */
+    char clickhouse_telemetry_user[64];
+    char clickhouse_telemetry_password[128];
+
+    /**
+     * Postgres ONT status side-car (sql/postgres/001_ont_status.sql).
+     * DSN for future LISTEN/upsert writers; schema is external apply.
+     */
+    int  postgres_ont_status_enabled;
+    char postgres_ont_status_dsn[512]; /* e.g. postgresql://… env expand later */
+    char postgres_ont_status_channel[64]; /* default ont_status */
+
+    /**
+     * Certificate Authority (plugins.ca.*). Keys + certs + CRL in Postgres
+     * via Unix domain socket. Schema: sql/postgres/002_ca.sql
+     */
+    int      ca_enabled;
+    char     ca_pg_sock[EDGE_CONFIG_PATH_MAX]; /* default /var/run/postgresql/.s.PGSQL.5432 */
+    char     ca_pg_database[64];
+    char     ca_pg_user[64];
+    char     ca_pg_password[128];
+    uint32_t ca_pg_timeout_ms;
+    int      ca_default_days; /* leaf default validity */
+
+    /**
      * E7 NETCONF Call Home (PR-2 skeleton — config only; no listen yet).
      * YAML path: plugins.e7_callhome.*
      * If transport=raw and listen_host is not loopback, lab_insecure_raw

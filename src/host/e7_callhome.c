@@ -6,7 +6,11 @@
 #define _GNU_SOURCE
 
 #include "edge_e7_callhome.h"
+#include "edge_clickhouse.h"
 #include "edge_state_notify.h"
+#include "host_alloc.h"
+
+static int json_escape_str(const char *in, char *out, size_t out_sz);
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -181,6 +185,7 @@ struct edge_e7_callhome {
     const edge_config_t *cfg;
     edge_state_store_t  *state;
     edge_ws_hub_t       *hub;
+    edge_clickhouse_t   *clickhouse; /* optional; not owned */
 
     int                  listen_fd;
     /* Bound listen coords (for SIGHUP change detection; no live rebind). */
@@ -238,6 +243,275 @@ size_t edge_e7_session_rss_estimate(void)
     size_t event_bytes = (size_t)EDGE_E7_NC_EVENT_Q * 70000u; /* ~netconf_event_t */
     return (size_t)EDGE_E7_NC_MAX_OUTPUT + (size_t)EDGE_E7_NC_MAX_RPC +
            event_bytes + (size_t)EDGE_E7_RX_CAP + (size_t)EDGE_E7_TX_CAP;
+}
+
+int edge_e7_callhome_memory_json(const edge_e7_callhome_t *ch, char *buf,
+                                 size_t buf_sz)
+{
+    size_t off = 0;
+    int n;
+    int first;
+    uint32_t i;
+    size_t per = edge_e7_session_rss_estimate();
+    uint64_t host_e7 = host_bytes_outstanding_kind(EDGE_MEM_E7);
+    uint64_t fixed_engine;
+    uint64_t sessions_table;
+    uint64_t dirty_table;
+    uint64_t runtime_array;
+    uint64_t cmds_array;
+    uint64_t trace_array;
+    uint64_t fixed_total;
+    uint64_t live_host_bufs = 0;
+    uint64_t live_nc_est = 0;
+    uint32_t live = 0;
+    uint32_t open_n = 0;
+    uint32_t shelves_used = 0;
+
+    if (!buf || buf_sz < 64) {
+        return -1;
+    }
+    if (!ch) {
+        n = snprintf(buf, buf_sz,
+                     "{\"id\":\"e7\",\"name\":\"E7 Call Home\",\"bytes\":0,"
+                     "\"enabled\":false,\"items\":[]}");
+        return (n < 0 || (size_t)n >= buf_sz) ? -1 : n;
+    }
+
+    fixed_engine = (uint64_t)sizeof(*ch);
+    sessions_table =
+        (uint64_t)ch->max_sessions * (uint64_t)sizeof(edge_e7_session_t);
+    dirty_table =
+        (uint64_t)ch->dirty_cap * (uint64_t)sizeof(edge_e7_dirty_slot_t);
+    runtime_array = (uint64_t)sizeof(ch->runtime);
+    cmds_array = (uint64_t)sizeof(ch->cmds);
+    trace_array = (uint64_t)sizeof(ch->trace);
+    /* engine object is host_alloc; sessions/dirty are separate host_alloc slabs.
+     * sizeof(*ch) already includes embedded runtime/cmds/trace. */
+    fixed_total = host_e7; /* prefer measured host_alloc[e7] as module total */
+
+    for (i = 0; i < ch->max_sessions; i++) {
+        const edge_e7_session_t *s = &ch->sessions[i];
+        if (s->state == EDGE_E7_SESS_EMPTY) {
+            continue;
+        }
+        live++;
+        if (s->state == EDGE_E7_SESS_OPEN) {
+            open_n++;
+        }
+        if (s->rx) {
+            live_host_bufs += (uint64_t)EDGE_E7_RX_CAP;
+        }
+        if (s->tx) {
+            live_host_bufs += (uint64_t)EDGE_E7_TX_CAP;
+        }
+        if (s->state == EDGE_E7_SESS_OPEN || s->state == EDGE_E7_SESS_HELLO
+#if EDGEHOST_HAVE_LIBNETCONF
+            || s->nc
+#endif
+        ) {
+            live_nc_est += (uint64_t)per - (uint64_t)EDGE_E7_RX_CAP -
+                           (uint64_t)EDGE_E7_TX_CAP;
+        }
+    }
+    for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+        if (ch->runtime[i].used) {
+            shelves_used++;
+        }
+    }
+
+    n = snprintf(
+        buf + off, buf_sz - off,
+        "{\"id\":\"e7\",\"name\":\"E7 Call Home\","
+        "\"bytes\":%llu,\"host_alloc_bytes\":%llu,"
+        "\"enabled\":%s,"
+        "\"max_sessions\":%u,\"live_sessions\":%u,\"open_sessions\":%u,"
+        "\"runtime_shelves\":%u,"
+        "\"per_session_budget_bytes\":%zu,"
+        "\"capacity_budget_bytes\":%llu,"
+        "\"live_nc_estimate_bytes\":%llu,"
+        "\"items\":["
+        "{\"id\":\"fixed_engine\",\"label\":\"Engine object + embedded tables\","
+        "\"bytes\":%llu},"
+        "{\"id\":\"session_table\",\"label\":\"Session slot table\","
+        "\"bytes\":%llu,\"count\":%u,\"per_item_bytes\":%zu},"
+        "{\"id\":\"dirty_set\",\"label\":\"K16 dirty-set\","
+        "\"bytes\":%llu,\"count\":%u},"
+        "{\"id\":\"runtime_shelves\",\"label\":\"Runtime allowlist array\","
+        "\"bytes\":%llu,\"count\":%u,\"used\":%u},"
+        "{\"id\":\"live_rx_tx\",\"label\":\"Live session RX/TX buffers\","
+        "\"bytes\":%llu,\"count\":%u},"
+        "{\"id\":\"live_libnetconf_est\",\"label\":\"Live libnetconf estimate\","
+        "\"bytes\":%llu,\"count\":%u,\"kind\":\"estimate\"}"
+        "],\"sessions\":[",
+        (unsigned long long)fixed_total, (unsigned long long)host_e7,
+        edge_e7_callhome_enabled(ch) ? "true" : "false", ch->max_sessions, live,
+        open_n, shelves_used, per,
+        (unsigned long long)((uint64_t)ch->max_sessions * (uint64_t)per),
+        (unsigned long long)live_nc_est, (unsigned long long)fixed_engine,
+        (unsigned long long)sessions_table, ch->max_sessions,
+        sizeof(edge_e7_session_t), (unsigned long long)dirty_table,
+        ch->dirty_cap, (unsigned long long)runtime_array,
+        (unsigned)EDGE_E7_RUNTIME_SHELVES_MAX, shelves_used,
+        (unsigned long long)live_host_bufs, live,
+        (unsigned long long)live_nc_est, open_n);
+    if (n < 0 || (size_t)n >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)n;
+    (void)cmds_array;
+    (void)trace_array;
+
+    first = 1;
+    for (i = 0; i < ch->max_sessions; i++) {
+        const edge_e7_session_t *s = &ch->sessions[i];
+        char esc_mac[EDGE_E7_MAC_MAX * 2];
+        char esc_peer[EDGE_E7_PEER_ADDR_MAX * 2];
+        const char *mac;
+        uint64_t bufs = 0;
+        uint64_t nc_est = 0;
+        uint64_t sess_bytes;
+
+        if (s->state == EDGE_E7_SESS_EMPTY) {
+            continue;
+        }
+        mac = (s->identity.identity_ok && s->identity.mac[0]) ? s->identity.mac
+                                                              : "";
+        if (json_escape_str(mac, esc_mac, sizeof(esc_mac)) < 0 ||
+            json_escape_str(s->peer, esc_peer, sizeof(esc_peer)) < 0) {
+            return -1;
+        }
+        if (s->rx) {
+            bufs += (uint64_t)EDGE_E7_RX_CAP;
+        }
+        if (s->tx) {
+            bufs += (uint64_t)EDGE_E7_TX_CAP;
+        }
+        if (s->state == EDGE_E7_SESS_OPEN || s->state == EDGE_E7_SESS_HELLO
+#if EDGEHOST_HAVE_LIBNETCONF
+            || s->nc
+#endif
+        ) {
+            nc_est = (uint64_t)per - (uint64_t)EDGE_E7_RX_CAP -
+                     (uint64_t)EDGE_E7_TX_CAP;
+        }
+        /* One slot in the preallocated session table + live buffers + nc est */
+        sess_bytes = (uint64_t)sizeof(edge_e7_session_t) + bufs + nc_est;
+        n = snprintf(
+            buf + off, buf_sz - off,
+            "%s{\"id\":\"session:%u\",\"slot\":%u,\"label\":%s,"
+            "\"mac\":%s,\"peer\":%s,\"state\":\"%s\","
+            "\"bytes\":%llu,"
+            "\"components\":["
+            "{\"id\":\"slot\",\"label\":\"Session slot\",\"bytes\":%zu},"
+            "{\"id\":\"rx_tx\",\"label\":\"RX/TX host buffers\",\"bytes\":%llu},"
+            "{\"id\":\"libnetconf\",\"label\":\"libnetconf estimate\","
+            "\"bytes\":%llu,\"kind\":\"estimate\"}"
+            "],"
+            "\"allowlisted\":%s,\"use_ssh\":%s,\"sub_ok\":%s}",
+            first ? "" : ",", (unsigned)i, (unsigned)i,
+            (mac[0] ? esc_mac : "\"(no-mac)\""), esc_mac, esc_peer,
+            edge_e7_sess_state_name(s->state), (unsigned long long)sess_bytes,
+            sizeof(edge_e7_session_t), (unsigned long long)bufs,
+            (unsigned long long)nc_est, s->allowlisted ? "true" : "false",
+            s->use_ssh ? "true" : "false", s->sub_ok ? "true" : "false");
+        if (n < 0 || (size_t)n >= buf_sz - off) {
+            return -1;
+        }
+        off += (size_t)n;
+        first = 0;
+    }
+
+    n = snprintf(buf + off, buf_sz - off, "],\"shelves\":[");
+    if (n < 0 || (size_t)n >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)n;
+
+    first = 1;
+    for (i = 0; i < EDGE_E7_RUNTIME_SHELVES_MAX; i++) {
+        const edge_e7_runtime_shelf_t *rs = &ch->runtime[i];
+        const edge_e7_session_t *sess = NULL;
+        char esc_mac[EDGE_E7_MAC_MAX * 2];
+        char esc_label[EDGE_CONFIG_E7_SHELF_ID_MAX * 2];
+        uint64_t shelf_bytes;
+        uint64_t sess_bytes = 0;
+        uint32_t j;
+
+        if (!rs->used) {
+            continue;
+        }
+        if (json_escape_str(rs->mac, esc_mac, sizeof(esc_mac)) < 0 ||
+            json_escape_str(rs->label, esc_label, sizeof(esc_label)) < 0) {
+            return -1;
+        }
+        /* find matching live session */
+        for (j = 0; j < ch->max_sessions; j++) {
+            const edge_e7_session_t *s = &ch->sessions[j];
+            if (s->state == EDGE_E7_SESS_EMPTY) {
+                continue;
+            }
+            if (rs->mac[0] && s->identity.mac[0] &&
+                strcmp(rs->mac, s->identity.mac) == 0) {
+                sess = s;
+                break;
+            }
+            if (rs->device_id[0] && s->identity.device_id[0] &&
+                strcmp(rs->device_id, s->identity.device_id) == 0) {
+                sess = s;
+                break;
+            }
+        }
+        if (sess) {
+            uint64_t bufs = 0;
+            uint64_t nc_est = 0;
+            if (sess->rx) {
+                bufs += (uint64_t)EDGE_E7_RX_CAP;
+            }
+            if (sess->tx) {
+                bufs += (uint64_t)EDGE_E7_TX_CAP;
+            }
+            if (sess->state == EDGE_E7_SESS_OPEN ||
+                sess->state == EDGE_E7_SESS_HELLO
+#if EDGEHOST_HAVE_LIBNETCONF
+                || sess->nc
+#endif
+            ) {
+                nc_est = (uint64_t)per - (uint64_t)EDGE_E7_RX_CAP -
+                         (uint64_t)EDGE_E7_TX_CAP;
+            }
+            sess_bytes = (uint64_t)sizeof(edge_e7_session_t) + bufs + nc_est;
+        }
+        /* shelf row is embedded in runtime[]; charge pro-rata struct size */
+        shelf_bytes = (uint64_t)sizeof(edge_e7_runtime_shelf_t) + sess_bytes;
+        n = snprintf(
+            buf + off, buf_sz - off,
+            "%s{\"id\":\"shelf:%u\",\"label\":%s,\"mac\":%s,"
+            "\"bytes\":%llu,\"enabled\":%s,\"from_yaml\":%s,"
+            "\"vendor\":\"%s\","
+            "\"has_session\":%s,\"session_bytes\":%llu,"
+            "\"session_state\":\"%s\","
+            "\"share_of_fixed_table_bytes\":%zu}",
+            first ? "" : ",", (unsigned)i,
+            rs->label[0] ? esc_label : esc_mac, esc_mac,
+            (unsigned long long)shelf_bytes, rs->enabled ? "true" : "false",
+            rs->from_yaml ? "true" : "false",
+            rs->vendor[0] ? rs->vendor : "",
+            sess ? "true" : "false", (unsigned long long)sess_bytes,
+            sess ? edge_e7_sess_state_name(sess->state) : "none",
+            sizeof(edge_e7_runtime_shelf_t));
+        if (n < 0 || (size_t)n >= buf_sz - off) {
+            return -1;
+        }
+        off += (size_t)n;
+        first = 0;
+    }
+
+    n = snprintf(buf + off, buf_sz - off, "]}");
+    if (n < 0 || (size_t)n >= buf_sz - off) {
+        return -1;
+    }
+    off += (size_t)n;
+    return (int)off;
 }
 
 void edge_e7_netconf_profile(void *cfg_out)
@@ -1259,8 +1533,8 @@ static void session_close(edge_e7_callhome_t *ch, edge_e7_session_t *s)
         close(s->fd);
         s->fd = -1;
     }
-    free(s->rx);
-    free(s->tx);
+    host_free(s->rx);
+    host_free(s->tx);
     s->rx = NULL;
     s->tx = NULL;
     s->tx_len = s->tx_off = 0;
@@ -1476,11 +1750,11 @@ static edge_e7_session_t *session_alloc(edge_e7_callhome_t *ch)
             s->slot = (int)i;
             s->fd = -1;
             s->state = EDGE_E7_SESS_ACCEPTED;
-            s->rx = (uint8_t *)malloc(EDGE_E7_RX_CAP);
-            s->tx = (uint8_t *)malloc(EDGE_E7_TX_CAP);
+            s->rx = (uint8_t *)host_alloc_kind(EDGE_MEM_E7, EDGE_E7_RX_CAP);
+            s->tx = (uint8_t *)host_alloc_kind(EDGE_MEM_E7, EDGE_E7_TX_CAP);
             if (!s->rx || !s->tx) {
-                free(s->rx);
-                free(s->tx);
+                host_free(s->rx);
+                host_free(s->tx);
                 s->rx = s->tx = NULL;
                 s->state = EDGE_E7_SESS_EMPTY;
                 return NULL;
@@ -2116,6 +2390,14 @@ static void on_notification(edge_e7_callhome_t *ch, edge_e7_session_t *s,
         if (lab_v1_map_key(s->identity.mac, n->xml, n->xml_len, key,
                            sizeof(key)) == 0) {
             notify_coalesce(ch, "map.dynamic", key);
+        }
+        /* ClickHouse history: aggregated JSONEachRow (async flush). */
+        if (ch->clickhouse) {
+            const char *sid =
+                s->identity.mac[0] ? s->identity.mac : s->identity.device_id;
+            (void)edge_clickhouse_enqueue_e7_event(
+                ch->clickhouse, s->identity.mac, sid, s->peer, n->xml,
+                n->xml_len, source[0] ? source : "e7");
         }
     }
 }
@@ -3997,30 +4279,31 @@ edge_e7_callhome_t *edge_e7_callhome_create(const edge_e7_callhome_opts_t *opts)
         dirty_cap = EDGE_E7_DIRTY_CAP_DEFAULT;
     }
 
-    ch = (edge_e7_callhome_t *)calloc(1, sizeof(*ch));
+    ch = (edge_e7_callhome_t *)host_alloc_kind(EDGE_MEM_E7, sizeof(*ch));
     if (!ch) {
         return NULL;
     }
     ch->cfg = opts->cfg;
     ch->state = opts->state;
     ch->hub = opts->hub;
+    ch->clickhouse = NULL;
     ch->listen_fd = -1;
     ch->bound_host[0] = '\0';
     ch->bound_port = 0;
     ch->bound_enabled = 0;
     ch->max_sessions = max_s;
     ch->dirty_cap = dirty_cap;
-    ch->sessions =
-        (edge_e7_session_t *)calloc(max_s, sizeof(edge_e7_session_t));
+    ch->sessions = (edge_e7_session_t *)host_alloc_kind(
+        EDGE_MEM_E7, (size_t)max_s * sizeof(edge_e7_session_t));
     if (!ch->sessions) {
-        free(ch);
+        host_free(ch);
         return NULL;
     }
-    ch->dirty = (edge_e7_dirty_slot_t *)calloc(dirty_cap,
-                                               sizeof(edge_e7_dirty_slot_t));
+    ch->dirty = (edge_e7_dirty_slot_t *)host_alloc_kind(
+        EDGE_MEM_E7, (size_t)dirty_cap * sizeof(edge_e7_dirty_slot_t));
     if (!ch->dirty) {
-        free(ch->sessions);
-        free(ch);
+        host_free(ch->sessions);
+        host_free(ch);
         return NULL;
     }
     {
@@ -4071,9 +4354,9 @@ void edge_e7_callhome_destroy(edge_e7_callhome_t *ch)
         ch->yang = NULL;
     }
 #endif
-    free(ch->sessions);
-    free(ch->dirty);
-    free(ch);
+    host_free(ch->sessions);
+    host_free(ch->dirty);
+    host_free(ch);
 }
 
 int edge_e7_callhome_apply_config(edge_e7_callhome_t *ch,
@@ -4132,10 +4415,17 @@ int edge_e7_callhome_apply_config(edge_e7_callhome_t *ch,
 
 void edge_e7_callhome_set_hub(edge_e7_callhome_t *ch, edge_ws_hub_t *hub)
 {
-    if (!ch) {
-        return;
+    if (ch) {
+        ch->hub = hub;
     }
-    ch->hub = hub;
+}
+
+void edge_e7_callhome_set_clickhouse(edge_e7_callhome_t *ch,
+                                     edge_clickhouse_t *clickhouse)
+{
+    if (ch) {
+        ch->clickhouse = clickhouse;
+    }
 }
 
 int edge_e7_callhome_enabled(const edge_e7_callhome_t *ch)

@@ -5,6 +5,8 @@
 
 #include "edge_ws.h"
 
+#include "host_alloc.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -311,13 +313,14 @@ edge_ws_hub_t *edge_ws_hub_create(size_t max_subs)
     if (max_subs == 0) {
         max_subs = 64;
     }
-    h = (edge_ws_hub_t *)calloc(1, sizeof(*h));
+    h = (edge_ws_hub_t *)host_alloc_kind(EDGE_MEM_WS, sizeof(*h));
     if (!h) {
         return NULL;
     }
-    h->subs = (edge_ws_sub_t *)calloc(max_subs, sizeof(edge_ws_sub_t));
+    h->subs = (edge_ws_sub_t *)host_alloc_kind(EDGE_MEM_WS,
+                                               max_subs * sizeof(edge_ws_sub_t));
     if (!h->subs) {
-        free(h);
+        host_free(h);
         return NULL;
     }
     h->max_subs = max_subs;
@@ -336,13 +339,13 @@ void edge_ws_hub_destroy(edge_ws_hub_t *h)
     for (i = 0; i < h->max_subs; i++) {
         if (h->subs[i].active) {
             for (j = 0; j < EDGE_WS_PENDING_MAX; j++) {
-                free(h->subs[i].q[j]);
+                host_free(h->subs[i].q[j]);
                 h->subs[i].q[j] = NULL;
             }
         }
     }
-    free(h->subs);
-    free(h);
+    host_free(h->subs);
+    host_free(h);
 }
 
 int edge_ws_hub_subscribe(edge_ws_hub_t *h, int conn_slot)
@@ -364,7 +367,7 @@ void edge_ws_hub_unsubscribe(edge_ws_hub_t *h, int conn_slot)
     }
     s = &h->subs[conn_slot];
     for (j = 0; j < EDGE_WS_PENDING_MAX; j++) {
-        free(s->q[j]);
+        host_free(s->q[j]);
         s->q[j] = NULL;
         s->qlen[j] = 0;
     }
@@ -408,7 +411,7 @@ static int sub_push(edge_ws_sub_t *s, const char *msg, size_t len,
     }
     if (s->n >= EDGE_WS_PENDING_MAX) {
         /* drop oldest */
-        free(s->q[s->head]);
+        host_free(s->q[s->head]);
         s->q[s->head] = NULL;
         s->qlen[s->head] = 0;
         s->head = (s->head + 1) % EDGE_WS_PENDING_MAX;
@@ -417,7 +420,7 @@ static int sub_push(edge_ws_sub_t *s, const char *msg, size_t len,
             h->drop_oldest++;
         }
     }
-    copy = (char *)malloc(len + 1);
+    copy = (char *)host_alloc_kind(EDGE_MEM_WS, len + 1);
     if (!copy) {
         return -1;
     }
@@ -490,7 +493,7 @@ int edge_ws_hub_take_pending(edge_ws_hub_t *h, int conn_slot, char *out,
     if (out_len) {
         *out_len = s->qlen[s->head];
     }
-    free(s->q[s->head]);
+    host_free(s->q[s->head]);
     s->q[s->head] = NULL;
     s->qlen[s->head] = 0;
     s->head = (s->head + 1) % EDGE_WS_PENDING_MAX;

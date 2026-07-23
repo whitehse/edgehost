@@ -3,17 +3,16 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>edgehost lab console</title>
+  <title>Lab console · edgehost</title>
   <link rel="stylesheet" href="/app.css"/>
 </head>
-<body>
-  <header>
-    <h1><a href="/" class="home-link">edgehost</a> · lab console</h1>
+<body class="app-shell lab-wide" data-nav="lab" data-title="Lab console"
+      data-subtitle="Health, memory, APIs — engineering workspace"
+      data-wide="1">
+  <header class="hidden">
+    <h1>Lab console</h1>
     <span id="authBadge" class="badge muted">not logged in</span>
   </header>
-  <p class="hint nav-links">
-    <a href="/">Home</a> · <a href="/map/">Map</a> · <a href="/e7/">E7 Call Home</a>
-  </p>
 
   <section class="card">
     <h2>Health</h2>
@@ -22,8 +21,65 @@
   </section>
 
   <section class="card">
+    <h2>System memory impact</h2>
+    <p class="hint">
+      Hierarchical report from <code>GET /api/v1/debug/memory</code> (lab session).
+      Process VmRSS is kernel ground truth. Each module shows accounted heap and
+      per-item costs (E7 shelves/sessions, HTTP connections, state namespaces).
+      Set a baseline overnight to see which module grew.
+    </p>
+    <div class="row">
+      <button type="button" id="btnMemRefresh">Refresh memory</button>
+      <button type="button" id="btnMemBaseline" class="ghost">Set baseline</button>
+      <button type="button" id="btnMemClearBaseline" class="ghost">Clear baseline</button>
+      <label class="inline-check"><input type="checkbox" id="memAuto" checked/> Auto 5s</label>
+      <span id="memUpdated" class="badge muted">—</span>
+    </div>
+    <div id="memSummary" class="mem-summary">…</div>
+    <h3 class="subhead">Module share of accounted host heap</h3>
+    <canvas id="memBars" class="mem-bars" width="900" height="220" aria-label="Module memory bar chart"></canvas>
+    <div id="memModules" class="mem-modules"></div>
+    <details class="mem-raw-wrap">
+      <summary>Raw JSON</summary>
+      <pre id="memRaw" class="compact"></pre>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>CPU flame graph</h2>
+    <p class="hint">
+      In-process sampler: host loop tick (~100&nbsp;Hz while profiling) +
+      <code>backtrace()</code> / <code>dladdr</code> (no root). Optionally opens
+      <code>perf_event_open</code> when the kernel allows. For offline eBPF/perf
+      flame graphs, see capabilities JSON and <code>scripts/cpu-flame-perf.sh</code>
+      (<code>linux-perf</code> + Brendan Gregg FlameGraph scripts).
+    </p>
+    <div class="row">
+      <label>Seconds
+        <input id="cpuSecs" type="number" min="1" max="60" value="10" style="width:5rem;display:inline-block"/>
+      </label>
+      <label>Mode
+        <select id="cpuMode">
+          <option value="auto">auto (host tick)</option>
+          <option value="perf">perf_event probe + tick</option>
+        </select>
+      </label>
+      <button type="button" id="btnCpuStart">Start profile</button>
+      <button type="button" id="btnCpuRefresh" class="ghost">Refresh status</button>
+      <span id="cpuStatus" class="badge muted">idle</span>
+    </div>
+    <pre id="cpuCaps" class="compact">…</pre>
+    <canvas id="flameCanvas" class="flame-canvas" width="960" height="360" aria-label="CPU flame graph"></canvas>
+    <p id="flameTip" class="hint">Hover a frame for detail.</p>
+    <details>
+      <summary>Folded stacks</summary>
+      <pre id="cpuFolded" class="compact log"></pre>
+    </details>
+  </section>
+
+  <section class="card">
     <h2>Lab login</h2>
-    <p class="hint">POST /auth/lab-login → <code>edge_session</code> cookie (ADR-013).</p>
+    <p class="hint">POST /auth/lab-login → <code>edge_session</code> cookie (ADR-013). Required for debug APIs.</p>
     <label>Password <input id="labPw" type="password" value="lab" autocomplete="current-password"/></label>
     <button type="button" id="btnLogin">Login</button>
     <button type="button" id="btnMe">GET /auth/me</button>
@@ -78,6 +134,7 @@
   </section>
 
   <script src="/app.js"></script>
+  <script src="/shell.js"></script>
   <script src="/lab/console.js"></script>
 </body>
 </html>

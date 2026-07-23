@@ -16,6 +16,10 @@
 #include "edge_tls.h"
 #include "edge_ws.h"
 #include "edgecore.h"
+#include "edge_ca.h"
+#include "edge_clickhouse.h"
+#include "edge_debug.h"
+#include "host_alloc.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -104,6 +108,10 @@ typedef struct {
     edge_pq_sidecar_config_t   pq_cfg;
     uint64_t                   last_scrape_ms;
     edge_e7_callhome_t        *e7; /* optional; not owned */
+    edge_clickhouse_t         *clickhouse; /* optional; not owned */
+    const char                *telemetry_user;     /* from cfg; not owned */
+    const char                *telemetry_password; /* from cfg; not owned */
+    edge_ca_t                 *ca;         /* optional; not owned */
     int                        e7_accept_pending;
     struct sockaddr_storage    e7_client_addr;
     socklen_t                  e7_client_addr_len;
@@ -118,6 +126,44 @@ static int ws_try_send_pending(server_t *srv, conn_t *c);
 static int handle_ws_recv(server_t *srv, conn_t *c, size_t n);
 static void ws_flush_all_pending(server_t *srv);
 static int handle_http_bytes(server_t *srv, conn_t *c, size_t n);
+
+static void publish_http_debug(server_t *srv)
+{
+    edge_debug_http_snap_t snap;
+    int i;
+    int active = 0;
+    int ws = 0;
+
+    if (!srv) {
+        return;
+    }
+    memset(&snap, 0, sizeof(snap));
+    snap.max_conns = srv->max_conns;
+    snap.send_cap = srv->send_cap;
+    snap.conn_table_bytes =
+        (size_t)srv->max_conns * sizeof(conn_t);
+    if (srv->metrics) {
+        snap.accepts = srv->metrics->accepts;
+        snap.requests = srv->metrics->requests;
+        snap.active_conns = (int)srv->metrics->active_conns;
+    }
+    for (i = 0; i < srv->max_conns; i++) {
+        if (srv->conns[i].state == CS_FREE) {
+            continue;
+        }
+        active++;
+        if (srv->conns[i].state == CS_WS_RECV ||
+            srv->conns[i].state == CS_WS_SEND || srv->conns[i].keep_ws) {
+            ws++;
+        }
+    }
+    snap.active_conns = active;
+    snap.ws_conns = ws;
+    snap.send_bufs_live = (size_t)active * srv->send_cap;
+    snap.recv_bufs_embedded = (size_t)active * sizeof(((conn_t *)0)->recv_buf);
+    snap.valid = 1;
+    edge_debug_http_publish(&snap);
+}
 
 void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
 {
@@ -138,6 +184,8 @@ void edge_iouring_opts_defaults(edge_iouring_opts_t *o)
     o->plugins = NULL;
     o->service_api_key = NULL;
     o->e7 = NULL;
+    o->clickhouse = NULL;
+    o->ca = NULL;
     o->config_path = NULL;
     o->core = NULL;
 }
@@ -304,7 +352,7 @@ static void close_conn(server_t *srv, conn_t *c)
         SSL_free(c->ssl);
         c->ssl = NULL;
     }
-    free(c->send_buf);
+    host_free(c->send_buf);
     c->send_buf = NULL;
     c->send_cap = 0;
     if (c->fd >= 0) {
@@ -331,13 +379,13 @@ static conn_t *alloc_conn(server_t *srv)
             c->fd = -1;
             c->state = CS_RECV;
             c->send_cap = srv->send_cap;
-            c->send_buf = (char *)malloc(c->send_cap);
+            c->send_buf = (char *)host_alloc_kind(EDGE_MEM_HTTP, c->send_cap);
             if (!c->send_buf) {
                 return NULL;
             }
             c->http = edge_http1_serve_create();
             if (!c->http) {
-                free(c->send_buf);
+                host_free(c->send_buf);
                 c->send_buf = NULL;
                 return NULL;
             }
@@ -347,6 +395,10 @@ static conn_t *alloc_conn(server_t *srv)
             edge_http1_serve_set_auth(c->http, srv->auth);
             edge_http1_serve_set_plugin_host(c->http, srv->plugins);
             edge_http1_serve_set_e7(c->http, srv->e7);
+            edge_http1_serve_set_clickhouse(c->http, srv->clickhouse);
+            edge_http1_serve_set_telemetry_auth(c->http, srv->telemetry_user,
+                                                srv->telemetry_password);
+            edge_http1_serve_set_ca(c->http, srv->ca);
             edge_http1_serve_set_outbound_policy(
                 c->http, srv->cfg->dns_allow_blocking,
                 srv->cfg->http_max_upstream_body_bytes);
@@ -898,6 +950,17 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     srv.plugins = opts->plugins;
     srv.service_api_key = opts->service_api_key;
     srv.e7 = opts->e7;
+    srv.clickhouse = opts->clickhouse;
+    srv.telemetry_user =
+        cfg && cfg->clickhouse_telemetry_user[0]
+            ? cfg->clickhouse_telemetry_user
+            : NULL;
+    srv.telemetry_password =
+        cfg ? cfg->clickhouse_telemetry_password : NULL;
+    srv.ca = opts->ca;
+    if (srv.e7 && srv.clickhouse) {
+        edge_e7_callhome_set_clickhouse(srv.e7, srv.clickhouse);
+    }
     srv.e7_accept_pending = 0;
     srv.mono_ms = mono_now_ms();
     if (edge_tls_config_enabled(cfg->tls_cert, cfg->tls_key)) {
@@ -942,7 +1005,8 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         edge_e7_callhome_set_hub(srv.e7, srv.hub);
     }
 
-    srv.conns = (conn_t *)calloc((size_t)srv.max_conns, sizeof(conn_t));
+    srv.conns = (conn_t *)host_alloc_kind(
+        EDGE_MEM_HTTP, (size_t)srv.max_conns * sizeof(conn_t));
     if (!srv.conns) {
         edge_ws_hub_destroy(srv.hub);
         edge_tls_ctx_free(srv.tls_ctx);
@@ -959,7 +1023,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
 
     srv.listen_fd = create_listen_socket(cfg, opts->backlog);
     if (srv.listen_fd < 0) {
-        free(srv.conns);
+        host_free(srv.conns);
         edge_ws_hub_destroy(srv.hub);
         edge_tls_ctx_free(srv.tls_ctx);
         if (srv.store_owned && srv.store) {
@@ -975,7 +1039,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             fprintf(stderr, "edgehost: io_uring_queue_init: %s\n",
                     strerror(-rc));
             close(srv.listen_fd);
-            free(srv.conns);
+            host_free(srv.conns);
             edge_ws_hub_destroy(srv.hub);
             edge_tls_ctx_free(srv.tls_ctx);
             if (srv.store_owned && srv.store) {
@@ -992,7 +1056,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
                 fprintf(stderr, "edgehost: e7_callhome bind failed\n");
                 io_uring_queue_exit(&srv.ring);
                 close(srv.listen_fd);
-                free(srv.conns);
+                host_free(srv.conns);
                 edge_ws_hub_destroy(srv.hub);
                 edge_tls_ctx_free(srv.tls_ctx);
                 if (srv.store_owned && srv.store) {
@@ -1006,7 +1070,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     if (submit_accept(&srv) != 0) {
         io_uring_queue_exit(&srv.ring);
         close(srv.listen_fd);
-        free(srv.conns);
+        host_free(srv.conns);
         edge_ws_hub_destroy(srv.hub);
         edge_tls_ctx_free(srv.tls_ctx);
         if (srv.store_owned && srv.store) {
@@ -1019,7 +1083,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
             fprintf(stderr, "edgehost: e7 accept submit failed\n");
             io_uring_queue_exit(&srv.ring);
             close(srv.listen_fd);
-            free(srv.conns);
+            host_free(srv.conns);
             edge_ws_hub_destroy(srv.hub);
             edge_tls_ctx_free(srv.tls_ctx);
             if (srv.store_owned && srv.store) {
@@ -1047,20 +1111,27 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
         int res;
 
         ts.tv_sec = 0;
-        ts.tv_nsec = 200 * 1000 * 1000L;
+        /* Tighten poll while CPU profiling so host_tick can sample ~100Hz. */
+        ts.tv_nsec = edge_debug_cpu_profiling() ? (10L * 1000L * 1000L)
+                                               : (200L * 1000L * 1000L);
         rc = io_uring_wait_cqe_timeout(&srv.ring, &cqe, &ts);
         srv.mono_ms = mono_now_ms();
+        edge_debug_cpu_on_tick(srv.mono_ms);
         /* ADR-005 / K15: SIGHUP → shadow YAML → apply edgecore + state + e7 */
         try_hup_reload(&srv);
         if (rc == -ETIME || rc == -EAGAIN) {
             if (should_stop(&srv)) {
                 break;
             }
+            publish_http_debug(&srv);
             /* opportunistic fan-out flush */
             ws_flush_all_pending(&srv);
             /* PR-4a: E7 session pump (identity + CLIENT hello I/O) */
             if (srv.e7) {
                 edge_e7_callhome_on_tick(srv.e7, srv.mono_ms);
+            }
+            if (srv.clickhouse) {
+                edge_clickhouse_on_tick(srv.clickhouse, srv.mono_ms);
             }
             /* P1.11: periodic pqproxy metrics scrape */
             if (srv.pq_cfg.enabled && srv.store) {
@@ -1202,7 +1273,7 @@ int edge_iouring_run(const edge_config_t *cfg, const edge_iouring_opts_t *opts)
     }
     io_uring_queue_exit(&srv.ring);
     close(srv.listen_fd);
-    free(srv.conns);
+    host_free(srv.conns);
     edge_ws_hub_destroy(srv.hub);
     edge_tls_ctx_free(srv.tls_ctx);
     if (srv.store_owned && srv.store) {

@@ -5,6 +5,9 @@
 
 #include "edge_http1_serve.h"
 
+#include "edge_ca.h"
+#include "edge_clickhouse.h"
+#include "edge_debug.h"
 #include "edge_explain.h"
 #include "edge_state_notify.h"
 #include "edge_static.h"
@@ -34,9 +37,14 @@ struct edge_http1_serve {
     edge_principal_t     principal;
     edge_plugin_host_t  *plugins; /* not owned */
     edge_e7_callhome_t  *e7;      /* not owned; PR-5 */
+    edge_clickhouse_t   *clickhouse; /* not owned */
+    edge_ca_t           *ca;         /* not owned */
     int                  allow_blocking_dns;
     size_t               max_upstream_body;
     const char          *service_api_key; /* not owned */
+    /** Optional CPE telemetry Basic Auth (not owned; from edge_config). */
+    const char          *telemetry_user;
+    const char          *telemetry_password;
     uint32_t             inbound_slot;    /* set by host; default 0 */
 
     /* Accumulated request for body (PUT/POST) — host buffer */
@@ -1223,6 +1231,522 @@ static int dispatch_explain(edge_http1_serve_t *s, edge_metrics_t *metrics,
     }
 }
 
+/**
+ * /api/v1/ca/ routes and GET /ca/crl.pem — Certificate Authority.
+ * Admin routes require employee_admin (E7_ADMIN); CSR sign allows employee.
+ * Public CRL is open (no session).
+ */
+static int dispatch_ca(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
+                       size_t out_cap, size_t *out_len)
+{
+    int gate;
+    int status = 500;
+    int rc;
+    const uint8_t *body = NULL;
+    size_t body_len = 0;
+    int is_public_crl =
+        (strcmp(s->path, "/ca/crl.pem") == 0 ||
+         strcmp(s->path, "/api/v1/ca/crl.pem") == 0) &&
+        strcmp(s->method, "GET") == 0;
+    int is_sign = (strstr(s->path, "/api/v1/ca/sign") == s->path) &&
+                  strcmp(s->method, "POST") == 0;
+    int is_admin = !is_public_crl && !is_sign &&
+                   (strcmp(s->method, "POST") == 0 ||
+                    strstr(s->path, "/revoke") != NULL ||
+                    strstr(s->path, "/authorities") != NULL);
+
+    if (!is_public_crl) {
+        gate = require_rbac(s, is_admin ? EDGE_RES_E7_ADMIN : EDGE_RES_E7_GET,
+                            NULL, NULL, metrics, out, out_cap, out_len);
+        if (gate != 0) {
+            return gate;
+        }
+    }
+
+    if (strcmp(s->method, "POST") == 0) {
+        if (!wait_full_body(s) && s->content_length > 0) {
+            return 0;
+        }
+        if (s->have_body_off && s->acc_len > s->body_off) {
+            body = s->acc + s->body_off;
+            body_len = s->acc_len - s->body_off;
+            if (s->content_length >= 0 && body_len > (size_t)s->content_length) {
+                body_len = (size_t)s->content_length;
+            }
+        }
+    }
+
+    rc = edge_ca_http_dispatch(s->ca, s->method, s->path, body, body_len, out,
+                               out_cap, out_len, &status);
+    if (rc == 0) {
+        return 0;
+    }
+    if (rc < 0) {
+        return -1;
+    }
+    note_response(metrics, status);
+    return 1;
+}
+
+/**
+ * POST /api/v1/telemetry/events — CPE / agent JSON into ClickHouse batch.
+ * Body: one JSON object, or NDJSON (multiple objects separated by newlines),
+ * or {"events":[ {...}, ... ]}.
+ * GET /api/v1/telemetry/status — aggregator stats.
+ */
+static int dispatch_telemetry(edge_http1_serve_t *s, edge_metrics_t *metrics,
+                              char *out, size_t out_cap, size_t *out_len)
+{
+    int gate;
+    char jbuf[512];
+    int jn;
+    const char *p;
+    const uint8_t *body;
+    size_t body_len;
+
+    if (strncmp(s->path, "/api/v1/telemetry", 17) != 0) {
+        return 0;
+    }
+    p = s->path + 17;
+    if (*p == '?') {
+        return 0;
+    }
+    if (*p != '\0' && *p != '/') {
+        return 0;
+    }
+    if (*p == '/') {
+        p++;
+    }
+
+    /* Prefer telemetry Basic Auth → ingest role, else employee session. */
+    if (!s->principal.authenticated && s->telemetry_user &&
+        s->telemetry_user[0]) {
+        char authz[384];
+        if (http1_get_header(s->h1, "Authorization", authz, sizeof(authz)) ==
+                0 &&
+            strncmp(authz, "Basic ", 6) == 0) {
+            const char *b64 = authz + 6;
+            unsigned char raw[192];
+            size_t raw_len = 0;
+            size_t bi = 0;
+            size_t blen = strlen(b64);
+            int ok_dec = 1;
+
+            while (blen > 0 &&
+                   (b64[blen - 1] == '\r' || b64[blen - 1] == '\n' ||
+                    b64[blen - 1] == ' ' || b64[blen - 1] == '\t')) {
+                blen--;
+            }
+            while (bi + 3 < blen && raw_len + 3 < sizeof(raw) && ok_dec) {
+                int vals[4];
+                size_t k;
+                for (k = 0; k < 4; k++) {
+                    unsigned char c = (unsigned char)b64[bi + k];
+                    if (c >= 'A' && c <= 'Z') {
+                        vals[k] = c - 'A';
+                    } else if (c >= 'a' && c <= 'z') {
+                        vals[k] = c - 'a' + 26;
+                    } else if (c >= '0' && c <= '9') {
+                        vals[k] = c - '0' + 52;
+                    } else if (c == '+') {
+                        vals[k] = 62;
+                    } else if (c == '/') {
+                        vals[k] = 63;
+                    } else if (c == '=') {
+                        vals[k] = -2; /* pad */
+                    } else {
+                        ok_dec = 0;
+                        break;
+                    }
+                }
+                if (!ok_dec) {
+                    break;
+                }
+                if (vals[0] < 0 || vals[1] < 0) {
+                    ok_dec = 0;
+                    break;
+                }
+                raw[raw_len++] =
+                    (unsigned char)((vals[0] << 2) | (vals[1] >> 4));
+                if (vals[2] >= 0) {
+                    raw[raw_len++] =
+                        (unsigned char)(((vals[1] & 15) << 4) | (vals[2] >> 2));
+                }
+                if (vals[3] >= 0) {
+                    raw[raw_len++] =
+                        (unsigned char)(((vals[2] & 3) << 6) | vals[3]);
+                }
+                bi += 4;
+            }
+            if (ok_dec && raw_len > 0) {
+                char userpass[192];
+                char *colon;
+                if (raw_len >= sizeof(userpass)) {
+                    raw_len = sizeof(userpass) - 1;
+                }
+                memcpy(userpass, raw, raw_len);
+                userpass[raw_len] = '\0';
+                colon = strchr(userpass, ':');
+                if (colon) {
+                    *colon = '\0';
+                    if (strcmp(userpass, s->telemetry_user) == 0 &&
+                        strcmp(colon + 1,
+                               s->telemetry_password
+                                   ? s->telemetry_password
+                                   : "") == 0) {
+                        s->principal.authenticated = 1;
+                        snprintf(s->principal.sub, sizeof(s->principal.sub),
+                                 "cpe_ingest");
+                        s->principal.roles = EDGE_ROLE_INGEST;
+                    }
+                }
+            }
+        }
+    }
+
+    gate = require_rbac(s, EDGE_RES_TELEMETRY, NULL, NULL, metrics, out,
+                        out_cap, out_len);
+    if (gate != 0) {
+        return gate;
+    }
+
+    if ((p[0] == '\0' || strcmp(p, "status") == 0) &&
+        strcmp(s->method, "GET") == 0) {
+        jn = edge_clickhouse_status_json(s->clickhouse, jbuf, sizeof(jbuf));
+        if (jn < 0) {
+            static const char bodyz[] = "{\"enabled\":false}";
+            if (build_response(out, out_cap, 200, "OK", "application/json",
+                               bodyz, sizeof(bodyz) - 1, out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 200);
+            return 1;
+        }
+        if (build_response(out, out_cap, 200, "OK", "application/json", jbuf,
+                           (size_t)jn, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 200);
+        return 1;
+    }
+
+    if ((strcmp(p, "events") == 0 || strncmp(p, "events?", 7) == 0) &&
+        strcmp(s->method, "POST") == 0) {
+        size_t queued = 0;
+        size_t i = 0;
+        int rc = 0;
+
+        if (!edge_clickhouse_enabled(s->clickhouse)) {
+            static const char bodyz[] =
+                "{\"ok\":false,\"error\":\"CLICKHOUSE_DISABLED\"}";
+            if (build_response(out, out_cap, 503, "Service Unavailable",
+                               "application/json", bodyz, sizeof(bodyz) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 503);
+            return 1;
+        }
+        if (!wait_full_body(s) && s->content_length > 0) {
+            return 0; /* need more body bytes */
+        }
+        if (!s->have_body_off) {
+            return 0;
+        }
+        body = s->acc + s->body_off;
+        body_len = s->acc_len > s->body_off ? s->acc_len - s->body_off : 0;
+        if (s->content_length >= 0 && body_len > (size_t)s->content_length) {
+            body_len = (size_t)s->content_length;
+        }
+        if (body_len == 0) {
+            static const char bodyz[] = "{\"ok\":false,\"error\":\"EMPTY_BODY\"}";
+            if (build_response(out, out_cap, 400, "Bad Request",
+                               "application/json", bodyz, sizeof(bodyz) - 1,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 400);
+            return 1;
+        }
+
+        /* NDJSON or single object */
+        while (i < body_len) {
+            size_t start;
+            size_t end;
+            while (i < body_len &&
+                   (body[i] == ' ' || body[i] == '\n' || body[i] == '\r' ||
+                    body[i] == '\t')) {
+                i++;
+            }
+            if (i >= body_len) {
+                break;
+            }
+            if (body[i] != '{') {
+                /* skip non-object (e.g. array wrapper start) */
+                if (body[i] == '[') {
+                    i++;
+                    continue;
+                }
+                break;
+            }
+            start = i;
+            {
+                int depth = 0;
+                int in_str = 0;
+                int esc = 0;
+                for (; i < body_len; i++) {
+                    char c = (char)body[i];
+                    if (in_str) {
+                        if (esc) {
+                            esc = 0;
+                        } else if (c == '\\') {
+                            esc = 1;
+                        } else if (c == '"') {
+                            in_str = 0;
+                        }
+                        continue;
+                    }
+                    if (c == '"') {
+                        in_str = 1;
+                    } else if (c == '{') {
+                        depth++;
+                    } else if (c == '}') {
+                        depth--;
+                        if (depth == 0) {
+                            i++;
+                            break;
+                        }
+                    }
+                }
+                end = i;
+            }
+            if (end > start) {
+                rc = edge_clickhouse_enqueue_cpe_ndjson(
+                    s->clickhouse, (const char *)body + start, end - start);
+                if (rc == 0) {
+                    queued++;
+                }
+            }
+            while (i < body_len && (body[i] == ',' || body[i] == ' ' ||
+                                    body[i] == '\n' || body[i] == '\r')) {
+                i++;
+            }
+        }
+
+        {
+            ch_async_stats_t st;
+            edge_clickhouse_stats(s->clickhouse, &st);
+            jn = snprintf(jbuf, sizeof(jbuf),
+                          "{\"ok\":%s,\"queued\":%zu,\"rows_queued\":%llu,"
+                          "\"flush_err\":%llu}",
+                          queued > 0 ? "true" : "false", queued,
+                          (unsigned long long)st.rows_queued,
+                          (unsigned long long)st.flush_err);
+        }
+        if (jn < 0) {
+            return -1;
+        }
+        if (build_response(out, out_cap, queued > 0 ? 202 : 400, "Accepted",
+                           "application/json", jbuf, (size_t)jn, out_len) !=
+            0) {
+            return -1;
+        }
+        note_response(metrics, queued > 0 ? 202 : 400);
+        return 1;
+    }
+
+    {
+        static const char bodyz[] = "{\"error\":\"NOT_FOUND\"}";
+        if (build_response(out, out_cap, 404, "Not Found", "application/json",
+                           bodyz, sizeof(bodyz) - 1, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 404);
+        return 1;
+    }
+}
+
+/**
+ * /api/v1/debug/memory
+ * /api/v1/debug/cpu/capabilities
+ * /api/v1/debug/cpu/profile  GET status|flame|folded, POST start
+ */
+static int dispatch_debug(edge_http1_serve_t *s, edge_metrics_t *metrics,
+                          char *out, size_t out_cap, size_t *out_len)
+{
+    static char jbuf[98304];
+    int jn;
+    int gate;
+    const char *p;
+    const char *ctype = "application/json";
+
+    if (strncmp(s->path, "/api/v1/debug", 13) != 0) {
+        return 0;
+    }
+    p = s->path + 13;
+    if (*p == '?') {
+        return 0;
+    }
+    if (*p != '\0' && *p != '/') {
+        return 0;
+    }
+
+    gate = require_rbac(s, EDGE_RES_E7_GET, NULL, NULL, metrics, out, out_cap,
+                        out_len);
+    if (gate != 0) {
+        return gate;
+    }
+
+    /* strip query */
+    {
+        static char path[256];
+        size_t i = 0;
+        const char *src = s->path;
+        while (*src && *src != '?' && i + 1 < sizeof(path)) {
+            path[i++] = *src++;
+        }
+        path[i] = '\0';
+        p = path + 13;
+        if (*p == '/') {
+            p++;
+        }
+
+        if (strcmp(p, "memory") == 0 && strcmp(s->method, "GET") == 0) {
+            jn = edge_debug_memory_json(metrics, s->store, s->e7, jbuf,
+                                        sizeof(jbuf));
+            if (jn < 0) {
+                static const char body[] = "{\"error\":\"MEMORY_OVERFLOW\"}";
+                if (build_response(out, out_cap, 500, "Internal Server Error",
+                                   "application/json", body, sizeof(body) - 1,
+                                   out_len) != 0) {
+                    return -1;
+                }
+                note_response(metrics, 500);
+                return 1;
+            }
+            if (build_response(out, out_cap, 200, "OK", ctype, jbuf, (size_t)jn,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 200);
+            return 1;
+        }
+
+        if (strcmp(p, "cpu/capabilities") == 0 &&
+            strcmp(s->method, "GET") == 0) {
+            jn = edge_debug_cpu_capabilities_json(jbuf, sizeof(jbuf));
+            if (jn < 0) {
+                return -1;
+            }
+            if (build_response(out, out_cap, 200, "OK", ctype, jbuf, (size_t)jn,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 200);
+            return 1;
+        }
+
+        if (strncmp(p, "cpu/profile", 11) == 0 &&
+            (p[11] == '\0' || p[11] == '/')) {
+            const char *sub = p + 11;
+            if (*sub == '/') {
+                sub++;
+            }
+
+            if (strcmp(s->method, "POST") == 0 &&
+                (sub[0] == '\0' || strcmp(sub, "start") == 0)) {
+                char err[128];
+                int seconds = 10;
+                const char *mode = "auto";
+                /* optional ?seconds=N&mode=sigprof from path query */
+                {
+                    const char *q = strchr(s->path, '?');
+                    if (q) {
+                        const char *sp = strstr(q, "seconds=");
+                        const char *mp = strstr(q, "mode=");
+                        if (sp) {
+                            seconds = atoi(sp + 8);
+                        }
+                        if (mp) {
+                            static char mbuf[16];
+                            size_t mi = 0;
+                            mp += 5;
+                            while (*mp && *mp != '&' && mi + 1 < sizeof(mbuf)) {
+                                mbuf[mi++] = *mp++;
+                            }
+                            mbuf[mi] = '\0';
+                            mode = mbuf;
+                        }
+                    }
+                }
+                if (edge_debug_cpu_profile_start(seconds, mode, err,
+                                                 sizeof(err)) != 0) {
+                    jn = snprintf(jbuf, sizeof(jbuf),
+                                  "{\"ok\":false,\"error\":\"%s\"}",
+                                  err[0] ? err : "start_failed");
+                    if (jn < 0) {
+                        return -1;
+                    }
+                    if (build_response(out, out_cap, 409, "Conflict", ctype,
+                                       jbuf, (size_t)jn, out_len) != 0) {
+                        return -1;
+                    }
+                    note_response(metrics, 409);
+                    return 1;
+                }
+                jn = edge_debug_cpu_profile_status_json(jbuf, sizeof(jbuf));
+                if (jn < 0) {
+                    return -1;
+                }
+                if (build_response(out, out_cap, 200, "OK", ctype, jbuf,
+                                   (size_t)jn, out_len) != 0) {
+                    return -1;
+                }
+                note_response(metrics, 200);
+                return 1;
+            }
+
+            if (strcmp(s->method, "GET") == 0) {
+                if (strcmp(sub, "flame") == 0) {
+                    jn = edge_debug_cpu_profile_flame_json(jbuf, sizeof(jbuf));
+                } else if (strcmp(sub, "folded") == 0) {
+                    jn = edge_debug_cpu_profile_folded(jbuf, sizeof(jbuf));
+                    ctype = "text/plain";
+                } else {
+                    jn = edge_debug_cpu_profile_status_json(jbuf, sizeof(jbuf));
+                }
+                if (jn < 0) {
+                    return -1;
+                }
+                if (build_response(out, out_cap, 200, "OK", ctype, jbuf,
+                                   (size_t)jn, out_len) != 0) {
+                    return -1;
+                }
+                note_response(metrics, 200);
+                return 1;
+            }
+
+            if (build_response(out, out_cap, 405, "Method Not Allowed",
+                               "text/plain", "method not allowed\n", 19,
+                               out_len) != 0) {
+                return -1;
+            }
+            note_response(metrics, 405);
+            return 1;
+        }
+    }
+
+    {
+        static const char body[] = "{\"error\":\"NOT_FOUND\"}";
+        if (build_response(out, out_cap, 404, "Not Found", "application/json",
+                           body, sizeof(body) - 1, out_len) != 0) {
+            return -1;
+        }
+        note_response(metrics, 404);
+        return 1;
+    }
+}
+
 static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
                        size_t out_cap, size_t *out_len)
 {
@@ -1546,7 +2070,7 @@ static int dispatch_e7(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out
 static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
                     size_t out_cap, size_t *out_len)
 {
-    char json[512];
+    char json[3072];
     int jn;
     static const char ok_body[] = "ok\n";
     static const char nf_body[] = "not found\n";
@@ -1665,6 +2189,34 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
         }
     }
 
+    /* Lab diagnostics: memory hierarchy + CPU flame sampling */
+    if (strncmp(s->path, "/api/v1/debug", 13) == 0 &&
+        (s->path[13] == '\0' || s->path[13] == '/' || s->path[13] == '?')) {
+        st = dispatch_debug(s, metrics, out, out_cap, out_len);
+        if (st != 0) {
+            return st;
+        }
+    }
+
+    /* CPE telemetry proxy → ClickHouse batch (POST /api/v1/telemetry/events) */
+    if (strncmp(s->path, "/api/v1/telemetry", 17) == 0 &&
+        (s->path[17] == '\0' || s->path[17] == '/' || s->path[17] == '?')) {
+        st = dispatch_telemetry(s, metrics, out, out_cap, out_len);
+        if (st != 0) {
+            return st;
+        }
+    }
+
+    /* Certificate Authority + public CRL */
+    if ((strncmp(s->path, "/api/v1/ca", 10) == 0 &&
+         (s->path[10] == '\0' || s->path[10] == '/' || s->path[10] == '?')) ||
+        strcmp(s->path, "/ca/crl.pem") == 0) {
+        st = dispatch_ca(s, metrics, out, out_cap, out_len);
+        if (st != 0) {
+            return st;
+        }
+    }
+
     /* E7 Call Home REST (PR-5) */
     if (strncmp(s->path, "/api/v1/e7", 10) == 0 &&
         (s->path[10] == '\0' || s->path[10] == '/' || s->path[10] == '?')) {
@@ -1693,13 +2245,30 @@ static int dispatch(edge_http1_serve_t *s, edge_metrics_t *metrics, char *out,
     }
 
     if (path_is_health(s->path)) {
-        if (!metrics) {
-            edge_metrics_t tmp;
-            edge_metrics_init(&tmp);
-            jn = edge_metrics_format_health_json(&tmp, json, sizeof(json));
-        } else {
-            jn = edge_metrics_format_health_json(metrics, json, sizeof(json));
+        edge_metrics_memory_extra_t mem_extra;
+        edge_metrics_t tmp;
+        const edge_metrics_t *m = metrics;
+
+        memset(&mem_extra, 0, sizeof(mem_extra));
+        if (s->store) {
+            mem_extra.have_state = 1;
+            mem_extra.state_rss_bytes = edge_state_rss_bytes(s->store);
         }
+        if (s->e7 && edge_e7_callhome_enabled(s->e7)) {
+            uint32_t open_n = edge_e7_callhome_open_count(s->e7);
+            size_t per = edge_e7_session_rss_estimate();
+            mem_extra.have_e7 = 1;
+            mem_extra.e7_sessions_open = open_n;
+            mem_extra.e7_rss_estimate = (uint64_t)open_n * (uint64_t)per;
+            /* max_sessions not exported; 0 means unknown in UI */
+            mem_extra.e7_max_sessions = 0;
+        }
+        if (!m) {
+            edge_metrics_init(&tmp);
+            m = &tmp;
+        }
+        jn = edge_metrics_format_health_json_ex(m, &mem_extra, json,
+                                                sizeof(json));
         if (jn < 0) {
             if (build_response(out, out_cap, 500, "Internal Server Error",
                                "text/plain", "metrics error\n", 14,
@@ -1860,6 +2429,31 @@ void edge_http1_serve_set_e7(edge_http1_serve_t *s, edge_e7_callhome_t *e7)
 {
     if (s) {
         s->e7 = e7;
+    }
+}
+
+void edge_http1_serve_set_clickhouse(edge_http1_serve_t *s,
+                                     edge_clickhouse_t *ch)
+{
+    if (s) {
+        s->clickhouse = ch;
+    }
+}
+
+void edge_http1_serve_set_telemetry_auth(edge_http1_serve_t *s,
+                                         const char *username,
+                                         const char *password)
+{
+    if (s) {
+        s->telemetry_user = username;
+        s->telemetry_password = password;
+    }
+}
+
+void edge_http1_serve_set_ca(edge_http1_serve_t *s, edge_ca_t *ca)
+{
+    if (s) {
+        s->ca = ca;
     }
 }
 

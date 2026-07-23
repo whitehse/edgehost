@@ -107,7 +107,7 @@ static int wait_ready(uint16_t port, const char *req, char *buf, size_t buflen)
 static void test_metrics_json_unit(void)
 {
     edge_metrics_t m;
-    char buf[256];
+    char buf[3072];
     int n;
 
     edge_metrics_init(&m);
@@ -119,6 +119,9 @@ static void test_metrics_json_unit(void)
     assert(strstr(buf, "\"status\":\"ok\"") != NULL);
     assert(strstr(buf, "\"accepts\":3") != NULL);
     assert(strstr(buf, "\"requests\":2") != NULL);
+    assert(strstr(buf, "\"memory\"") != NULL);
+    assert(strstr(buf, "\"host_alloc\"") != NULL);
+    assert(strstr(buf, "\"by_kind\"") != NULL);
     printf("  PASS: metrics JSON unit format\n");
 }
 
@@ -150,6 +153,8 @@ static int test_health_json(void)
     assert(strstr(buf, "\"accepts\":") != NULL);
     assert(strstr(buf, "\"requests\":") != NULL);
     assert(strstr(buf, "\"uptime_s\":") != NULL);
+    assert(strstr(buf, "\"memory\"") != NULL);
+    assert(strstr(buf, "\"host_alloc\"") != NULL);
     waitpid(pid, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "health: child status %d\n", status);

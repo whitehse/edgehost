@@ -187,6 +187,14 @@ int edge_e7_callhome_apply_config(edge_e7_callhome_t *ch,
  */
 void edge_e7_callhome_set_hub(edge_e7_callhome_t *ch, edge_ws_hub_t *hub);
 
+/**
+ * Optional ClickHouse async writer (not owned). When set, NETCONF notifications
+ * are also enqueued as JSONEachRow into e7_netconf_events (aggregated flush).
+ */
+struct edge_clickhouse; /* edge_clickhouse.h */
+void edge_e7_callhome_set_clickhouse(edge_e7_callhome_t *ch,
+                                     struct edge_clickhouse *clickhouse);
+
 /** 1 if instance exists and cfg.e7_enabled. */
 int edge_e7_callhome_enabled(const edge_e7_callhome_t *ch);
 
@@ -247,6 +255,14 @@ void edge_e7_netconf_profile(void *cfg_out /* netconf_config_t * when linked */)
 
 /** Rough per-session RSS estimate used for budget check (bytes). */
 size_t edge_e7_session_rss_estimate(void);
+
+/**
+ * Module object JSON for GET /api/v1/debug/memory (no outer array).
+ * Includes fixed tables, per live session, and per runtime shelf costs.
+ * @return bytes written excl NUL, or -1.
+ */
+int edge_e7_callhome_memory_json(const edge_e7_callhome_t *ch, char *buf,
+                                 size_t buf_sz);
 
 /* ---- REST host APIs (PR-5) ---- */
 

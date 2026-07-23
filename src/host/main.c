@@ -6,6 +6,8 @@
 #include "edge_auth_host.h"
 #include "edge_config.h"
 #include "edge_config_hup.h"
+#include "edge_ca.h"
+#include "edge_clickhouse.h"
 #include "edge_e7_callhome.h"
 #include "edge_iouring.h"
 #include "edge_openai_proxy.h"
@@ -60,6 +62,8 @@ int main(int argc, char **argv)
     edge_teams_config_t teams_cfg, teams_store;
     edge_state_store_t *store = NULL;
     edge_e7_callhome_t *e7 = NULL;
+    edge_clickhouse_t *clickhouse = NULL;
+    edge_ca_t *ca = NULL;
     char service_key_buf[256];
     const char *service_key = NULL;
     edge_event_t ev;
@@ -297,6 +301,61 @@ int main(int argc, char **argv)
                         (unsigned)ac->e7_listen_port);
             }
         }
+        if (ac->clickhouse_enabled) {
+            clickhouse = edge_clickhouse_create(ac);
+            if (!clickhouse) {
+                fprintf(stderr, "edgehost: clickhouse create failed\n");
+                if (e7) {
+                    edge_e7_callhome_destroy(e7);
+                }
+                if (ph) {
+                    edge_plugin_host_destroy(ph);
+                }
+                edge_state_destroy(store);
+                edgecore_destroy(core);
+                return 1;
+            }
+            if (e7) {
+                edge_e7_callhome_set_clickhouse(e7, clickhouse);
+            }
+            fprintf(stderr,
+                    "edgehost: clickhouse enabled table=%s host=%s:%u "
+                    "telemetry_proxy=%d\n",
+                    ac->clickhouse_events_table[0] ? ac->clickhouse_events_table
+                                                   : "edgehost.e7_netconf_events",
+                    ac->clickhouse_host, (unsigned)ac->clickhouse_port,
+                    ac->clickhouse_telemetry_proxy);
+        }
+        if (ac->postgres_ont_status_enabled) {
+            fprintf(stderr,
+                    "edgehost: postgres ont_status schema expected "
+                    "(sql/postgres/001_ont_status.sql) channel=%s\n",
+                    ac->postgres_ont_status_channel[0]
+                        ? ac->postgres_ont_status_channel
+                        : "ont_status");
+        }
+        if (ac->ca_enabled) {
+            ca = edge_ca_create(ac);
+            if (!ca) {
+                fprintf(stderr, "edgehost: ca create failed\n");
+                if (clickhouse) {
+                    edge_clickhouse_destroy(clickhouse);
+                }
+                if (e7) {
+                    edge_e7_callhome_destroy(e7);
+                }
+                if (ph) {
+                    edge_plugin_host_destroy(ph);
+                }
+                edge_state_destroy(store);
+                edgecore_destroy(core);
+                return 1;
+            }
+            fprintf(stderr,
+                    "edgehost: ca enabled pg_sock=%s db=%s user=%s "
+                    "(schema sql/postgres/002_ca.sql)\n",
+                    ac->ca_pg_sock, ac->ca_pg_database, ac->ca_pg_user);
+        }
     }
 
     edge_iouring_opts_defaults(&iopts);
@@ -305,6 +364,8 @@ int main(int argc, char **argv)
     iopts.plugins = ph;
     iopts.service_api_key = service_key;
     iopts.e7 = e7;
+    iopts.clickhouse = clickhouse;
+    iopts.ca = ca;
     iopts.core = core;
     iopts.config_path = config_path; /* SIGHUP reload (ADR-005 / K15) */
     if (store) {
@@ -317,6 +378,12 @@ int main(int argc, char **argv)
     rc = edge_iouring_run(edgecore_config(core), &iopts);
     if (e7) {
         edge_e7_callhome_destroy(e7);
+    }
+    if (clickhouse) {
+        edge_clickhouse_destroy(clickhouse);
+    }
+    if (ca) {
+        edge_ca_destroy(ca);
     }
     if (ph) {
         edge_plugin_host_destroy(ph);

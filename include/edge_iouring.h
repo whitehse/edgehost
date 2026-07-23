@@ -14,6 +14,8 @@
 
 #include "edge_auth.h"
 #include "edge_config.h"
+#include "edge_ca.h"
+#include "edge_clickhouse.h"
 #include "edge_e7_callhome.h"
 #include "edge_metrics.h"
 #include "edge_plugin_host.h"
@@ -72,6 +74,13 @@ typedef struct {
      * (UD_DOMAIN_E7); session I/O is pumped on tick (poll path).
      */
     edge_e7_callhome_t *e7;
+    /**
+     * Optional ClickHouse async client (not destroyed). Flushed on tick;
+     * wired into E7 for notification history inserts.
+     */
+    edge_clickhouse_t *clickhouse;
+    /** Optional Certificate Authority (not destroyed). */
+    edge_ca_t *ca;
     /**
      * Optional YAML path for SIGHUP live reload (ADR-005 / K15). When set and
      * edgehost_hup_take() is true in the wait loop, reloads YAML and applies

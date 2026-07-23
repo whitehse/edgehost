@@ -68,6 +68,37 @@ void edge_config_defaults(edge_config_t *c)
     c->postgres_notify_enabled = 0;
     snprintf(c->postgres_listen_channel, sizeof(c->postgres_listen_channel),
              "map_overlay");
+    /* ClickHouse async writer — disabled until plugins.clickhouse.enabled. */
+    c->clickhouse_enabled = 0;
+    c->clickhouse_telemetry_proxy = 1;
+    c->clickhouse_telemetry_user[0] = '\0';
+    c->clickhouse_telemetry_password[0] = '\0';
+    snprintf(c->clickhouse_host, sizeof(c->clickhouse_host), "127.0.0.1");
+    c->clickhouse_port = 8123;
+    snprintf(c->clickhouse_database, sizeof(c->clickhouse_database), "edgehost");
+    snprintf(c->clickhouse_user, sizeof(c->clickhouse_user), "default");
+    c->clickhouse_password[0] = '\0';
+    c->clickhouse_base_url[0] = '\0';
+    c->clickhouse_use_https = 0;
+    snprintf(c->clickhouse_events_table, sizeof(c->clickhouse_events_table),
+             "edgehost.e7_netconf_events");
+    c->clickhouse_flush_interval_ms = 1000;
+    c->clickhouse_flush_max_rows = 256;
+    c->clickhouse_flush_max_bytes = 262144;
+    c->clickhouse_timeout_ms = 15000;
+    c->clickhouse_telemetry_proxy = 1;
+    c->postgres_ont_status_enabled = 0;
+    c->postgres_ont_status_dsn[0] = '\0';
+    snprintf(c->postgres_ont_status_channel,
+             sizeof(c->postgres_ont_status_channel), "ont_status");
+    c->ca_enabled = 0;
+    snprintf(c->ca_pg_sock, sizeof(c->ca_pg_sock),
+             "/var/run/postgresql/.s.PGSQL.5432");
+    snprintf(c->ca_pg_database, sizeof(c->ca_pg_database), "edgehost");
+    snprintf(c->ca_pg_user, sizeof(c->ca_pg_user), "edgehost");
+    c->ca_pg_password[0] = '\0';
+    c->ca_pg_timeout_ms = 5000;
+    c->ca_default_days = 825;
     /* E7 Call Home — disabled; lab-safe defaults (PR-2). */
     c->e7_enabled = 0;
     snprintf(c->e7_listen_host, sizeof(c->e7_listen_host), "127.0.0.1");

@@ -3,12 +3,14 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>edgehost · Junos Call Home</title>
+  <title>Junos Call Home · edgehost</title>
   <link rel="stylesheet" href="/app.css"/>
 </head>
-<body class="e7 junos">
-  <header>
-    <h1><a href="/" class="home-link">edgehost</a> · Junos Call Home</h1>
+<body class="app-shell e7 junos" data-nav="junos" data-title="Junos Call Home"
+      data-subtitle="Juniper outbound-SSH dial-in and allowlist"
+      data-wide="1">
+  <header class="hidden">
+    <h1>Junos Call Home</h1>
     <span id="authBadge" class="badge muted">not logged in</span>
   </header>
 
@@ -175,6 +177,7 @@ set system services outbound-ssh client edgehost servers &lt;nms-ip&gt; port 433
   </section>
 
   <script src="/app.js"></script>
+  <script src="/shell.js"></script>
   <script src="/junos/junos.js"></script>
 </body>
 </html>

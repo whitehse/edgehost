@@ -174,6 +174,56 @@ static void test_max_bufs(void)
     printf("  PASS: max buf slots\n");
 }
 
+static void test_host_alloc_byte_tracking(void)
+{
+    void *a;
+    void *b;
+    void *c;
+
+    host_alloc_reset_stats();
+    a = host_alloc(100);
+    assert(a);
+    assert(host_bytes_outstanding() == 100);
+    assert(host_bytes_outstanding_kind(EDGE_MEM_EDGECORE) == 100);
+    assert(host_bytes_peak() == 100);
+
+    b = host_alloc_kind(EDGE_MEM_HTTP, 50);
+    assert(b);
+    assert(host_bytes_outstanding() == 150);
+    assert(host_bytes_outstanding_kind(EDGE_MEM_HTTP) == 50);
+    assert(host_bytes_peak() == 150);
+
+    c = host_realloc(a, 200);
+    assert(c);
+    assert(host_bytes_outstanding() == 250);
+    assert(host_bytes_outstanding_kind(EDGE_MEM_EDGECORE) == 200);
+    assert(host_bytes_peak() == 250);
+
+    host_free(c);
+    assert(host_bytes_outstanding() == 50);
+    assert(host_bytes_outstanding_kind(EDGE_MEM_EDGECORE) == 0);
+    host_free(b);
+    assert(host_bytes_outstanding() == 0);
+    assert(host_free_count() == 2);
+    assert(host_alloc_count() == 2);
+    assert(host_realloc_count() == 1);
+
+    /* kind names stable for JSON */
+    assert(strcmp(edge_mem_kind_name(EDGE_MEM_E7), "e7") == 0);
+    assert(strcmp(edge_mem_kind_name(EDGE_MEM_WS), "ws") == 0);
+
+    {
+        char buf[1024];
+        int n = host_mem_format_json(buf, sizeof(buf));
+        assert(n > 0);
+        assert(strstr(buf, "\"host_alloc\"") != NULL);
+        assert(strstr(buf, "\"by_kind\"") != NULL);
+        assert(strstr(buf, "\"edgecore\"") != NULL);
+    }
+
+    printf("  PASS: host_alloc byte tracking + kinds\n");
+}
+
 int main(void)
 {
     printf("edgecore_alloc:\n");
@@ -181,6 +231,7 @@ int main(void)
     test_need_realloc_roundtrip();
     test_invalid_ops();
     test_max_bufs();
+    test_host_alloc_byte_tracking();
     printf("all passed\n");
     return 0;
 }

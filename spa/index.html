@@ -3,66 +3,110 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>edgehost — status map</title>
+  <title>Home · edgehost</title>
   <link rel="stylesheet" href="/app.css"/>
 </head>
-<body class="home">
-  <header>
-    <h1>edgehost</h1>
-    <span id="authBadge" class="badge muted">not logged in</span>
-  </header>
+<body class="app-shell" data-nav="home" data-title="Home"
+      data-subtitle="Services, locations, and live edge status">
 
-  <section class="card hero">
-    <h2>Rural network status map</h2>
-    <p class="hint">
-      Sign in with the lab password to open the WebGPU status map
-      (basemap + fiber design, same data path as the libwebmap demo).
-    </p>
-
-    <div id="loginPanel">
+  <!-- Signed-out gate (full viewport when not authenticated) -->
+  <div id="loginGate" class="auth-gate hidden">
+    <section class="card">
+      <p class="welcome">Welcome back</p>
+      <p class="hint" style="margin-bottom:1rem">
+        Sign in to the edge platform — network status, customer devices,
+        Call Home, and operator tools in one place.
+      </p>
       <label>Password
         <input id="labPw" type="password" value="lab" autocomplete="current-password"/>
       </label>
       <div class="row">
-        <button type="button" id="btnLogin">Log in</button>
+        <button type="button" id="btnLogin" class="btn primary">Sign in</button>
       </div>
-      <pre id="authOut" class="compact"></pre>
+      <pre id="authOut" class="compact hidden"></pre>
+    </section>
+  </div>
+
+  <div id="dashRoot" class="hidden">
+    <div class="stat-row" id="statRow">
+      <div class="stat-card">
+        <div class="label">Locations</div>
+        <div class="value" id="statLocations">—</div>
+        <div class="delta">customer premises</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">ONTs online</div>
+        <div class="value" id="statOnts">—</div>
+        <div class="delta">from Call Home state</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Shelves</div>
+        <div class="value" id="statShelves">—</div>
+        <div class="delta">E7 / access gear</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Host health</div>
+        <div class="value" id="statHealth" style="font-size:1.25rem">—</div>
+        <div class="delta" id="statHealthMeta">/health</div>
+      </div>
     </div>
 
-    <div id="appPanel" class="hidden">
-      <p class="hint">Session active. Open the map, Call Home admin, or lab API console.</p>
-      <div class="row nav-row">
-        <a class="btn primary" href="/map/">Open status map</a>
-        <a class="btn secondary" href="/junos/">Junos Call Home</a>
-        <a class="btn secondary" href="/e7/">E7 Call Home</a>
-        <a class="btn secondary" href="/documentation/">Documentation</a>
-        <a class="btn secondary" href="/explain/">Fiber explain</a>
-        <a class="btn secondary" href="/lab/">Lab console</a>
-        <button type="button" id="btnLogout" class="ghost">Log out (local)</button>
-      </div>
-    </div>
-  </section>
+    <div class="split-2">
+      <section class="card">
+        <h2>Services</h2>
+        <p class="hint">Open a platform surface. Each service has its own workspace.</p>
+        <div class="service-grid" id="serviceGrid"></div>
+      </section>
 
-  <section class="card muted">
-    <h2>What this serves</h2>
-    <ul class="plain">
-      <li><strong>Login</strong> — <code>POST /auth/lab-login</code> (ADR-013 cookie)</li>
-      <li><strong>Map UI</strong> — <code>/map/</code> (WebGPU host; assets linked from libwebmap demo)</li>
-      <li><strong>Junos Call Home</strong> — <code>/junos/</code> (DEVICE-ID allowlist, shared secret)</li>
-      <li><strong>Documentation</strong> — <code>/documentation/</code> (2-port tap lesson + libanim)</li>
-      <li><strong>Fiber explain</strong> — <code>/explain/</code> (libanim WASM + WebGPU, template fill)</li>
-      <li><strong>E7 Call Home</strong> — <code>/e7/</code> (Calix + multi-vendor admin, ONTs, commands)</li>
-      <li><strong>Packages</strong> — <code>/packages/</code> (auth-gated catalog + fixtures)</li>
-      <li><strong>State / WS</strong> — <code>/api/v1/state/*</code>, <code>/api/v1/stream</code></li>
-    </ul>
-    <p class="hint">
-      Status map only: <code>./scripts/run-status-map.sh</code>.
-      Map + Calix E7: <code>./scripts/run-status-map-e7.sh</code> → <code>/e7/</code>.
-      Map + Junos: <code>./scripts/run-status-map-junos.sh</code> → <code>/junos/</code>.
-    </p>
-  </section>
+      <section class="card">
+        <h2>At a glance</h2>
+        <p class="hint">Recent focus and quick paths.</p>
+        <ul class="panel-list" id="glanceList">
+          <li>
+            <div>
+              <div class="pl-title">Status map</div>
+              <div class="pl-sub">Fiber & basemap — field context</div>
+            </div>
+            <a class="btn secondary" href="/map/">Open</a>
+          </li>
+          <li>
+            <div>
+              <div class="pl-title">Customer devices</div>
+              <div class="pl-sub">ONTs, home routers, premise gear</div>
+            </div>
+            <a class="btn secondary" href="/devices/">Browse</a>
+          </li>
+          <li>
+            <div>
+              <div class="pl-title">E7 Call Home</div>
+              <div class="pl-sub">Shelves, sessions, ONT inventory</div>
+            </div>
+            <a class="btn secondary" href="/e7/">Manage</a>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <section class="card">
+      <div class="device-head" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+        <div>
+          <h2 style="margin:0">Locations &amp; devices</h2>
+          <p class="hint" style="margin:0.35rem 0 0">
+            Premise equipment installed at member homes — ONT and customer router.
+          </p>
+        </div>
+        <a class="btn secondary" href="/devices/">View all</a>
+      </div>
+      <div class="device-grid" id="devicePreview" style="margin-top:1rem"></div>
+    </section>
+
+    <div class="row" style="margin-top:0.5rem">
+      <button type="button" id="btnLogout" class="ghost">Sign out (local)</button>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
+  <script src="/shell.js"></script>
   <script src="/home.js"></script>
 </body>
 </html>

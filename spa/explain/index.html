@@ -3,26 +3,23 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>edgehost — fiber explain</title>
+  <title>Fiber explain · edgehost</title>
   <link rel="stylesheet" href="/app.css"/>
   <link rel="stylesheet" href="./player/demo.css"/>
   <style>
     .explain-layout { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; }
     @media (max-width: 900px) { .explain-layout { grid-template-columns: 1fr; } }
-    #auth-gate { max-width: 28rem; margin: 2rem auto; }
+    #auth-gate { max-width: 28rem; margin: 1rem auto; }
     .hidden { display: none !important; }
     #wrap.hidden { display: none !important; }
+    #topbar { display: none !important; }
   </style>
 </head>
-<body class="home">
+<body class="app-shell home" data-nav="explain" data-title="Fiber explain"
+      data-subtitle="Interactive optical path stories" data-wide="1">
   <header id="topbar" class="hidden">
     <h1>Fiber explain</h1>
     <span id="userBadge" class="badge muted"></span>
-    <nav class="row" style="margin-left:auto;gap:.5rem">
-      <a class="btn secondary" href="/">Home</a>
-      <a class="btn secondary" href="/map/">Map</a>
-      <a class="btn secondary" href="/e7/">E7</a>
-    </nav>
   </header>
 
   <section id="auth-gate" class="card">
@@ -94,6 +91,7 @@
   </div>
 
   <script src="/app.js"></script>
+  <script src="/shell.js"></script>
   <script type="module" src="./explain_boot.js"></script>
 </body>
 </html>

@@ -26,15 +26,21 @@
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
-      padding: 0.45rem 0.85rem;
-      background: rgba(12, 18, 30, 0.92);
-      border-bottom: 1px solid #2a3548;
+      padding: 0.5rem 1rem;
+      background: rgba(15, 18, 24, 0.94);
+      border-bottom: 1px solid #2e3648;
+      font-family: "Outfit", system-ui, sans-serif;
       font-size: 0.9rem;
+      backdrop-filter: blur(10px);
     }
-    .map-topbar a { color: #8bb4ff; text-decoration: none; }
-    .map-topbar a:hover { text-decoration: underline; }
-    .map-topbar .title { font-weight: 600; }
-    .map-topbar .meta { color: #8b9bb4; font-size: 0.8rem; }
+    .map-topbar a { color: #8ba4ff; text-decoration: none; font-weight: 500; }
+    .map-topbar a:hover { color: #c4788a; }
+    .map-topbar .title {
+      font-family: "Fraunces", Georgia, serif;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .map-topbar .meta { color: #9a958c; font-size: 0.8rem; }
     #auth-gate {
       position: fixed;
       inset: 0;
@@ -122,15 +128,15 @@
 
   <div class="map-topbar hidden" id="mapTopbar" hidden>
     <div>
-      <span class="title">edgehost status map</span>
+      <span class="title">Status map</span>
       <span class="meta" id="mapUser"></span>
     </div>
     <div class="row" style="margin:0">
       <a href="/">Home</a>
+      <a href="/devices/">Devices</a>
+      <a href="/e7/">E7</a>
       <a href="/junos/">Junos</a>
-      <a href="/e7/">E7 Call Home</a>
-      <a href="/lab/">Lab console</a>
-      <a href="/health" target="_blank" rel="noopener">/health</a>
+      <a href="/lab/">Lab</a>
     </div>
   </div>
 

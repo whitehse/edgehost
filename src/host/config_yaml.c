@@ -460,6 +460,190 @@ static int apply_scalar(edge_config_t *c, const char *key, const char *val,
         }
         return 0;
     }
+    /* plugins.clickhouse (async JSONEachRow writer + CPE proxy) */
+    if (strcmp(key, "plugins.clickhouse.enabled") == 0 ||
+        strcmp(key, "clickhouse.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->clickhouse_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.host") == 0) {
+        if (copy_str(c->clickhouse_host, sizeof(c->clickhouse_host), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.port") == 0) {
+        if (parse_u16(val, &u16) != 0 || u16 == 0) {
+            FAIL("invalid port");
+        }
+        c->clickhouse_port = u16;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.database") == 0) {
+        if (copy_str(c->clickhouse_database, sizeof(c->clickhouse_database),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.user") == 0) {
+        if (copy_str(c->clickhouse_user, sizeof(c->clickhouse_user), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.password") == 0) {
+        if (copy_str(c->clickhouse_password, sizeof(c->clickhouse_password),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.base_url") == 0) {
+        if (copy_str(c->clickhouse_base_url, sizeof(c->clickhouse_base_url),
+                     val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.use_https") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->clickhouse_use_https = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.events_table") == 0) {
+        if (copy_str(c->clickhouse_events_table,
+                     sizeof(c->clickhouse_events_table), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.flush_interval_ms") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->clickhouse_flush_interval_ms = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.flush_max_rows") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->clickhouse_flush_max_rows = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.flush_max_bytes") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0) {
+            FAIL("invalid");
+        }
+        c->clickhouse_flush_max_bytes = sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.timeout_ms") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->clickhouse_timeout_ms = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.telemetry_proxy") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->clickhouse_telemetry_proxy = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.telemetry_user") == 0 ||
+        strcmp(key, "plugins.clickhouse.telemetry_username") == 0) {
+        if (copy_str(c->clickhouse_telemetry_user,
+                     sizeof(c->clickhouse_telemetry_user), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.clickhouse.telemetry_password") == 0) {
+        if (copy_str(c->clickhouse_telemetry_password,
+                     sizeof(c->clickhouse_telemetry_password), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "postgres.ont_status.enabled") == 0 ||
+        strcmp(key, "plugins.postgres_ont_status.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->postgres_ont_status_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "postgres.ont_status.dsn") == 0 ||
+        strcmp(key, "plugins.postgres_ont_status.dsn") == 0) {
+        if (copy_str(c->postgres_ont_status_dsn,
+                     sizeof(c->postgres_ont_status_dsn), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "postgres.ont_status.channel") == 0) {
+        if (copy_str(c->postgres_ont_status_channel,
+                     sizeof(c->postgres_ont_status_channel), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    /* plugins.ca — Certificate Authority (Postgres-backed) */
+    if (strcmp(key, "plugins.ca.enabled") == 0 ||
+        strcmp(key, "ca.enabled") == 0) {
+        if (parse_bool(val, &iv) != 0) {
+            FAIL("invalid bool");
+        }
+        c->ca_enabled = iv;
+        return 0;
+    }
+    if (strcmp(key, "plugins.ca.pg_sock") == 0 ||
+        strcmp(key, "plugins.ca.socket") == 0) {
+        if (copy_str(c->ca_pg_sock, sizeof(c->ca_pg_sock), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.ca.database") == 0) {
+        if (copy_str(c->ca_pg_database, sizeof(c->ca_pg_database), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.ca.user") == 0) {
+        if (copy_str(c->ca_pg_user, sizeof(c->ca_pg_user), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.ca.password") == 0) {
+        if (copy_str(c->ca_pg_password, sizeof(c->ca_pg_password), val) != 0) {
+            FAIL("too long");
+        }
+        return 0;
+    }
+    if (strcmp(key, "plugins.ca.timeout_ms") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 0xffffffffu) {
+            FAIL("invalid");
+        }
+        c->ca_pg_timeout_ms = (uint32_t)sz;
+        return 0;
+    }
+    if (strcmp(key, "plugins.ca.default_days") == 0) {
+        if (parse_size(val, &sz) != 0 || sz == 0 || sz > 36500) {
+            FAIL("invalid");
+        }
+        c->ca_default_days = (int)sz;
+        return 0;
+    }
     /* plugins.e7_callhome (PR-2) */
     if (strcmp(key, "plugins.e7_callhome.enabled") == 0 ||
         strcmp(key, "e7_callhome.enabled") == 0) {
@@ -653,6 +837,38 @@ static const char *const g_paths[] = {
     "postgres.enabled",
     "postgres.listen_channels",
     "postgres.listen_channel",
+    "plugins.clickhouse.enabled",
+    "clickhouse.enabled",
+    "plugins.clickhouse.host",
+    "plugins.clickhouse.port",
+    "plugins.clickhouse.database",
+    "plugins.clickhouse.user",
+    "plugins.clickhouse.password",
+    "plugins.clickhouse.base_url",
+    "plugins.clickhouse.use_https",
+    "plugins.clickhouse.events_table",
+    "plugins.clickhouse.flush_interval_ms",
+    "plugins.clickhouse.flush_max_rows",
+    "plugins.clickhouse.flush_max_bytes",
+    "plugins.clickhouse.timeout_ms",
+    "plugins.clickhouse.telemetry_proxy",
+    "plugins.clickhouse.telemetry_user",
+    "plugins.clickhouse.telemetry_username",
+    "plugins.clickhouse.telemetry_password",
+    "postgres.ont_status.enabled",
+    "plugins.postgres_ont_status.enabled",
+    "postgres.ont_status.dsn",
+    "plugins.postgres_ont_status.dsn",
+    "postgres.ont_status.channel",
+    "plugins.ca.enabled",
+    "ca.enabled",
+    "plugins.ca.pg_sock",
+    "plugins.ca.socket",
+    "plugins.ca.database",
+    "plugins.ca.user",
+    "plugins.ca.password",
+    "plugins.ca.timeout_ms",
+    "plugins.ca.default_days",
     "plugins.e7_callhome.enabled",
     "e7_callhome.enabled",
     "plugins.e7_callhome.listen_host",

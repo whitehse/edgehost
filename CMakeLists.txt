@@ -116,6 +116,13 @@ target_include_directories(edgehost_tls PUBLIC
 )
 target_link_libraries(edgehost_tls PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
+# --- Host: tagged alloc + memory stats (before consumers) ---
+add_library(edgehost_alloc STATIC src/host/host_alloc.c)
+target_include_directories(edgehost_alloc PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
 # --- Host: plugin registry + outbound + WS hub + state notify choke point ---
 add_library(edgehost_plugins STATIC
   src/host/plugin_host.c
@@ -130,14 +137,7 @@ target_include_directories(edgehost_plugins PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(edgehost_plugins PUBLIC edgecore edgehost_tls)
-
-# --- Host: alloc ---
-add_library(edgehost_alloc STATIC src/host/host_alloc.c)
-target_include_directories(edgehost_alloc PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
+target_link_libraries(edgehost_plugins PUBLIC edgecore edgehost_tls edgehost_alloc)
 
 # --- Host: E7 event apply + Call Home listen/pump (PR-3 / PR-4a) ---
 add_library(edgehost_e7 STATIC
@@ -149,7 +149,9 @@ target_include_directories(edgehost_e7 PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 # state_notify + ws hub live in edgehost_plugins (put_and_notify / K16)
-target_link_libraries(edgehost_e7 PUBLIC edgecore edgehost_plugins OpenSSL::Crypto)
+# clickhouse optional enqueue from notification path
+target_link_libraries(edgehost_e7 PUBLIC
+  edgecore edgehost_plugins edgehost_alloc edgehost_clickhouse OpenSSL::Crypto)
 if(Libnetconf_FOUND)
   target_compile_definitions(edgehost_e7 PUBLIC EDGEHOST_HAVE_LIBNETCONF=1)
   if(TARGET Libnetconf::netconf)
@@ -218,7 +220,29 @@ if(Libyaml_FOUND AND TARGET Libyaml::headers)
   target_link_libraries(edgehost_config PUBLIC Libyaml::headers)
 endif()
 
-# --- Host: HTTP/1 serve + metrics + static + sidecar/notify + explain ---
+# --- Host: ClickHouse async client (shared by e7 + HTTP telemetry) ---
+add_library(edgehost_clickhouse STATIC
+  src/host/clickhouse_async.c
+  src/host/edge_clickhouse.c
+)
+target_include_directories(edgehost_clickhouse PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(edgehost_clickhouse PUBLIC edgecore edgehost_alloc edgehost_plugins)
+
+# --- Host: CA + non-blocking Postgres Unix socket client ---
+add_library(edgehost_ca STATIC
+  src/host/edge_pg.c
+  src/host/edge_ca.c
+)
+target_include_directories(edgehost_ca PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(edgehost_ca PUBLIC edgecore edgehost_alloc OpenSSL::SSL OpenSSL::Crypto)
+
+# --- Host: HTTP/1 serve + metrics + static + sidecar/notify + explain + debug ---
 # (WS hub + state_notify live in edgehost_plugins so plugin state_put can fan-out)
 add_library(edgehost_http STATIC
   src/host/edge_metrics.c
@@ -227,13 +251,17 @@ add_library(edgehost_http STATIC
   src/host/static_files.c
   src/host/pq_sidecar.c
   src/host/notify_apply.c
+  src/host/edge_debug.c
 )
 target_include_directories(edgehost_http PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 # edgehost_e7: /api/v1/e7/* REST dispatch (PR-5)
-target_link_libraries(edgehost_http PUBLIC edgecore edgehost_plugins edgehost_e7)
+# dl: dladdr for CPU flame symbol resolution
+target_link_libraries(edgehost_http PUBLIC
+  edgecore edgehost_plugins edgehost_e7 edgehost_alloc edgehost_clickhouse
+  edgehost_ca ${CMAKE_DL_LIBS})
 if(Libanim_FOUND AND LIBANIM_LIBRARY)
   target_compile_definitions(edgehost_http PUBLIC EDGEHOST_HAVE_LIBANIM=1)
   target_include_directories(edgehost_http PUBLIC ${LIBANIM_INCLUDE_DIRS})
@@ -264,7 +292,7 @@ target_include_directories(edgehost_iouring PUBLIC
 target_include_directories(edgehost_iouring PRIVATE ${LIBURING_INCLUDE_DIR})
 target_link_libraries(edgehost_iouring PUBLIC
   edgecore edgehost_config edgehost_http edgehost_tls edgehost_e7
-  ${LIBURING_LIBRARY})
+  edgehost_alloc ${LIBURING_LIBRARY})
 
 # --- Host: class-A sim_main ---
 if(Libsim_FOUND AND LIBSIM_LIBRARY)
@@ -289,10 +317,13 @@ else()
   set(EDGEHOST_HAVE_SIM 0)
 endif()
 
-# edgehost binary
+# edgehost binary (-rdynamic: backtrace symbols for lab CPU flame graph)
 add_executable(edgehost src/host/main.c)
 target_link_libraries(edgehost PRIVATE
   edgecore edgehost_config edgehost_iouring edgehost_plugins edgehost_e7)
+if(NOT MSVC)
+  target_link_options(edgehost PRIVATE -rdynamic)
+endif()
 
 # Sibling header smoke
 add_library(edgehost_deps INTERFACE)
@@ -351,6 +382,9 @@ target_link_libraries(edgehost_static_test PRIVATE edgehost_http edgehost_config
 add_executable(edgehost_state_test tests/test_state_store.c)
 target_link_libraries(edgehost_state_test PRIVATE edgecore edgehost_http)
 
+add_executable(edgehost_clickhouse_test tests/test_clickhouse_xml.c)
+target_link_libraries(edgehost_clickhouse_test PRIVATE edgehost_clickhouse edgehost_alloc)
+
 add_executable(edgehost_ws_test tests/test_ws_stream.c)
 target_link_libraries(edgehost_ws_test PRIVATE edgecore edgehost_http)
 
@@ -404,6 +438,7 @@ add_test(NAME edgehost_iouring_static COMMAND edgehost_iouring_test)
 add_test(NAME edgehost_static_files COMMAND edgehost_static_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME edgehost_state_store COMMAND edgehost_state_test)
+add_test(NAME edgehost_clickhouse COMMAND edgehost_clickhouse_test)
 add_test(NAME edgehost_ws_stream COMMAND edgehost_ws_test)
 add_test(NAME edgehost_auth COMMAND edgehost_auth_test)
 add_test(NAME edgehost_pending_plugin COMMAND edgehost_pending_test)

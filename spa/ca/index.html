@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Certificate Authority · edgehost</title>
+  <link rel="stylesheet" href="/app.css"/>
+</head>
+<body class="app-shell lab-wide" data-nav="ca" data-title="Certificate Authority"
+      data-subtitle="Roots, CSR sign, certificates, and CRL"
+      data-wide="1">
+  <header class="hidden">
+    <h1>Certificate Authority</h1>
+    <span id="authBadge" class="badge muted">not logged in</span>
+  </header>
+  <p class="hint nav-links">
+    <a href="/ca/crl.pem" target="_blank" rel="noopener">Public CRL (PEM)</a>
+  </p>
+
+  <section class="card" id="loginCard">
+    <h2>Lab login</h2>
+    <p class="hint">Admin CA routes need <code>employee_admin</code>. CSR sign needs employee. CRL is public.</p>
+    <label>Password <input id="labPw" type="password" value="lab" autocomplete="current-password"/></label>
+    <div class="row">
+      <button type="button" id="btnLogin">Login</button>
+      <button type="button" id="btnMe">GET /auth/me</button>
+    </div>
+    <pre id="authOut" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <div class="row">
+      <button type="button" id="btnStatus">Refresh</button>
+    </div>
+    <pre id="statusOut" class="compact">…</pre>
+  </section>
+
+  <section class="card">
+    <h2>Authorities</h2>
+    <p class="hint">Create a self-signed root CA stored in Postgres (keys + cert PEM).</p>
+    <label>Name <input id="caName" type="text" value="edgehost-lab-ca"/></label>
+    <label>CN <input id="caCn" type="text" value="Edgehost Lab Root CA"/></label>
+    <label>Days <input id="caDays" type="number" value="3650"/></label>
+    <div class="row">
+      <button type="button" id="btnCreateCa">Create CA</button>
+      <button type="button" id="btnListCa" class="ghost">Refresh list</button>
+    </div>
+    <pre id="caListOut" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Known certificates</h2>
+    <div class="row">
+      <label>Status filter
+        <select id="certFilter">
+          <option value="">all</option>
+          <option value="valid">valid</option>
+          <option value="revoked">revoked</option>
+        </select>
+      </label>
+      <button type="button" id="btnListCerts">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table class="data" id="certTable">
+        <thead>
+          <tr>
+            <th>ID</th><th>Serial</th><th>CN</th><th>Device</th>
+            <th>Status</th><th>Not after</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="certBody"></tbody>
+      </table>
+    </div>
+    <pre id="certDetail" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Sign CSR (CPE)</h2>
+    <p class="hint">Paste PEM CSR from a CPE. Optional device_id annotation.</p>
+    <label>CA id <input id="signCaId" type="number" value="1"/></label>
+    <label>Device id <input id="signDevice" type="text" placeholder="cpe-serial-or-mac"/></label>
+    <label>Days <input id="signDays" type="number" value="825"/></label>
+    <label>CSR PEM
+      <textarea id="csrPem" rows="8" placeholder="-----BEGIN CERTIFICATE REQUEST-----"></textarea>
+    </label>
+    <div class="row">
+      <button type="button" id="btnSign">Sign CSR</button>
+    </div>
+    <pre id="signOut" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Issue leaf (lab convenience)</h2>
+    <p class="hint">Generate key + cert for a CN (stores cert only in Postgres; key returned once).</p>
+    <label>CA id <input id="issueCaId" type="number" value="1"/></label>
+    <label>CN <input id="issueCn" type="text" value="cpe.lab.local"/></label>
+    <label>Device id <input id="issueDevice" type="text" value="lab-cpe-1"/></label>
+    <label>Days <input id="issueDays" type="number" value="825"/></label>
+    <div class="row">
+      <button type="button" id="btnIssue">Issue certificate</button>
+    </div>
+    <pre id="issueOut" class="compact"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Certificate revocation list</h2>
+    <p class="hint">
+      Latest CRL is served publicly at <a href="/ca/crl.pem"><code>/ca/crl.pem</code></a>
+      (also <code>/api/v1/ca/crl.pem</code>). Rebuild after revocations if needed.
+    </p>
+    <label>CA id <input id="crlCaId" type="number" value="1"/></label>
+    <div class="row">
+      <button type="button" id="btnCrlRebuild">Rebuild CRL</button>
+      <a class="btn secondary" href="/ca/crl.pem" target="_blank" rel="noopener">View CRL PEM</a>
+    </div>
+    <pre id="crlOut" class="compact"></pre>
+  </section>
+
+  <script src="/app.js"></script>
+  <script src="/shell.js"></script>
+  <script src="/ca/ca.js"></script>
+</body>
+</html>

@@ -431,6 +431,7 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
         case EDGE_RES_E7_GET:
         case EDGE_RES_E7_ADMIN:
         case EDGE_RES_EXPLAIN:
+        case EDGE_RES_TELEMETRY:
             return EDGE_AUTH_ALLOW;
         default:
             return EDGE_AUTH_DENY;
@@ -447,6 +448,7 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
         case EDGE_RES_OPENAI:
         case EDGE_RES_E7_GET:
         case EDGE_RES_EXPLAIN:
+        case EDGE_RES_TELEMETRY:
             return EDGE_AUTH_ALLOW;
         case EDGE_RES_E7_ADMIN:
             return EDGE_AUTH_DENY;
@@ -461,7 +463,7 @@ edge_auth_decision_t edge_auth_rbac_check(const edge_principal_t *p,
         return EDGE_AUTH_DENY;
     }
     if (edge_auth_role_has(p->roles, EDGE_ROLE_INGEST)) {
-        if (res == EDGE_RES_STATE_PUT) {
+        if (res == EDGE_RES_STATE_PUT || res == EDGE_RES_TELEMETRY) {
             return EDGE_AUTH_ALLOW;
         }
         return EDGE_AUTH_DENY;
@@ -862,6 +864,33 @@ edge_auth_resource_t edge_auth_classify(const char *method, const char *path,
     }
     if (strncmp(path, "/v1/", 4) == 0 || strcmp(path, "/v1") == 0) {
         return EDGE_RES_OPENAI;
+    }
+    /* Lab diagnostics: /api/v1/debug/... (employee+; same gate as E7 GET) */
+    if (strncmp(path, "/api/v1/debug", 13) == 0 &&
+        (path[13] == '\0' || path[13] == '/' || path[13] == '?')) {
+        if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0) {
+            return EDGE_RES_E7_GET;
+        }
+    }
+    /* CPE telemetry proxy → ClickHouse (ingest + employee) */
+    if (strncmp(path, "/api/v1/telemetry", 17) == 0 &&
+        (path[17] == '\0' || path[17] == '/' || path[17] == '?')) {
+        if (strcmp(method, "GET") == 0 || strcmp(method, "POST") == 0) {
+            return EDGE_RES_TELEMETRY;
+        }
+    }
+    /* Certificate Authority (admin vs sign) */
+    if (strncmp(path, "/api/v1/ca", 10) == 0 &&
+        (path[10] == '\0' || path[10] == '/' || path[10] == '?')) {
+        if (strcmp(method, "POST") == 0 || strstr(path, "/revoke") != NULL) {
+            if (strstr(path, "/sign") != NULL) {
+                return EDGE_RES_E7_GET; /* CPE CSR sign */
+            }
+            return EDGE_RES_E7_ADMIN;
+        }
+        if (strcmp(method, "GET") == 0) {
+            return EDGE_RES_E7_GET;
+        }
     }
     /* E7 Call Home REST: /api/v1/e7 and /api/v1/e7/... */
     if (strncmp(path, "/api/v1/e7", 10) == 0 &&

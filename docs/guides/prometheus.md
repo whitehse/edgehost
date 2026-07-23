@@ -19,8 +19,39 @@
 | `bytes_in` / `bytes_out` | cumulative payload bytes |
 | `active_conns` | open client fds |
 | `rejects` | accept when connection table full, etc. |
+| `memory.process` | `vm_rss_kb`, `vm_hwm_kb`, `vm_size_kb`, `vm_peak_kb` from `/proc/self/status` |
+| `memory.host_alloc` | tagged host heap: total `bytes` / `peak_bytes` / alloc counts + `by_kind` |
+| `subsystems` (optional) | estimates: `state_rss_bytes`, live `e7_rss_estimate` / `e7_sessions_open` |
+
+`memory.host_alloc.by_kind` categories: `edgecore`, `http`, `e7`, `ws`, `state`,
+`plugin`, `other`. Outstanding bytes shrink on free (size headers on every
+`host_alloc` block). Sibling libraries (OpenSSL, libnetconf, shaggy, …) are
+**not** inside `host_alloc` — only process VmRSS covers them.
+
+Lab console (`/lab/`) renders this breakdown with optional baseline deltas.
+
+## Hierarchical memory + CPU flame (lab)
+
+| Endpoint | Auth | Contents |
+|----------|------|----------|
+| `GET /api/v1/debug/memory` | lab session | Process + host_alloc + **modules** (HTTP, WS, E7 shelves/sessions, state ns, edgecore) with per-item bytes |
+| `GET /api/v1/debug/cpu/capabilities` | lab session | Available samplers (SIGALRM, SIGPROF, perf_event_open, bpftrace/perf CLI if installed) |
+| `POST /api/v1/debug/cpu/profile?seconds=N&mode=auto` | lab session | Start in-process stack sample (default wall-clock `ITIMER_REAL`) |
+| `GET /api/v1/debug/cpu/profile` | lab session | Status / sample counts |
+| `GET /api/v1/debug/cpu/profile/flame` | lab session | Flame tree JSON for lab canvas |
+| `GET /api/v1/debug/cpu/profile/folded` | lab session | Folded stacks for external FlameGraph tools |
+
+**E7 module** lists fixed tables, each **live session** (RX/TX + libnetconf estimate), and each **runtime shelf** (allowlist row + attached session cost).
+
+**CPU sampling**: in-process `host_tick` tightens the io_uring wait to ~10 ms and
+calls `backtrace()`/`dladdr` from normal context (~100 Hz wall samples). No root
+required. Offline eBPF/perf: `scripts/cpu-flame-perf.sh` (install `linux-perf` +
+[FlameGraph](https://github.com/brendangregg/FlameGraph); may need
+`perf_event_paranoid` ≤ 1). Example bpftrace (root):
+`bpftrace -e 'profile:hz:99 /pid == $PID/ { @[ustack] = count(); }'`.
 
 Auth: `/health` is open (no session) so probes work without lab cookies.
+Debug APIs require a lab session when auth is enforced.
 
 ## Scraping without a native `/metrics`
 
